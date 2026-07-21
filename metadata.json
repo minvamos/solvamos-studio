@@ -1,0 +1,6 @@
+{
+  "name": "SolVamos Studio",
+  "description": "High-density no-code AI Agent compiler featuring secure GCP KMS key storage, Solana on-chain devnet paywalls (pay.sh protocol), and server-side RAG via Gemini.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
