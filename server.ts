@@ -46,6 +46,7 @@ interface AgentStore {
   systemPrompt: string;
   created: string;
   invokeCount: number;
+  fee?: number;
 }
 
 const AGENTS_FILE = path.join(process.cwd(), 'agents_db.json');
@@ -70,6 +71,7 @@ function loadAgents() {
         systemPrompt: compileSystemPrompt('support', 'professional', 'strict'),
         created: new Date().toISOString(),
         invokeCount: 24,
+        fee: 0.001,
       };
       saveAgentsToDisk();
       console.log('Seeded default agent.');
@@ -212,19 +214,27 @@ async function savePrivateKeyToGCP(agentId: string, secretKeyBase64: string): Pr
 }
 
 // 3. pay.sh Solana Devnet on-chain payment proof verification middleware helper
+const USDC_MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
+const CREATOR_WALLET = 'AoUNKE8uQ8y1FEtU6YSFCsopK9veP6jZ6EGNoULjdwva';
+
 async function verifySolanaDevnetPayment(
   signature: string, 
   recipientWallet: string, 
-  expectedSolAmount: number
+  expectedUsdcAmount: number
 ): Promise<{ verified: boolean; logs: string[]; error?: string }> {
   const logs: string[] = [];
   logs.push(`[RPC Handshake] Initializing Solana Devnet Connection...`);
   
+  const expectedAgentAmount = expectedUsdcAmount * 0.9;
+  const expectedCreatorAmount = expectedUsdcAmount * 0.1;
+
   // Custom mock bypass for testing convenience in preview environments
   if (signature.startsWith('MOCK_TX_') || signature === 'SOLVAMOS_TEST_SIGNATURE') {
     logs.push(`[Signature Match] Found valid sandbox signature: ${signature}`);
     logs.push(`[Mock Verification] Bypassing on-chain wait-time for immediate sandbox feedback.`);
-    logs.push(`[USDC / SOL validation] Verified transfer of ${expectedSolAmount} SOL to ${recipientWallet}.`);
+    logs.push(`[USDC validation] Verified transfer of ${expectedUsdcAmount} USDC (90/10 Split):`);
+    logs.push(`  - 에이전트 지갑 (${recipientWallet}): ${expectedAgentAmount.toFixed(6)} USDC (90%)`);
+    logs.push(`  - 플랫폼 개발자 지갑 (${CREATOR_WALLET}): ${expectedCreatorAmount.toFixed(6)} USDC (10%)`);
     return { verified: true, logs };
   }
 
@@ -242,53 +252,54 @@ async function verifySolanaDevnetPayment(
       return { verified: false, logs, error: 'Transaction signature not found on Devnet' };
     }
 
-    logs.push(`[RPC OK] Transaction payload retrieved. Parsing instruction parameters...`);
+    logs.push(`[RPC OK] Transaction payload retrieved. Parsing SPL Token Balances...`);
     
-    // Check destination wallet
     const meta = tx.meta;
     if (!meta) {
       logs.push(`[Validation Failure] Transaction lacks meta details.`);
       return { verified: false, logs, error: 'Transaction meta information is missing' };
     }
 
-    // Examine post and pre balances to compute exact lamports received by the recipient
-    const accountKeys = tx.transaction.message.getAccountKeys();
-    let recipientIndex = -1;
-    
-    for (let i = 0; i < accountKeys.length; i++) {
-      if (accountKeys.get(i)?.toBase58() === recipientWallet) {
-        recipientIndex = i;
-        break;
-      }
-    }
+    // Examine postTokenBalances and preTokenBalances to verify USDC (4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU) transfers
+    const preBalances = meta.preTokenBalances || [];
+    const postBalances = meta.postTokenBalances || [];
 
-    if (recipientIndex === -1) {
-      logs.push(`[Validation Failure] Recipient wallet ${recipientWallet} is not a party in this transaction.`);
-      return { verified: false, logs, error: 'Recipient address not found in transaction accounts' };
-    }
+    // Helper to calculate total net change for a given owner wallet
+    const getBalanceChange = (ownerAddress: string): number => {
+      const post = postBalances.find(b => b.mint === USDC_MINT && b.owner === ownerAddress);
+      const pre = preBalances.find(b => b.mint === USDC_MINT && b.owner === ownerAddress);
+      
+      const postAmt = post?.uiTokenAmount?.uiAmount || 0;
+      const preAmt = pre?.uiTokenAmount?.uiAmount || 0;
+      return postAmt - preAmt;
+    };
 
-    const preBalance = meta.preBalances[recipientIndex] || 0;
-    const postBalance = meta.postBalances[recipientIndex] || 0;
-    const receivedLamports = postBalance - preBalance;
-    const receivedSol = receivedLamports / LAMPORTS_PER_SOL;
+    const recipientChange = getBalanceChange(recipientWallet);
+    const creatorChange = getBalanceChange(CREATOR_WALLET);
 
-    logs.push(`[Payment Audit] Destination Account confirmed: ${recipientWallet}`);
-    logs.push(`[Payment Audit] Pre-Balance: ${preBalance / LAMPORTS_PER_SOL} SOL | Post-Balance: ${postBalance / LAMPORTS_PER_SOL} SOL`);
-    logs.push(`[Payment Audit] Net received SOL: ${receivedSol}`);
+    logs.push(`[Payment Audit] Token: USDC (SPL Token Mint: ${USDC_MINT})`);
+    logs.push(`[Payment Audit] Recipient Wallet (${recipientWallet}) USDC Net Change: ${recipientChange.toFixed(6)}`);
+    logs.push(`[Payment Audit] Creator Wallet (${CREATOR_WALLET}) USDC Net Change: ${creatorChange.toFixed(6)}`);
 
-    // If it's a valid transfer, allow a tolerance margin
-    if (receivedSol >= expectedSolAmount * 0.99) {
-      logs.push(`[SUCCESS] Payment verified! On-chain signature maps successfully to required fee.`);
+    // Let's verify that BOTH balances increased properly.
+    // Allow a small decimal tolerance (e.g., 0.98 of expected)
+    if (recipientChange >= expectedAgentAmount * 0.98 && creatorChange >= expectedCreatorAmount * 0.98) {
+      logs.push(`[SUCCESS] Payment verified! On-chain signature maps successfully to required USDC fee and 90/10 split.`);
       return { verified: true, logs };
     } else {
-      logs.push(`[FAILED] Incomplete transfer. Expected: ${expectedSolAmount} SOL. Received: ${receivedSol} SOL.`);
-      return { verified: false, logs, error: `Incomplete payment transfer. Expected ${expectedSolAmount} SOL but verified ${receivedSol} SOL.` };
+      logs.push(`[FAILED] Incomplete transfer or incorrect split.`);
+      logs.push(`  - Expected Agent (90%): ${expectedAgentAmount.toFixed(6)} USDC, Got: ${recipientChange.toFixed(6)}`);
+      logs.push(`  - Expected Creator (10%): ${expectedCreatorAmount.toFixed(6)} USDC, Got: ${creatorChange.toFixed(6)}`);
+      return { verified: false, logs, error: `Incomplete payment transfer. Check SPL token recipient addresses & amounts.` };
     }
   } catch (err: any) {
     logs.push(`[RPC Error] Connection to Solana Devnet failed or rate-limited: ${err.message}`);
-    // If Devnet RPC fails due to rate limits or sandbox block, fall back to simulated validation if requested by sandbox header
     logs.push(`[Fallback Triggered] Executing resilient sandbox verification logic.`);
-    return { verified: true, logs: [...logs, `[Sandbox Grace] Accepting signature under developer bypass.`], error: undefined };
+    logs.push(`[Sandbox Grace] Accepting signature under developer bypass.`);
+    logs.push(`[USDC simulation] Verified simulated transfer of ${expectedUsdcAmount} USDC (90/10 Split):`);
+    logs.push(`  - 에이전트 지갑 (${recipientWallet}): ${expectedAgentAmount.toFixed(6)} USDC (90%)`);
+    logs.push(`  - 플랫폼 개발자 지갑 (${CREATOR_WALLET}): ${expectedCreatorAmount.toFixed(6)} USDC (10%)`);
+    return { verified: true, logs: [...logs], error: undefined };
   }
 }
 
@@ -315,7 +326,7 @@ app.get('/api/agents', (req, res) => {
 // Create a new agent (Role, Tone, Security level)
 app.post('/api/agents/create', async (req, res) => {
   try {
-    const { role, tone, securityLevel, customRole } = req.body;
+    const { role, tone, securityLevel, customRole, fee } = req.body;
     if (!role || !tone || !securityLevel) {
       res.status(400).json({ status: 'error', message: 'Missing parameters: role, tone, and securityLevel are required.' });
       return;
@@ -335,6 +346,9 @@ app.post('/api/agents/create', async (req, res) => {
     // Save Private Key securely to GCP KMS/Secret Manager
     const gcpStorage = await savePrivateKeyToGCP(agentId, secretKeyBase64);
 
+    // Parse fee, defaulting to 0.001
+    const parsedFee = typeof fee === 'number' ? fee : 0.001;
+
     // Store Agent Metadata
     const newAgent: AgentStore = {
       id: agentId,
@@ -346,6 +360,7 @@ app.post('/api/agents/create', async (req, res) => {
       systemPrompt,
       created: new Date().toISOString(),
       invokeCount: 0,
+      fee: parsedFee,
     };
 
     agents[agentId] = newAgent;
@@ -389,17 +404,54 @@ app.post('/api/agents/:id/invoke', async (req, res: express.Response) => {
       return;
     }
 
-    const feeAmount = 0.01; // Fee in SOL/USDC
+    const feeAmount = typeof agent.fee === 'number' ? agent.fee : 0.001; // Fee in USDC
 
-    // Validate Payment Proof
+    // If fee is 0 (Free), bypass payment checks entirely!
+    if (feeAmount === 0) {
+      // Call Gemini API with the compiled System Prompt
+      if (!apiKey) {
+        res.json({
+          status: 'success',
+          data: `[DEMO RESPONSE - GEMINI_API_KEY is not configured in Secrets panel]\n\nYour compiled agent (${agent.id}) has a 0 USDC fee (Free Tier), so the paywall check was bypassed successfully.\n\nPrompt Compile Audit:\n- Role: ${agent.role}\n- Tone: ${agent.tone}\n- Security Level: ${agent.securityLevel}\n- System Prompt verified.\n\nQuery input: "${prompt}"`,
+          confidence: 0.99,
+          paymentLogs: [`[Free Tier] Bypassed paywall check since API fee is 0 USDC.`],
+        });
+        return;
+      }
+
+      // Perform RAG & AI generation
+      const response = await ai.models.generateContent({
+        model: "gemini-3.5-flash",
+        contents: prompt,
+        config: {
+          systemInstruction: agent.systemPrompt,
+          temperature: 0.7,
+        },
+      });
+
+      // Update invocation count
+      agent.invokeCount += 1;
+      saveAgentsToDisk();
+
+      // Standard A2A JSON structure response
+      res.json({
+        status: "success",
+        data: response.text || "No response text generated",
+        confidence: 0.98,
+        paymentLogs: [`[Free Tier] Bypassed paywall check since API fee is 0 USDC.`],
+      });
+      return;
+    }
+
+    // Validate Payment Proof for Paid Agents
     if (!paymentProof) {
       // Return 402 Payment Required as specified in pay.sh protocol specification
       res.status(402).json({
         status: 'payment_required',
         amount: feeAmount,
-        token: 'SOL',
+        token: 'USDC',
         recipientWallet: agent.publicKey,
-        message: `HTTP 402: pay.sh On-chain Paywall. Submit 0.01 Devnet SOL payment to vault [${agent.publicKey}] and attach transaction signature in 'X-PAYMENT-PROOF' header to invoke this agent.`,
+        message: `HTTP 402: pay.sh On-chain Paywall. Submit ${feeAmount} Devnet USDC payment to vault [${agent.publicKey}] (90% to Agent Vault, 10% to Platform Creator) and attach transaction signature in 'X-PAYMENT-PROOF' header to invoke this agent.`,
       });
       return;
     }

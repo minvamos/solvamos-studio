@@ -13,6 +13,7 @@ export interface Agent {
   systemPrompt: string;
   created: string;
   invokeCount: number;
+  fee?: number;
 }
 
 export interface Message {
@@ -31,6 +32,7 @@ export interface PromptOptions {
   customRole?: string;
   tone: 'professional' | 'casual' | 'academic' | 'cyberpunk';
   securityLevel: 'strict' | 'balanced' | 'permissive';
+  fee?: number;
 }
 
 export interface Settlement {

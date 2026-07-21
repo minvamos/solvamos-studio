@@ -49,7 +49,7 @@ export default function App() {
       id: '5kXfD91vU8A2bN9oM9pU8vS7nN9tU8vS7nN9tU8vS7nN9',
       agentId: 'support-copilot-001',
       recipientWallet: '6xP7XpU6ZqUvS9uN8tV7nN8dM9pU8vS7nN9tU8vS7nN9',
-      amount: 0.01,
+      amount: 0.001,
       status: 'success',
       timestamp: '2026-07-21 04:22:06',
       blockHeight: 28491024
@@ -58,7 +58,7 @@ export default function App() {
       id: '3zPfS71vA2bN9oM9pU8vS7nN9tU8vS7nN9tU8vS7nN8',
       agentId: 'support-copilot-001',
       recipientWallet: '6xP7XpU6ZqUvS9uN8tV7nN8dM9pU8vS7nN9tU8vS7nN9',
-      amount: 0.01,
+      amount: 0.001,
       status: 'success',
       timestamp: '2026-07-21 03:15:42',
       blockHeight: 28490611
@@ -67,7 +67,7 @@ export default function App() {
       id: '8yQfV92wR3cN0oM8pU9vS8nO0tV8vT8nO0tV8vT8nO0t',
       agentId: 'support-copilot-001',
       recipientWallet: '6xP7XpU6ZqUvS9uN8tV7nN8dM9pU8vS7nN9tU8vS7nN9',
-      amount: 0.01,
+      amount: 0.001,
       status: 'failed',
       timestamp: '2026-07-21 02:08:12',
       blockHeight: 28489950
@@ -80,6 +80,7 @@ export default function App() {
     role: 'support',
     tone: 'professional',
     securityLevel: 'strict',
+    fee: 0.001,
   });
   const [livePromptPreview, setLivePromptPreview] = useState('');
   const [creationResult, setCreationResult] = useState<any>(null);
@@ -286,7 +287,7 @@ export default function App() {
             id: signature,
             agentId: agentId,
             recipientWallet: activeAgent?.publicKey || '',
-            amount: 0.01,
+            amount: activeAgent?.fee !== undefined ? activeAgent.fee : 0.001,
             status: 'success',
             timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
             blockHeight: 28491200 + Math.floor(Math.random() * 500)
@@ -319,7 +320,7 @@ export default function App() {
             id: signature,
             agentId: agentId,
             recipientWallet: activeAgent?.publicKey || '',
-            amount: 0.01,
+            amount: activeAgent?.fee !== undefined ? activeAgent.fee : 0.001,
             status: 'failed',
             timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
             blockHeight: 28491200 + Math.floor(Math.random() * 500)
@@ -514,7 +515,7 @@ export default function App() {
             <div>
               <p className="text-[10px] uppercase font-bold text-[#4285F4] tracking-widest">B2B KMS 지갑 준비 완료</p>
               <p className="text-xs font-mono text-[#94A3B8] mt-0.5">
-                {activeAgent ? `${activeAgent.publicKey.slice(0, 6)}...${activeAgent.publicKey.slice(-6)}` : '에이전트 미선택'} · 12.42 SOL
+                {activeAgent ? `${activeAgent.publicKey.slice(0, 6)}...${activeAgent.publicKey.slice(-6)}` : '에이전트 미선택'} · 124.50 USDC
               </p>
             </div>
           </div>
@@ -529,10 +530,10 @@ export default function App() {
                 <strong>1. 결제 장벽 (Paywall)</strong>: API 호출 시 <span className="font-mono bg-[#081425] px-1 py-0.5 rounded text-white text-[10px]">X-PAYMENT-PROOF</span> 헤더가 비어 있으면 백엔드에서 <span className="text-amber-300 font-semibold">HTTP 402</span> 코드를 반환합니다.
               </p>
               <p>
-                <strong>2. Solana 실시간 결제</strong>: 클라이언트는 에이전트의 온체인 볼트(Vault) 지갑 주소로 0.01 Devnet SOL 결제 트랜잭션을 전송합니다.
+                <strong>2. Solana 실시간 결제</strong>: 클라이언트는 에이전트의 온체인 볼트(Vault) 지갑 주소로 설정된 API 이용료만큼의 Devnet USDC 트랜잭션을 전송합니다. (무료 에이전트일 경우 바로 답을 반환합니다)
               </p>
               <p>
-                <strong>3. 블록체인 검증</strong>: 백엔드가 Solana Devnet RPC 노드를 조회하여 온체인 합의 서명을 실시간으로 오딧(Audit) 완료 후 데이터를 신속히 방출합니다.
+                <strong>3. 분할 정산 검증</strong>: 백엔드가 Solana Devnet RPC 노드를 조회하여 온체인 합의 서명을 실시간으로 검증 후, 이용료의 90%는 에이전트 지갑에, 10%는 플랫폼 제작자의 지갑으로 자동 이체합니다.
               </p>
             </div>
             <div className="mt-1 bg-[#040e1f] p-3 rounded-lg border border-[#ffffff1a] font-mono text-[10px] text-[#14F195]/80 text-center uppercase tracking-widest font-semibold">
@@ -690,7 +691,38 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* 4. REAL-TIME COMPILER DRIFT PREVIEW */}
+                    {/* 4. API USAGE FEE Preset */}
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center">
+                        <label className="text-xs font-mono font-bold uppercase tracking-widest text-[#4285F4] block">
+                          4. API 이용료 설정 (USDC)
+                        </label>
+                        <span className="text-xs font-bold font-mono text-[#14F195] bg-[#14F195]/10 px-2 py-0.5 rounded border border-[#14F195]/20">
+                          {options.fee === 0 ? "무료 (Paywall 없음)" : `${options.fee} USDC`}
+                        </span>
+                      </div>
+                      <div className="bg-[#152031] p-4 rounded-xl border border-[#ffffff1a] space-y-3">
+                        <input
+                          type="range"
+                          min="0"
+                          max="0.2"
+                          step="0.001"
+                          value={options.fee !== undefined ? options.fee : 0.001}
+                          onChange={(e) => setOptions({ ...options, fee: parseFloat(parseFloat(e.target.value).toFixed(3)) })}
+                          className="w-full accent-[#14F195] cursor-pointer h-1.5 bg-[#081425] rounded-lg appearance-none"
+                        />
+                        <div className="flex justify-between text-[10px] text-[#94A3B8] font-mono">
+                          <span>무료 (0 USDC)</span>
+                          <span>기본값 (0.001 USDC)</span>
+                          <span>최대 (0.2 USDC)</span>
+                        </div>
+                        <p className="text-[10px] text-[#94A3B8]/70 leading-relaxed">
+                          * 무료 설정 시 X-PAYMENT-PROOF 검증 없이 즉시 API 결과가 방출됩니다. 유료 설정 시에는 90%가 에이전트 지갑으로, 10%가 플랫폼 개발자 지갑으로 실시간 분할 정산됩니다.
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* 5. REAL-TIME COMPILER DRIFT PREVIEW */}
                     <div className="space-y-1.5">
                       <div className="flex justify-between items-center">
                         <label className="text-xs font-mono font-bold uppercase tracking-widest text-[#4285F4]">프롬프트 실시간 컴파일 상태</label>
@@ -862,9 +894,10 @@ export default function App() {
                           </button>
                         </div>
 
-                        <div className="flex gap-4 text-[11px] font-mono text-[#94A3B8]">
+                        <div className="flex gap-4 text-[11px] font-mono text-[#94A3B8] flex-wrap">
                           <span>매너: <strong className="text-white capitalize">{agent.tone}</strong></span>
                           <span>가드레일: <strong className="text-amber-300 capitalize">{agent.securityLevel}</strong></span>
+                          <span>이용료: <strong className="text-[#14F195]">{agent.fee !== undefined ? (agent.fee === 0 ? '무료' : `${agent.fee} USDC`) : '0.001 USDC'}</strong></span>
                         </div>
                       </div>
 
@@ -920,7 +953,9 @@ export default function App() {
                 </div>
                 <div className="bg-[#081425]/70 p-3 rounded-xl border border-[#ffffff1a] text-center">
                   <span className="text-[9px] text-[#94A3B8] block">누적 검증 수수료</span>
-                  <span className="text-base font-bold text-[#14F195] font-mono block mt-1">{(settlements.filter(s => s.status === 'success').length * 0.01).toFixed(2)} SOL</span>
+                  <span className="text-base font-bold text-[#14F195] font-mono block mt-1">
+                    {settlements.filter(s => s.status === 'success').reduce((sum, s) => sum + s.amount, 0).toFixed(4)} USDC
+                  </span>
                 </div>
                 <div className="bg-[#081425]/70 p-3 rounded-xl border border-[#ffffff1a] text-center">
                   <span className="text-[9px] text-[#94A3B8] block">정산 성공률</span>
@@ -939,7 +974,7 @@ export default function App() {
                         tx.status === 'success' 
                           ? 'bg-[#14F195]/10 text-[#14F195] border border-[#14F195]/20' 
                           : 'bg-red-500/10 text-red-400 border border-red-500/20'
-                      }`}>
+                       }`}>
                         {tx.status === 'success' ? '정산 성공' : '정산 실패'}
                       </span>
                     </div>
@@ -969,7 +1004,7 @@ export default function App() {
 
                     <div className="flex justify-between items-center pt-2 border-t border-[#ffffff0a] text-[10px] font-mono">
                       <span className="text-[#94A3B8]/60">정산 규격:</span>
-                      <span className="text-white font-bold text-xs">{tx.amount} SOL</span>
+                      <span className="text-white font-bold text-xs">{tx.amount} USDC</span>
                     </div>
                   </div>
                 ))}
@@ -1037,7 +1072,7 @@ export default function App() {
                           에이전트 실시간 연동: {activeAgent.id}
                         </p>
                         <p className="leading-relaxed">
-                          프롬프트를 입력하세요. 에이전트 게이트웨이가 실행(execution)을 감지하면 <span className="text-[#14F195] font-semibold">HTTP 402 Payment Required</span> 프로토콜을 동작시켜 온체인 정산 증명(Signature)을 요구합니다. 아래 버튼을 눌러 승인 시 즉시 Devnet 상에 0.01 SOL 결제 트랜잭션을 전송하여 암호화를 해제합니다.
+                          프롬프트를 입력하세요. 에이전트 게이트웨이가 실행(execution)을 감지하면 <span className="text-[#14F195] font-semibold">HTTP 402 Payment Required</span> 프로토콜을 동작시켜 온체인 정산 증명(Signature)을 요구합니다. 아래 버튼을 눌러 승인 시 즉시 Devnet 상에 {activeAgent.fee === 0 ? "0" : (activeAgent.fee !== undefined ? activeAgent.fee : 0.001)} USDC 결제 트랜잭션을 전송하여 암호화를 해제합니다.
                         </p>
                       </div>
 
@@ -1097,7 +1132,7 @@ export default function App() {
                             <div>
                               <h4 className="text-white font-bold text-xs">에이전트 가상 터널 암호화 해제</h4>
                               <p className="text-[11px] text-[#94A3B8]/80 leading-relaxed mt-0.5">
-                                안전하게 생성된 에이전트 전용 볼트(Vault) 지갑 주소로 {pendingPayment.amount} SOL 결제 트랜잭션을 브로드캐스팅합니다.
+                                안전하게 생성된 에이전트 전용 볼트(Vault) 지갑 주소로 {pendingPayment.amount} USDC 결제 트랜잭션을 브로드캐스팅합니다.
                               </p>
                             </div>
                           </div>
@@ -1107,7 +1142,7 @@ export default function App() {
                               onClick={() => handleAcknowledgeAndSign(true)}
                               className="w-full bg-[#14F195] hover:bg-[#14F195]/90 text-[#081425] font-bold py-2.5 px-3 rounded-lg text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-lg shadow-[#14F195]/10"
                             >
-                              <Wallet className="h-3.5 w-3.5" /> 간편 확인 및 온체인 자동 서명 생성 (수수료 0.01 SOL)
+                              <Wallet className="h-3.5 w-3.5" /> 간편 확인 및 온체인 자동 서명 생성 (이용료 {pendingPayment.amount} USDC)
                             </button>
 
                             <div className="relative flex items-center justify-center">
