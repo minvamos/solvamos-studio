@@ -155,7 +155,7 @@ export async function provisionCustomerProject(input: ProvisionInput): Promise<T
       tenancyMode: 'isolated',
       createdAt: new Date().toISOString(),
     };
-    return upsertTenant(record);
+    return await upsertTenant(record);
   }
 
   const base: TenantRecord = {
@@ -169,7 +169,7 @@ export async function provisionCustomerProject(input: ProvisionInput): Promise<T
     sharedProject: plan.tenancyMode === 'shared',
     createdAt: new Date().toISOString(),
   };
-  upsertTenant(base);
+  await upsertTenant(base);
 
   // --- Shared / mock / terraform-only: no org GCP project create ---
   if (
@@ -216,7 +216,7 @@ export async function provisionCustomerProject(input: ProvisionInput): Promise<T
               : undefined,
       provisionNotes: plan.notes,
     };
-    return upsertTenant(record);
+    return await upsertTenant(record);
   }
 
   // --- Isolated + live + ENABLE_ORG_PROJECT_CREATE ---
@@ -255,14 +255,14 @@ export async function provisionCustomerProject(input: ProvisionInput): Promise<T
       `[Provisioner] Next: enable APIs + Cloud Run + Vertex Search in ${plan.projectId} (Terraform customer-project module)`
     );
 
-    return upsertTenant({
+    return await upsertTenant({
       ...base,
       status: 'active',
       provisionNotes: plan.notes,
     });
   } catch (err: any) {
     console.error(`[Provisioner] ${err.message}`);
-    return upsertTenant({
+    return await upsertTenant({
       ...base,
       status: 'error',
       errorMessage: err.message,
@@ -272,9 +272,10 @@ export async function provisionCustomerProject(input: ProvisionInput): Promise<T
 }
 
 /** Runtime GCP project for a tenant (agents/RAG should use this). */
-export function gcpProjectForTenant(tenantId?: string): string {
+export async function gcpProjectForTenant(tenantId?: string): Promise<string> {
   if (!tenantId) return config.gcpProject;
   const mode = resolveTenancyMode();
   if (mode === 'shared') return config.gcpProject;
-  return getTenant(tenantId)?.projectId || plannedProjectId(tenantId);
+  const t = await getTenant(tenantId);
+  return t?.projectId || plannedProjectId(tenantId);
 }

@@ -1,12 +1,15 @@
 /**
  * Agent vault: Secret Manager + optional CMEK.
+ * Agent keys are NEVER the user wallet — each agent gets its own Solana keypair.
  * Production: no plaintext local fallback unless ALLOW_LOCAL_VAULT_FALLBACK=true.
  */
 
 import path from 'path';
 import fs from 'fs';
+import { Keypair } from '@solana/web3.js';
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
 import { KeyManagementServiceClient } from '@google-cloud/kms';
+import { config } from './config.js';
 
 export type VaultSaveResult = {
   success: boolean;
@@ -14,8 +17,27 @@ export type VaultSaveResult = {
   mock: boolean;
 };
 
+export type AgentVaultKeys = {
+  publicKey: string;
+  secretKeyBase64: string;
+};
+
+/** Fresh agent vault keypair (not linked to any user wallet). */
+export function createAgentVaultKeypair(): AgentVaultKeys {
+  const kp = Keypair.generate();
+  return {
+    publicKey: kp.publicKey.toBase58(),
+    secretKeyBase64: Buffer.from(kp.secretKey).toString('base64'),
+  };
+}
+
 function allowLocalFallback(): boolean {
-  return process.env.ALLOW_LOCAL_VAULT_FALLBACK === 'true';
+  // Prefer central config (defaults true outside production)
+  return config.allowLocalVaultFallback === true;
+}
+
+function localVaultPath(): string {
+  return path.join(process.cwd(), 'kms_vault_mock.json');
 }
 
 async function encryptWithCmek(plaintext: string): Promise<string> {
@@ -78,11 +100,11 @@ export async function savePrivateKeyToGCP(
     }
 
     // Dev-only obfuscation (NOT production-safe) — never write raw secret key string
-    const localVaultPath = path.join(process.cwd(), 'kms_vault_mock.json');
+    const file = localVaultPath();
     let vault: Record<string, { ciphertext: string; algo: string }> = {};
-    if (fs.existsSync(localVaultPath)) {
+    if (fs.existsSync(file)) {
       try {
-        vault = JSON.parse(fs.readFileSync(localVaultPath, 'utf8'));
+        vault = JSON.parse(fs.readFileSync(file, 'utf8'));
       } catch {
         vault = {};
       }
@@ -91,7 +113,7 @@ export async function savePrivateKeyToGCP(
       ciphertext: Buffer.from(secretKeyBase64, 'utf8').toString('base64'),
       algo: 'dev-base64-only-NOT-SECURE',
     };
-    fs.writeFileSync(localVaultPath, JSON.stringify(vault, null, 2), 'utf8');
+    fs.writeFileSync(file, JSON.stringify(vault, null, 2), 'utf8');
     console.warn(
       `[Vault Dev Fallback] ${err.message}. Stored obfuscated local entry (dev only).`
     );
@@ -103,10 +125,29 @@ export async function savePrivateKeyToGCP(
   }
 }
 
+function agentIdFromLocalSecretPath(secretPath: string): string | null {
+  const m = secretPath.match(/solvamos-agent-([^/]+)-secret/);
+  return m?.[1] || null;
+}
+
 export async function loadPrivateKeyFromGCP(secretPath: string): Promise<string | null> {
   if (secretPath.includes('LOCAL_DEV') || secretPath.includes('MOCK_PROJECT')) {
     if (!allowLocalFallback()) return null;
-    return null;
+    const agentId = agentIdFromLocalSecretPath(secretPath);
+    if (!agentId) return null;
+    const file = localVaultPath();
+    if (!fs.existsSync(file)) return null;
+    try {
+      const vault = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<
+        string,
+        { ciphertext: string; algo: string }
+      >;
+      const entry = vault[agentId];
+      if (!entry?.ciphertext) return null;
+      return Buffer.from(entry.ciphertext, 'base64').toString('utf8');
+    } catch {
+      return null;
+    }
   }
   const client = new SecretManagerServiceClient();
   const [version] = await client.accessSecretVersion({ name: secretPath });

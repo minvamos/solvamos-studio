@@ -12,7 +12,7 @@ import {
   LogOut,
 } from 'lucide-react';
 
-export type AppTab = 'studio' | 'list' | 'settlements';
+export type AppTab = 'studio' | 'list' | 'settlements' | 'account';
 
 type Props = {
   activeTab: AppTab;
@@ -27,12 +27,17 @@ type Props = {
   paymentNetwork?: string;
   onPaymentNetworkChange?: (network: 'sandbox' | 'devnet') => void;
   paymentSwitchBusy?: boolean;
+  catalogPublishMode?: 'internal' | 'main' | 'both';
+  onCatalogPublishModeChange?: (mode: 'internal' | 'main' | 'both') => void;
+  catalogSwitchBusy?: boolean;
+  catalogRemoteConfigured?: boolean;
 };
 
 const NAV: { id: AppTab; label: string; icon: typeof Bot }[] = [
   { id: 'studio', label: '에이전트 스튜디오', icon: Factory },
   { id: 'list', label: '내 에이전트 목록', icon: Bot },
   { id: 'settlements', label: '온체인 정산 내역', icon: Wallet },
+  { id: 'account', label: '마이페이지', icon: Settings },
 ];
 
 export default function AppShell({
@@ -48,6 +53,10 @@ export default function AppShell({
   paymentNetwork,
   onPaymentNetworkChange,
   paymentSwitchBusy,
+  catalogPublishMode,
+  onCatalogPublishModeChange,
+  catalogSwitchBusy,
+  catalogRemoteConfigured,
 }: Props) {
   return (
     <div className="bg-background text-on-surface antialiased min-h-screen flex font-sans overflow-x-hidden">
@@ -65,7 +74,7 @@ export default function AppShell({
           {onPaymentNetworkChange && (
             <div className="mt-3 p-2 rounded-lg bg-surface-container border border-outline-variant/20">
               <p className="text-[10px] font-semibold text-on-surface-variant uppercase tracking-wider mb-2 px-1">
-                결제 테스트 모드
+                개발자 · 결제 테스트
               </p>
               <div className="flex gap-1">
                 <button
@@ -100,6 +109,46 @@ export default function AppShell({
               </p>
             </div>
           )}
+
+          {onCatalogPublishModeChange && (
+            <div className="mt-2 p-2 rounded-lg bg-surface-container border border-outline-variant/20">
+              <p className="text-[10px] font-semibold text-on-surface-variant uppercase tracking-wider mb-2 px-1">
+                개발자 · pay.sh 카탈로그
+              </p>
+              <div className="flex gap-1">
+                {(
+                  [
+                    { id: 'internal' as const, label: '내부' },
+                    { id: 'main' as const, label: '메인' },
+                    { id: 'both' as const, label: '둘다' },
+                  ] as const
+                ).map(({ id, label }) => (
+                  <button
+                    key={id}
+                    type="button"
+                    disabled={catalogSwitchBusy}
+                    onClick={() => onCatalogPublishModeChange(id)}
+                    className={
+                      catalogPublishMode === id
+                        ? 'flex-1 py-1.5 rounded-md text-xs font-semibold bg-secondary/20 text-secondary border border-secondary/40'
+                        : 'flex-1 py-1.5 rounded-md text-xs font-medium text-on-surface-variant hover:bg-surface-container-highest'
+                    }
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[10px] text-outline mt-2 px-1 leading-relaxed">
+                {catalogPublishMode === 'main'
+                  ? catalogRemoteConfigured
+                    ? '메인: 외부 PAYSH_CATALOG_URL로 게시'
+                    : '메인: Lab 미러 파일 (URL 미설정)'
+                  : catalogPublishMode === 'both'
+                    ? '내부 + 메인에 동시 게시'
+                    : '내부: 이 Studio 카탈로그만 (로컬 A2A)'}
+              </p>
+            </div>
+          )}
         </div>
 
         <div className="flex flex-col gap-1 flex-grow">
@@ -126,10 +175,11 @@ export default function AppShell({
         <div className="flex flex-col gap-1 mt-auto pt-6 border-t border-outline-variant/10 px-2">
           <button
             type="button"
+            onClick={() => onNavigate('account')}
             className="flex items-center gap-4 px-4 py-2 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest/50 transition-all rounded-lg text-left"
           >
             <Settings className="w-5 h-5" />
-            <span className="text-sm font-medium">설정</span>
+            <span className="text-sm font-medium">설정 / 계정</span>
           </button>
           <button
             type="button"

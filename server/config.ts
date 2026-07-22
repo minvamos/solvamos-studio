@@ -126,8 +126,8 @@ export const config = {
     process.env.PLATFORM_TREASURY_PUBKEY ||
     'AoUNKE8uQ8y1FEtU6YSFCsopK9veP6jZ6EGNoULjdwva',
   /**
-   * Default A2A / agent vault pubkey when creating an agent without a linked user wallet override.
-   * Lab demo address — replace per tenant in production.
+   * Deprecated for new agents — create always mints a dedicated agent vault.
+   * Kept only for legacy seed agents / env override demos.
    */
   defaultAgentVaultPubkey:
     process.env.DEFAULT_AGENT_VAULT_PUBKEY ||
@@ -207,8 +207,13 @@ export function assertProductionSafety() {
   if (!config.gcpProject) {
     problems.push('GOOGLE_CLOUD_PROJECT is required in production');
   }
+  const jwt = process.env.JWT_SECRET || '';
+  if (jwt.length < 32) {
+    problems.push('JWT_SECRET (>=32 chars) is required in production');
+  }
   if (problems.length) {
-    console.error('[SolVamos] Production safety check failed:\n - ' + problems.join('\n - '));
+    console.error('[SolVamos] Production safety check FAILED:\n - ' + problems.join('\n - '));
+    throw new Error(`Production safety check failed: ${problems.join('; ')}`);
   }
 }
 

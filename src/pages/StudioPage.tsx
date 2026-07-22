@@ -49,7 +49,9 @@ type Props = {
   isLoading: boolean;
   builderStep: 1 | 2 | 3;
   creationResult: any;
+  editingAgentId?: string | null;
   onCreate: () => void;
+  onStartNewAgent?: () => void;
   driveEmail: string | null;
   primaryWalletAddress?: string | null;
   primaryWalletLabel?: string | null;
@@ -94,7 +96,9 @@ export default function StudioPage(props: Props) {
     isLoading,
     builderStep,
     creationResult,
+    editingAgentId,
     onCreate,
+    onStartNewAgent,
     driveEmail,
     primaryWalletAddress,
     primaryWalletLabel,
@@ -175,11 +179,13 @@ export default function StudioPage(props: Props) {
             )}
             {primaryWalletAddress ? (
               <span className="text-solana-green font-mono text-xs">
-                내 지갑: {primaryWalletLabel || '메인'} · {primaryWalletAddress.slice(0, 4)}…
+                유저 지갑(운영): {primaryWalletLabel || '메인'} · {primaryWalletAddress.slice(0, 4)}…
                 {primaryWalletAddress.slice(-4)}
               </span>
             ) : (
-              <span className="text-outline text-xs">내 지갑 미연결 (헤더 Connect Wallet)</span>
+              <span className="text-outline text-xs">
+                유저 지갑 미연결 — 에이전트 볼트와는 별개 (헤더 Connect Wallet)
+              </span>
             )}
           </div>
 
@@ -345,15 +351,55 @@ export default function StudioPage(props: Props) {
 
         {/* CTA */}
         <section className="mt-2">
+          {editingAgentId ? (
+            <div className="mb-3 flex items-center justify-between gap-2 rounded-lg border border-google-blue/30 bg-google-blue/10 px-3 py-2">
+              <p className="text-xs text-on-surface">
+                편집 중 · ID <span className="font-mono">{editingAgentId}</span>
+                <span className="text-on-surface-variant"> (vault/ID 유지, 재게시 아님)</span>
+              </p>
+              {onStartNewAgent ? (
+                <button
+                  type="button"
+                  onClick={onStartNewAgent}
+                  className="shrink-0 text-xs font-medium text-google-blue hover:underline"
+                >
+                  새 에이전트
+                </button>
+              ) : null}
+            </div>
+          ) : null}
           {builderStep === 3 && creationResult?.agent ? (
             <div className="glass-panel rounded-xl p-6 mb-4 border border-solana-green/30">
-              <p className="text-solana-green font-semibold mb-2">에이전트 생성 완료</p>
+              <p className="text-solana-green font-semibold mb-2">
+                {creationResult._wasEdit || creationResult.message?.includes('updated')
+                  ? '에이전트 저장 완료 (기존 ID 유지)'
+                  : '에이전트 생성 완료'}
+              </p>
               <p className="text-sm text-on-surface-variant font-mono break-all">
                 ID: {creationResult.agent.id}
               </p>
               <p className="text-sm text-on-surface-variant font-mono break-all mt-1">
                 Vault: {creationResult.agent.publicKey}
               </p>
+              {creationResult.driveIngest?.docs != null ? (
+                <p className="text-sm text-on-surface-variant mt-2">
+                  Drive RAG: {creationResult.driveIngest.docs}개 문서 주입
+                </p>
+              ) : null}
+              {creationResult.payShCatalog?.invokeUrl ? (
+                <p className="text-xs text-on-surface-variant font-mono break-all mt-1">
+                  pay.sh: {creationResult.payShCatalog.invokeUrl}
+                </p>
+              ) : null}
+              {Array.isArray(creationResult.pipeline) ? (
+                <ul className="mt-3 space-y-1 text-xs text-on-surface-variant">
+                  {creationResult.pipeline.map((p: any, i: number) => (
+                    <li key={`${p.step}-${i}`}>
+                      [{p.status}] {p.step}: {p.detail}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
             </div>
           ) : null}
           <button
@@ -368,9 +414,18 @@ export default function StudioPage(props: Props) {
               <Rocket className="w-7 h-7" />
             )}
             {isLoading
-              ? '컴파일 중…'
-              : '에이전트 생성 및 pay.sh 카탈로그 게시하기'}
+              ? editingAgentId
+                ? '저장 중…'
+                : '컴파일 중…'
+              : editingAgentId
+                ? '변경사항 저장 (재게시 아님)'
+                : '에이전트 생성 및 pay.sh 카탈로그 게시하기'}
           </button>
+          {editingAgentId ? (
+            <p className="text-xs text-on-surface-variant mt-2 text-center">
+              같은 에이전트 메타/요금만 업데이트합니다. 새 vault·새 ID를 만들지 않습니다.
+            </p>
+          ) : null}
         </section>
       </div>
 

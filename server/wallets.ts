@@ -1,5 +1,7 @@
 /**
- * User Solana wallet registry — register addresses, pick one as primary (payout/vault).
+ * User Solana wallet registry — operator/human wallets ONLY.
+ * Never use these as Agent.publicKey / invoke paywall recipient.
+ * Agent vaults are created per-agent in vault.ts (separate keypair).
  */
 
 import fs from 'fs';

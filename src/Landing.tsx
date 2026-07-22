@@ -1,11 +1,22 @@
 /**
- * Stitch: solvamos_studio_login_enhanced_content_1
+ * Sign in / Sign up — email+password and Google.
  */
-import type { ReactNode } from 'react';
+import { useState, type FormEvent, type ReactNode } from 'react';
 import { Cloud, Wallet, Boxes } from 'lucide-react';
 
+export type AuthMode = 'signin' | 'signup';
+
 type Props = {
-  onContinue: () => void;
+  mode?: AuthMode;
+  onModeChange?: (m: AuthMode) => void;
+  onEmailSubmit: (payload: {
+    mode: AuthMode;
+    email: string;
+    password: string;
+    name?: string;
+    orgName?: string;
+  }) => Promise<void> | void;
+  onGoogle: (intent: 'login' | 'signup') => Promise<void> | void;
   onDevSkip?: () => void;
   oauthConfigured?: boolean;
   busy?: boolean;
@@ -13,12 +24,38 @@ type Props = {
 };
 
 export default function Landing({
-  onContinue,
+  mode: controlledMode,
+  onModeChange,
+  onEmailSubmit,
+  onGoogle,
   onDevSkip,
   oauthConfigured,
   busy,
   error,
 }: Props) {
+  const [internalMode, setInternalMode] = useState<AuthMode>('signin');
+  const mode = controlledMode ?? internalMode;
+  const setMode = (m: AuthMode) => {
+    onModeChange?.(m);
+    setInternalMode(m);
+  };
+
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
+  const [orgName, setOrgName] = useState('');
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    await onEmailSubmit({
+      mode,
+      email,
+      password,
+      name: name || undefined,
+      orgName: orgName || undefined,
+    });
+  };
+
   return (
     <div className="bg-[#0F172A] text-on-surface min-h-screen flex items-center justify-center font-sans relative overflow-hidden">
       <div className="absolute top-[-20%] left-[-10%] w-[50%] h-[50%] rounded-full bg-primary/5 blur-[120px] pointer-events-none" />
@@ -44,7 +81,7 @@ export default function Landing({
             비즈니스를 혁신하세요
           </h1>
           <p className="text-base md:text-lg text-on-surface-variant mb-8 leading-relaxed">
-            코딩 없이 구축하고, 블록체인으로 수익화하는 차세대 엔터프라이즈 AI 플랫폼.
+            계정 생성 시 워크스페이스(테넌트)가 준비됩니다. Google Drive는 나중에 연동할 수 있습니다.
           </p>
 
           <div className="flex flex-col gap-4">
@@ -67,36 +104,116 @@ export default function Landing({
         </div>
 
         <div className="w-full md:w-[480px] lg:w-[560px] flex flex-col items-center justify-center p-8 md:p-16 bg-surface-container-lowest/80 backdrop-blur-xl border-t md:border-t-0 md:border-l border-white/10 shadow-2xl">
-          <div className="w-full flex flex-col items-center text-center max-w-sm">
-            <h2 className="text-2xl md:text-3xl font-semibold text-on-surface mb-2 tracking-tight">
-              시작하기
+          <div className="w-full flex flex-col max-w-sm">
+            <div className="flex rounded-full bg-surface-container p-1 mb-8 border border-outline-variant/30">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setMode('signin')}
+                className={
+                  mode === 'signin'
+                    ? 'flex-1 py-2.5 rounded-full text-sm font-semibold bg-primary text-on-primary'
+                    : 'flex-1 py-2.5 rounded-full text-sm font-medium text-on-surface-variant'
+                }
+              >
+                로그인
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setMode('signup')}
+                className={
+                  mode === 'signup'
+                    ? 'flex-1 py-2.5 rounded-full text-sm font-semibold bg-primary text-on-primary'
+                    : 'flex-1 py-2.5 rounded-full text-sm font-medium text-on-surface-variant'
+                }
+              >
+                회원가입
+              </button>
+            </div>
+
+            <h2 className="text-2xl font-semibold text-on-surface mb-1 tracking-tight text-center">
+              {mode === 'signin' ? 'Sign in' : 'Create account'}
             </h2>
-            <p className="text-base text-on-surface-variant mb-10">
-              Google 계정으로 로그인하면 Drive 폴더를 연결하고 워크스페이스에 입장합니다.
+            <p className="text-sm text-on-surface-variant mb-6 text-center">
+              {mode === 'signin'
+                ? '이메일 또는 Google로 로그인하세요.'
+                : '가입 시 Lab 고객 테넌트(공유 GCP)가 DB에 생성·연결됩니다.'}
             </p>
+
+            <form onSubmit={submit} className="flex flex-col gap-3">
+              {mode === 'signup' && (
+                <>
+                  <Field
+                    label="이름"
+                    value={name}
+                    onChange={setName}
+                    autoComplete="name"
+                    placeholder="홍길동"
+                  />
+                  <Field
+                    label="조직 / 워크스페이스 이름 (선택)"
+                    value={orgName}
+                    onChange={setOrgName}
+                    placeholder="Acme Corp"
+                  />
+                </>
+              )}
+              <Field
+                label="이메일"
+                type="email"
+                value={email}
+                onChange={setEmail}
+                autoComplete="email"
+                required
+                placeholder="you@company.com"
+              />
+              <Field
+                label="비밀번호"
+                type="password"
+                value={password}
+                onChange={setPassword}
+                autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
+                required
+                placeholder={mode === 'signup' ? '8자 이상' : '••••••••'}
+              />
+
+              <button
+                type="submit"
+                disabled={busy}
+                className="mt-2 w-full py-3.5 rounded-full btn-primary text-base font-semibold disabled:opacity-50"
+              >
+                {busy ? '처리 중…' : mode === 'signin' ? '로그인' : '계정 만들고 시작하기'}
+              </button>
+            </form>
+
+            <div className="flex items-center gap-3 my-6">
+              <div className="h-px flex-1 bg-outline-variant/30" />
+              <span className="text-xs text-outline">또는</span>
+              <div className="h-px flex-1 bg-outline-variant/30" />
+            </div>
 
             <button
               type="button"
               disabled={busy || oauthConfigured === false}
-              onClick={onContinue}
-              className="w-full flex items-center justify-center gap-4 py-4 px-6 rounded-full border border-outline-variant/40 bg-surface-container text-on-surface transition-all duration-300 hover:border-google-blue/50 hover:bg-surface-container-high group disabled:opacity-50 cursor-pointer"
+              onClick={() => onGoogle(mode === 'signup' ? 'signup' : 'login')}
+              className="w-full flex items-center justify-center gap-3 py-3.5 px-6 rounded-full border border-outline-variant/40 bg-surface-container text-on-surface transition-all hover:border-google-blue/50 disabled:opacity-50"
             >
               <GoogleG />
-              <span className="font-medium text-base md:text-lg group-hover:text-primary transition-colors">
-                Google 계정으로 계속하기
+              <span className="font-medium text-sm">
+                {mode === 'signup' ? 'Google로 회원가입' : 'Google로 로그인'}
               </span>
             </button>
 
             {error && (
-              <p className="mt-4 text-xs text-red-400 leading-relaxed whitespace-pre-wrap">{error}</p>
+              <p className="mt-4 text-xs text-red-400 leading-relaxed whitespace-pre-wrap text-center">
+                {error}
+              </p>
             )}
 
             {oauthConfigured === false && (
-              <p className="mt-4 text-xs text-outline leading-relaxed">
-                OAuth Client가 `.env`에 없습니다. GCP에서 Web Client를 발급하고
-                `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`을 넣은 뒤 서버를 재시작하세요.
-                <br />
-                안내: docs/DRIVE_OAUTH_SETUP.md
+              <p className="mt-4 text-xs text-outline leading-relaxed text-center">
+                Google OAuth Client가 없으면 이메일 가입/로그인만 가능합니다.
               </p>
             )}
 
@@ -105,29 +222,52 @@ export default function Landing({
                 type="button"
                 disabled={busy}
                 onClick={onDevSkip}
-                className="mt-6 text-xs text-on-surface-variant underline hover:text-on-surface disabled:opacity-50"
+                className="mt-4 text-xs text-on-surface-variant underline hover:text-on-surface disabled:opacity-50"
               >
                 개발 모드로 입장 (로그인 없이)
               </button>
             )}
 
-            {oauthConfigured && (
-              <p className="mt-4 text-xs text-solana-green/80 leading-relaxed">
-                Google SSO 준비됨 · Drive.readonly 권한 포함
-              </p>
-            )}
-
-            <p className="mt-8 text-[11px] text-outline leading-relaxed">
+            <p className="mt-8 text-[11px] text-outline leading-relaxed text-center">
               계속 진행하면 서비스 이용약관 및 개인정보 처리방침에 동의하는 것으로 간주됩니다.
-            </p>
-            <p className="mt-4 text-[10px] text-outline font-medium">
-              Powered by <span className="text-google-blue">Google Cloud</span> ×{' '}
-              <span className="text-solana-green">Solana</span>
             </p>
           </div>
         </div>
       </div>
     </div>
+  );
+}
+
+function Field({
+  label,
+  value,
+  onChange,
+  type = 'text',
+  placeholder,
+  required,
+  autoComplete,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  type?: string;
+  placeholder?: string;
+  required?: boolean;
+  autoComplete?: string;
+}) {
+  return (
+    <label className="flex flex-col gap-1.5 text-left">
+      <span className="text-xs font-medium text-on-surface-variant">{label}</span>
+      <input
+        type={type}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        required={required}
+        autoComplete={autoComplete}
+        className="w-full rounded-xl bg-surface-container border border-outline-variant/40 px-4 py-3 text-sm text-on-surface focus:outline-none focus:border-google-blue focus:ring-1 focus:ring-google-blue"
+      />
+    </label>
   );
 }
 
@@ -153,7 +293,7 @@ function FeatureCard({
 
 function GoogleG() {
   return (
-    <svg className="w-6 h-6" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+    <svg className="w-5 h-5" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden>
       <path
         d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
         fill="#4285F4"

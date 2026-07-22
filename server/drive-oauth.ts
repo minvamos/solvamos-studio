@@ -1,19 +1,26 @@
 /**
- * Google SSO (openid/email/profile) + Drive.readonly for Sovereign RAG.
- *
- * Session: HttpOnly cookie `solvamos_sid` (CSRF state on authorize).
- * Lab ADC path remains optional behind ALLOW_ADC_DRIVE.
+ * Google OAuth + Drive.readonly.
+ * Account login/register is email/password (auth-routes). Google is used for:
+ *   intent=signup | login | link (Drive + identity link)
  */
-
 import crypto from 'crypto';
 import fs from 'fs';
 import { google } from 'googleapis';
 import { GoogleAuth } from 'google-auth-library';
 import type { Request, Response, NextFunction } from 'express';
 import { config } from './config.js';
-import { getTenant, upsertTenant } from './tenants.js';
-import { provisionCustomerProject } from './provision.js';
 import { dataFile, ensureDataDir } from './data-paths.js';
+import { setAuthCookies, resolveAuthSessionId, revokeSession } from './jwt-auth.js';
+import { loadSessionFromDb } from './session-db.js';
+import { prisma } from './db.js';
+import { normalizeEmail } from './password.js';
+import {
+  createSessionRow,
+  issueSessionCookies,
+  clientMeta,
+  getMeFromRequest,
+} from './platform-auth.js';
+import { provisionTenantForNewUser, ensureSharedCustomerTenant } from './tenant-seed.js';
 
 const SCOPES = [
   'openid',
@@ -22,11 +29,9 @@ const SCOPES = [
   'https://www.googleapis.com/auth/drive.readonly',
 ];
 
-const COOKIE_NAME = 'solvamos_sid';
 const ADC_SESSION_ID = 'adc_local';
 const SESSION_FILE = dataFile('oauth-sessions.json');
 const STATE_TTL_MS = 15 * 60 * 1000;
-const SESSION_MAX_AGE_SEC = 30 * 24 * 3600;
 
 type OAuthSession = {
   refreshToken?: string;
@@ -35,14 +40,19 @@ type OAuthSession = {
   name?: string;
   picture?: string;
   expiry?: number;
-  via?: 'oauth' | 'adc';
+  via?: 'oauth' | 'adc' | 'password' | 'link';
   tenantId?: string;
   createdAt?: string;
+  userId?: string;
 };
+
+type OAuthIntent = 'login' | 'signup' | 'link';
 
 type PendingState = {
   sessionId: string;
   createdAt: number;
+  intent: OAuthIntent;
+  linkUserId?: string;
 };
 
 let oauthSessions: Record<string, OAuthSession> = {};
@@ -63,7 +73,7 @@ function saveSessions() {
     ensureDataDir();
     fs.writeFileSync(SESSION_FILE, JSON.stringify(oauthSessions, null, 2));
   } catch (err) {
-    console.warn('[oauth] failed to persist sessions', err);
+    console.warn('[oauth] failed to persist sessions (file)', err);
   }
 }
 
@@ -85,98 +95,35 @@ function oauthClient(redirectUri?: string) {
   const clientId = config.googleClientId;
   const clientSecret = config.googleClientSecret;
   const redirect = redirectUri || config.oauthRedirectUri;
-
   if (!clientId || !clientSecret) {
     throw new Error('GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET not configured');
   }
-
   return new google.auth.OAuth2(clientId, clientSecret, redirect);
 }
 
-function parseCookies(req: Request): Record<string, string> {
-  const header = req.headers.cookie || '';
-  const out: Record<string, string> = {};
-  for (const part of header.split(';')) {
-    const idx = part.indexOf('=');
-    if (idx < 0) continue;
-    const k = part.slice(0, idx).trim();
-    const v = part.slice(idx + 1).trim();
-    if (k) out[k] = decodeURIComponent(v);
+export async function resolveSessionId(req: Request): Promise<string | undefined> {
+  const id = await resolveAuthSessionId(req);
+  if (!id) return undefined;
+  if (!oauthSessions[id]) {
+    const fromDb = await loadSessionFromDb(id);
+    if (fromDb) oauthSessions[id] = fromDb as OAuthSession;
   }
-  return out;
+  return id;
 }
 
-export function resolveSessionId(req: Request): string | undefined {
-  const cookies = parseCookies(req);
-  const candidates = [
-    cookies[COOKIE_NAME],
-    req.headers['x-solvamos-session'] as string | undefined,
-    typeof req.query.session === 'string' ? req.query.session : undefined,
-  ].filter((v): v is string => !!v && v.trim().length > 0);
-
-  for (const id of candidates) {
-    const s = oauthSessions[id];
-    if (s && (s.accessToken || s.refreshToken || s.via === 'adc')) return id;
-  }
-  return candidates[0];
+export function getSession(sessionId: string) {
+  return oauthSessions[sessionId];
 }
 
-function setSessionCookie(res: Response, sessionId: string) {
-  const secure = config.isProd ? '; Secure' : '';
-  res.append(
-    'Set-Cookie',
-    `${COOKIE_NAME}=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MAX_AGE_SEC}${secure}`
-  );
+export async function destroySession(sessionId: string) {
+  delete oauthSessions[sessionId];
+  saveSessions();
+  await revokeSession(sessionId);
 }
 
-function clearSessionCookie(res: Response) {
-  const secure = config.isProd ? '; Secure' : '';
-  res.append(
-    'Set-Cookie',
-    `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`
-  );
-}
-
-function noStore(res: Response) {
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-  res.setHeader('Pragma', 'no-cache');
-}
-
-function emailToTenantId(email: string): string {
-  const local = email.split('@')[0] || 'user';
-  return local
-    .toLowerCase()
-    .replace(/[^a-z0-9-]/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 20) || 'user';
-}
-
-async function ensureTenantForUser(email: string, displayName?: string): Promise<string> {
-  const tenantId = emailToTenantId(email);
-  const existing = getTenant(tenantId);
-  if (existing) return tenantId;
-
-  try {
-    await provisionCustomerProject({
-      tenantId,
-      displayName: displayName || email,
-      tier: 'starter',
-    });
-  } catch (err) {
-    console.warn('[oauth] tenant provision failed, registering stub', err);
-    upsertTenant({
-      tenantId,
-      displayName: displayName || email,
-      projectId: config.gcpProject || `shared-${tenantId}`,
-      tier: 'starter',
-      status: 'active',
-      tenancyMode: 'shared',
-      sharedProject: true,
-      createdAt: new Date().toISOString(),
-    });
-  }
-  return tenantId;
+function cacheSession(sid: string, session: OAuthSession) {
+  oauthSessions[sid] = session;
+  saveSessions();
 }
 
 export function getAuthUrl(state: string): string {
@@ -190,112 +137,346 @@ export function getAuthUrl(state: string): string {
   });
 }
 
-export async function handleOAuthCallback(code: string, sessionId: string) {
+async function exchangeCode(code: string) {
   const client = oauthClient();
   const { tokens } = await client.getToken(code);
   client.setCredentials(tokens);
-
   const oauth2 = google.oauth2({ version: 'v2', auth: client });
   const me = await oauth2.userinfo.get();
-  const email = me.data.email || undefined;
-  const name = me.data.name || undefined;
-  const picture = me.data.picture || undefined;
-
-  let tenantId: string | undefined;
-  if (email) {
-    tenantId = await ensureTenantForUser(email, name || email);
-  }
-
-  oauthSessions[sessionId] = {
-    refreshToken: tokens.refresh_token || oauthSessions[sessionId]?.refreshToken,
-    accessToken: tokens.access_token || undefined,
-    email,
-    name,
-    picture,
-    expiry: tokens.expiry_date || undefined,
-    via: 'oauth',
-    tenantId,
-    createdAt: oauthSessions[sessionId]?.createdAt || new Date().toISOString(),
-  };
-  saveSessions();
-
-  return oauthSessions[sessionId];
-}
-
-export function getSession(sessionId: string) {
-  return oauthSessions[sessionId];
-}
-
-export function destroySession(sessionId: string) {
-  delete oauthSessions[sessionId];
-  saveSessions();
-}
-
-function publicSession(session: OAuthSession | undefined) {
-  if (!session) return null;
-  const connected = !!(session.accessToken || session.refreshToken || session.via === 'adc');
+  const tokenInfo = await client.getTokenInfo(tokens.access_token!).catch(() => null);
   return {
-    connected,
-    email: session.email || null,
-    name: session.name || null,
-    picture: session.picture || null,
-    via: session.via || null,
-    tenantId: session.tenantId || null,
+    tokens,
+    email: normalizeEmail(me.data.email || ''),
+    name: me.data.name || undefined,
+    picture: me.data.picture || undefined,
+    googleSub: (tokenInfo as any)?.sub || me.data.id || undefined,
   };
 }
 
-/** Connect Drive via gcloud ADC (local developer PoC). */
-export async function connectViaAdc(): Promise<OAuthSession> {
-  const auth = new GoogleAuth({
-    scopes: [
-      'https://www.googleapis.com/auth/drive.readonly',
-      'https://www.googleapis.com/auth/userinfo.email',
-      'https://www.googleapis.com/auth/userinfo.profile',
-    ],
+function successRedirect(opts: { email?: string; linked?: boolean; error?: string }) {
+  const url = new URL('/', config.appUrl);
+  if (opts.error) {
+    url.searchParams.set('auth_error', opts.error);
+  } else {
+    url.searchParams.set('logged_in', '1');
+    if (opts.email) url.searchParams.set('email', opts.email);
+    if (opts.linked) url.searchParams.set('google_linked', '1');
+  }
+  return url.pathname + url.search;
+}
+
+function prunePendingStates() {
+  const now = Date.now();
+  for (const [k, v] of Object.entries(pendingStates)) {
+    if (now - v.createdAt > STATE_TTL_MS) delete pendingStates[k];
+  }
+}
+
+async function attachGoogleTokensToSession(
+  sid: string,
+  tokens: {
+    access_token?: string | null;
+    refresh_token?: string | null;
+    expiry_date?: number | null;
+  }
+) {
+  const accessToken = tokens.access_token || undefined;
+  const refreshToken = tokens.refresh_token || undefined;
+  const expiry = tokens.expiry_date || undefined;
+  await prisma.session.update({
+    where: { id: sid },
+    data: {
+      accessToken: accessToken || undefined,
+      refreshToken: refreshToken || undefined,
+      expiry: expiry ? new Date(expiry) : undefined,
+      via: 'oauth',
+    },
   });
-  const client = await auth.getClient();
-  const tokenRes = await client.getAccessToken();
-  const accessToken = typeof tokenRes === 'string' ? tokenRes : tokenRes?.token;
-  if (!accessToken) {
-    throw new Error(
-      'ADC token unavailable. Prefer GOOGLE_CLIENT_ID/SECRET OAuth Web Client.'
-    );
+  const row = await prisma.session.findUnique({ where: { id: sid } });
+  if (row) {
+    cacheSession(sid, {
+      accessToken: row.accessToken || undefined,
+      refreshToken: row.refreshToken || undefined,
+      email: row.email || undefined,
+      name: row.name || undefined,
+      picture: row.picture || undefined,
+      expiry: row.expiry?.getTime(),
+      via: 'oauth',
+      tenantId: row.tenantId || undefined,
+      userId: row.userId || undefined,
+    });
+  }
+}
+
+/** Complete Google OAuth for signup / login / link. */
+export async function completeGoogleOAuth(opts: {
+  code: string;
+  intent: OAuthIntent;
+  linkUserId?: string;
+  req: Request;
+  res: Response;
+  preferredSessionId?: string;
+}): Promise<{ email?: string; linked?: boolean }> {
+  const profile = await exchangeCode(opts.code);
+  if (!profile.email) throw new Error('Google 계정에서 이메일을 가져오지 못했습니다');
+
+  const meta = clientMeta(opts.req);
+
+  // --- LINK (logged-in user attaches Google) ---
+  if (opts.intent === 'link') {
+    if (!opts.linkUserId) throw new Error('연동할 로그인 세션이 없습니다');
+    const user = await prisma.user.findUnique({ where: { id: opts.linkUserId } });
+    if (!user) throw new Error('사용자를 찾을 수 없습니다');
+
+    if (profile.googleSub) {
+      const taken = await prisma.user.findFirst({
+        where: { googleSub: profile.googleSub, NOT: { id: user.id } },
+      });
+      if (taken) throw new Error('이 Google 계정은 다른 SolVamos 계정에 이미 연동되어 있습니다');
+    }
+    if (user.email !== profile.email) {
+      const emailTaken = await prisma.user.findFirst({
+        where: { email: profile.email, NOT: { id: user.id } },
+      });
+      if (emailTaken) {
+        throw new Error('Google 이메일이 다른 계정과 충돌합니다. 같은 이메일로 가입했는지 확인하세요.');
+      }
+    }
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        googleSub: profile.googleSub || user.googleSub,
+        picture: profile.picture || user.picture,
+        name: user.name || profile.name,
+        emailVerifiedAt: new Date(),
+      },
+    });
+
+    // Prefer existing session from cookies; else create
+    let sid = await resolveAuthSessionId(opts.req);
+    if (!sid || !(await prisma.session.findUnique({ where: { id: sid } }))?.userId) {
+      sid = await createSessionRow({
+        userId: user.id,
+        email: user.email,
+        name: user.name,
+        picture: profile.picture || user.picture,
+        tenantId: user.primaryTenantId,
+        via: 'link',
+        accessToken: profile.tokens.access_token || undefined,
+        refreshToken: profile.tokens.refresh_token || undefined,
+        expiry: profile.tokens.expiry_date || undefined,
+        sessionId: opts.preferredSessionId,
+        ...meta,
+      });
+    } else {
+      await attachGoogleTokensToSession(sid, profile.tokens);
+    }
+
+    await issueSessionCookies(opts.res, {
+      sid,
+      userId: user.id,
+      email: user.email,
+      tenantId: user.primaryTenantId,
+    });
+    await attachGoogleTokensToSession(sid, profile.tokens);
+    return { email: user.email, linked: true };
   }
 
-  let email: string | undefined;
+  // --- SIGNUP ---
+  if (opts.intent === 'signup') {
+    let user = await prisma.user.findUnique({ where: { email: profile.email } });
+    if (user?.passwordHash && !user.googleSub) {
+      throw new Error(
+        '이미 이메일로 가입된 계정입니다. 로그인 후 마이페이지에서 Google을 연동하세요.'
+      );
+    }
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          email: profile.email,
+          name: profile.name || profile.email.split('@')[0],
+          picture: profile.picture,
+          googleSub: profile.googleSub,
+          emailVerifiedAt: new Date(),
+        },
+      });
+      await provisionTenantForNewUser({ userId: user.id });
+    } else {
+      await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          googleSub: profile.googleSub || user.googleSub,
+          picture: profile.picture || user.picture,
+          emailVerifiedAt: user.emailVerifiedAt || new Date(),
+        },
+      });
+      if (!user.primaryTenantId) await provisionTenantForNewUser({ userId: user.id });
+    }
+
+    const fresh = await prisma.user.findUniqueOrThrow({ where: { id: user.id } });
+    const sid = await createSessionRow({
+      userId: fresh.id,
+      email: fresh.email,
+      name: fresh.name,
+      picture: fresh.picture,
+      tenantId: fresh.primaryTenantId,
+      via: 'oauth',
+      accessToken: profile.tokens.access_token || undefined,
+      refreshToken: profile.tokens.refresh_token || undefined,
+      expiry: profile.tokens.expiry_date || undefined,
+      sessionId: opts.preferredSessionId,
+      ...meta,
+    });
+    cacheSession(sid, {
+      accessToken: profile.tokens.access_token || undefined,
+      refreshToken: profile.tokens.refresh_token || undefined,
+      email: fresh.email,
+      name: fresh.name || undefined,
+      picture: fresh.picture || undefined,
+      expiry: profile.tokens.expiry_date || undefined,
+      via: 'oauth',
+      tenantId: fresh.primaryTenantId || undefined,
+      userId: fresh.id,
+    });
+    await issueSessionCookies(opts.res, {
+      sid,
+      userId: fresh.id,
+      email: fresh.email,
+      tenantId: fresh.primaryTenantId,
+    });
+    return { email: fresh.email };
+  }
+
+  // --- LOGIN (default) ---
+  let user =
+    (profile.googleSub
+      ? await prisma.user.findUnique({ where: { googleSub: profile.googleSub } })
+      : null) || (await prisma.user.findUnique({ where: { email: profile.email } }));
+
+  if (!user) {
+    throw new Error('가입되지 않은 Google 계정입니다. 회원가입을 먼저 진행하세요.');
+  }
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      googleSub: profile.googleSub || user.googleSub,
+      picture: profile.picture || user.picture,
+      name: user.name || profile.name,
+      emailVerifiedAt: user.emailVerifiedAt || new Date(),
+    },
+  });
+  if (!user.primaryTenantId) {
+    await provisionTenantForNewUser({ userId: user.id });
+    user = await prisma.user.findUniqueOrThrow({ where: { id: user.id } });
+  }
+
+  const sid = await createSessionRow({
+    userId: user.id,
+    email: user.email,
+    name: user.name,
+    picture: user.picture,
+    tenantId: user.primaryTenantId,
+    via: 'oauth',
+    accessToken: profile.tokens.access_token || undefined,
+    refreshToken: profile.tokens.refresh_token || undefined,
+    expiry: profile.tokens.expiry_date || undefined,
+    sessionId: opts.preferredSessionId,
+    ...meta,
+  });
+  cacheSession(sid, {
+    accessToken: profile.tokens.access_token || undefined,
+    refreshToken: profile.tokens.refresh_token || undefined,
+    email: user.email,
+    name: user.name || undefined,
+    picture: user.picture || undefined,
+    expiry: profile.tokens.expiry_date || undefined,
+    via: 'oauth',
+    tenantId: user.primaryTenantId || undefined,
+    userId: user.id,
+  });
+  await issueSessionCookies(opts.res, {
+    sid,
+    userId: user.id,
+    email: user.email,
+    tenantId: user.primaryTenantId,
+  });
+  return { email: user.email };
+}
+
+export async function connectViaAdc(): Promise<OAuthSession> {
+  const auth = new GoogleAuth({ scopes: SCOPES });
+  const client = await auth.getClient();
+  const accessToken = (await client.getAccessToken()).token || undefined;
+  let email = process.env.GOOGLE_ADC_EMAIL || 'adc-local@gcloud';
   let name: string | undefined;
   let picture: string | undefined;
   try {
     const oauth2 = google.oauth2({ version: 'v2', auth: client as any });
     const me = await oauth2.userinfo.get();
-    email = me.data.email || undefined;
+    email = normalizeEmail(me.data.email || email);
     name = me.data.name || undefined;
     picture = me.data.picture || undefined;
   } catch {
-    email = process.env.GOOGLE_ADC_EMAIL || 'adc-local@gcloud';
+    /* keep defaults */
   }
 
-  const tenantId = email ? await ensureTenantForUser(email, name || email) : undefined;
-
-  oauthSessions[ADC_SESSION_ID] = {
+  await ensureSharedCustomerTenant();
+  let user = await prisma.user.findUnique({ where: { email } });
+  if (!user) {
+    user = await prisma.user.create({
+      data: { email, name: name || email, picture, emailVerifiedAt: new Date() },
+    });
+    await provisionTenantForNewUser({ userId: user.id });
+  }
+  const fresh = await prisma.user.findUniqueOrThrow({ where: { id: user.id } });
+  const sid = ADC_SESSION_ID;
+  await prisma.session.upsert({
+    where: { id: sid },
+    create: {
+      id: sid,
+      userId: fresh.id,
+      email: fresh.email,
+      name: fresh.name,
+      picture: fresh.picture,
+      accessToken,
+      via: 'adc',
+      expiry: new Date(Date.now() + 45 * 60 * 1000),
+      tenantId: fresh.primaryTenantId,
+    },
+    update: {
+      accessToken,
+      via: 'adc',
+      expiry: new Date(Date.now() + 45 * 60 * 1000),
+      tenantId: fresh.primaryTenantId,
+    },
+  });
+  const session: OAuthSession = {
     accessToken,
-    email,
-    name,
-    picture,
+    email: fresh.email,
+    name: fresh.name || undefined,
+    picture: fresh.picture || undefined,
     via: 'adc',
     expiry: Date.now() + 45 * 60 * 1000,
-    tenantId,
+    tenantId: fresh.primaryTenantId || undefined,
+    userId: fresh.id,
     createdAt: new Date().toISOString(),
   };
-  saveSessions();
-  return oauthSessions[ADC_SESSION_ID];
+  cacheSession(sid, session);
+  return session;
 }
 
-async function authedDrive(sessionId: string) {
-  const session = oauthSessions[sessionId];
+export async function authedDrive(sessionId: string) {
+  let session = oauthSessions[sessionId];
   if (!session) {
-    throw new Error('Not authenticated with Google');
+    const fromDb = await loadSessionFromDb(sessionId);
+    if (fromDb) {
+      oauthSessions[sessionId] = fromDb as OAuthSession;
+      session = oauthSessions[sessionId];
+    }
   }
+  if (!session) throw new Error('Not authenticated with Google');
 
   if (session.via === 'adc' || sessionId === ADC_SESSION_ID) {
     const auth = new GoogleAuth({
@@ -306,7 +487,7 @@ async function authedDrive(sessionId: string) {
   }
 
   if (!session.refreshToken && !session.accessToken) {
-    throw new Error('Not authenticated with Google');
+    throw new Error('Google Drive가 연동되지 않았습니다. 마이페이지에서 Google을 연결하세요.');
   }
   const client = oauthClient();
   client.setCredentials({
@@ -314,14 +495,22 @@ async function authedDrive(sessionId: string) {
     access_token: session.accessToken,
     expiry_date: session.expiry,
   });
-
   client.on('tokens', (tokens) => {
-    if (tokens.access_token) session.accessToken = tokens.access_token;
-    if (tokens.refresh_token) session.refreshToken = tokens.refresh_token;
-    if (tokens.expiry_date) session.expiry = tokens.expiry_date;
+    if (tokens.access_token) session!.accessToken = tokens.access_token;
+    if (tokens.refresh_token) session!.refreshToken = tokens.refresh_token;
+    if (tokens.expiry_date) session!.expiry = tokens.expiry_date;
     saveSessions();
+    void prisma.session
+      .update({
+        where: { id: sessionId },
+        data: {
+          accessToken: session!.accessToken || null,
+          refreshToken: session!.refreshToken || null,
+          expiry: session!.expiry ? new Date(session!.expiry) : null,
+        },
+      })
+      .catch(() => undefined);
   });
-
   return google.drive({ version: 'v3', auth: client });
 }
 
@@ -357,97 +546,87 @@ export async function listDriveChildren(
   }));
 }
 
-/** @deprecated use listDriveChildren */
 export async function listDriveFolders(sessionId: string, parentId = 'root') {
   return listDriveChildren(sessionId, parentId, { foldersOnly: true });
 }
 
-function successRedirect(sessionId: string, email?: string) {
-  const override = process.env.OAUTH_SUCCESS_REDIRECT?.trim();
-  if (override && override !== '/' && !override.startsWith('/?')) {
-    const url = new URL(override, config.appUrl);
-    url.searchParams.set('logged_in', '1');
-    url.searchParams.set('session', sessionId);
-    if (email) url.searchParams.set('email', email);
-    return url.pathname + url.search;
-  }
-  return `/?logged_in=1&session=${encodeURIComponent(sessionId)}${
-    email ? `&email=${encodeURIComponent(email)}` : ''
-  }`;
-}
-
-function prunePendingStates() {
-  const now = Date.now();
-  for (const [k, v] of Object.entries(pendingStates)) {
-    if (now - v.createdAt > STATE_TTL_MS) delete pendingStates[k];
-  }
-}
-
-/** Optional middleware: require Google session for mutating studio APIs. */
-export function requireGoogleSession(req: Request, res: Response, next: NextFunction) {
-  if (!isOAuthClientConfigured() && process.env.REQUIRE_GOOGLE_LOGIN !== 'true') {
-    next();
+/** Soft: logged-in user enough for Studio APIs; Drive still needs Google tokens. */
+export async function requireGoogleSession(req: Request, res: Response, next: NextFunction) {
+  const me = await getMeFromRequest(req);
+  if (!me.connected) {
+    res.status(401).json({ status: 'error', message: '로그인이 필요합니다' });
     return;
   }
-  const sid = resolveSessionId(req);
-  const session = sid ? getSession(sid) : undefined;
-  if (!session || !(session.accessToken || session.refreshToken || session.via === 'adc')) {
-    res.status(401).json({ status: 'error', message: 'Google login required' });
-    return;
-  }
-  (req as any).solvamosSessionId = sid;
-  (req as any).solvamosUser = publicSession(session);
+  (req as any).solvamosSessionId = me.sessionId;
+  (req as any).solvamosUser = me.user;
   next();
 }
 
 export function registerDriveAuthRoutes(app: import('express').Express) {
   app.get('/api/auth/google', async (req: Request, res: Response) => {
     try {
-      if (isOAuthClientConfigured()) {
-        prunePendingStates();
-        const sessionId = `sess_${crypto.randomBytes(16).toString('hex')}`;
-        const state = crypto.randomBytes(24).toString('hex');
-        pendingStates[state] = { sessionId, createdAt: Date.now() };
-        const url = getAuthUrl(state);
-        res.json({
-          status: 'success',
-          authUrl: url,
-          sessionId,
-          mode: 'oauth',
-          message: 'Redirect browser to authUrl to complete Google SSO',
+      const intentRaw = String(req.query.intent || 'login').toLowerCase();
+      const intent: OAuthIntent =
+        intentRaw === 'signup' || intentRaw === 'link' ? intentRaw : 'login';
+
+      if (!isOAuthClientConfigured()) {
+        if (allowAdcDrive() && intent !== 'link') {
+          const session = await connectViaAdc();
+          if (session.userId) {
+            await setAuthCookies(res, {
+              sid: ADC_SESSION_ID,
+              uid: session.userId,
+              email: session.email,
+              tenantId: session.tenantId,
+            });
+          }
+          res.json({
+            status: 'success',
+            mode: 'adc',
+            sessionId: ADC_SESSION_ID,
+            authUrl: null,
+            user: {
+              email: session.email,
+              name: session.name,
+              tenantId: session.tenantId,
+              connected: true,
+            },
+          });
+          return;
+        }
+        res.status(503).json({
+          status: 'error',
+          message: 'GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET not configured',
         });
         return;
       }
 
-      if (allowAdcDrive()) {
-        const session = await connectViaAdc();
-        setSessionCookie(res, ADC_SESSION_ID);
-        res.json({
-          status: 'success',
-          mode: 'adc',
-          sessionId: ADC_SESSION_ID,
-          email: session.email,
-          name: session.name,
-          tenantId: session.tenantId,
-          authUrl: null,
-          user: publicSession(session),
-          message:
-            'Connected via ADC (lab only). Set GOOGLE_CLIENT_ID/SECRET for real Google SSO.',
-        });
-        return;
+      prunePendingStates();
+      const sessionId = `sess_${crypto.randomBytes(16).toString('hex')}`;
+      const state = crypto.randomBytes(24).toString('hex');
+      let linkUserId: string | undefined;
+
+      if (intent === 'link') {
+        const me = await getMeFromRequest(req);
+        if (!me.user) {
+          res.status(401).json({ status: 'error', message: 'Google 연동은 로그인 후 가능합니다' });
+          return;
+        }
+        linkUserId = me.user.id;
       }
 
-      res.status(503).json({
-        status: 'error',
-        message: 'GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET not configured',
-        hint: 'GCP Console → APIs & Services → Credentials → OAuth 2.0 Client ID (Web). See docs/DRIVE_OAUTH_SETUP.md',
+      pendingStates[state] = { sessionId, createdAt: Date.now(), intent, linkUserId };
+      const url = getAuthUrl(state);
+      res.json({
+        status: 'success',
+        authUrl: url,
+        sessionId,
+        mode: 'oauth',
+        intent,
+        message: 'Redirect browser to authUrl',
       });
     } catch (err: any) {
-      res.status(503).json({
-        status: 'error',
-        message: err.message,
-        hint: 'Check OAuth consent screen + redirect URI http://localhost:3000/api/auth/google/callback',
-      });
+      res.status(503).json({ status: 'error', message: err.message });
     }
   });
 
@@ -456,123 +635,65 @@ export function registerDriveAuthRoutes(app: import('express').Express) {
       const code = req.query.code as string;
       const state = req.query.state as string;
       const oauthError = req.query.error as string | undefined;
-
       if (oauthError) {
-        res.status(400).send(`OAuth denied: ${oauthError}`);
+        res.redirect(successRedirect({ error: `OAuth denied: ${oauthError}` }));
         return;
       }
       if (!code || !state) {
-        res.status(400).send('Missing code or state');
+        res.redirect(successRedirect({ error: 'Missing code or state' }));
         return;
       }
-
       prunePendingStates();
       const pending = pendingStates[state];
       delete pendingStates[state];
       if (!pending) {
-        res.status(400).send('Invalid or expired OAuth state — start login again');
+        res.redirect(successRedirect({ error: '만료된 로그인 요청입니다. 다시 시도하세요.' }));
         return;
       }
 
-      const session = await handleOAuthCallback(code, pending.sessionId);
-      setSessionCookie(res, pending.sessionId);
-      noStore(res);
-      res.redirect(successRedirect(pending.sessionId, session.email));
+      const result = await completeGoogleOAuth({
+        code,
+        intent: pending.intent,
+        linkUserId: pending.linkUserId,
+        preferredSessionId: pending.sessionId,
+        req,
+        res,
+      });
+      res.redirect(successRedirect(result));
     } catch (err: any) {
       console.error('[oauth] callback', err);
-      res.status(500).send(`OAuth error: ${err.message}`);
+      res.redirect(successRedirect({ error: err.message || 'OAuth error' }));
     }
-  });
-
-  app.get('/api/auth/me', (req: Request, res: Response) => {
-    noStore(res);
-    const sessionId = resolveSessionId(req);
-    if (!sessionId) {
-      res.json({
-        status: 'success',
-        connected: false,
-        oauthConfigured: isOAuthClientConfigured(),
-        user: null,
-      });
-      return;
-    }
-    const session = getSession(sessionId);
-    const user = publicSession(session);
-    if (user?.connected) {
-      setSessionCookie(res, sessionId);
-    }
-    res.json({
-      status: 'success',
-      connected: !!user?.connected,
-      oauthConfigured: isOAuthClientConfigured(),
-      sessionId: user?.connected ? sessionId : null,
-      user,
-      email: user?.email || null,
-      via: user?.via || null,
-      tenantId: user?.tenantId || null,
-    });
-  });
-
-  /** @deprecated prefer /api/auth/me — kept for older UI */
-  app.get('/api/auth/google/session', (req: Request, res: Response) => {
-    noStore(res);
-    const sessionId = resolveSessionId(req);
-    if (!sessionId) {
-      res.status(400).json({ status: 'error', message: 'session required' });
-      return;
-    }
-    const session = getSession(sessionId);
-    const user = publicSession(session);
-    res.json({
-      status: 'success',
-      connected: !!user?.connected,
-      email: user?.email || null,
-      name: user?.name || null,
-      picture: user?.picture || null,
-      via: user?.via || null,
-      tenantId: user?.tenantId || null,
-    });
-  });
-
-  app.post('/api/auth/logout', (req: Request, res: Response) => {
-    noStore(res);
-    const sessionId = resolveSessionId(req);
-    if (sessionId) destroySession(sessionId);
-    clearSessionCookie(res);
-    res.json({ status: 'success', connected: false });
   });
 
   app.get('/api/drive/folders', async (req: Request, res: Response) => {
-    noStore(res);
     try {
-      const sessionId = resolveSessionId(req);
+      const sessionId = await resolveSessionId(req);
       if (!sessionId) {
-        res.status(401).json({ status: 'error', message: 'Google login required' });
+        res.status(401).json({ status: 'error', message: '로그인이 필요합니다' });
         return;
       }
-      const parent = (req.query.parent as string) || 'root';
-      const foldersOnly =
-        req.query.foldersOnly === '1' ||
-        req.query.foldersOnly === 'true' ||
-        req.query.files === '0';
+      const parent = typeof req.query.parent === 'string' ? req.query.parent : 'root';
+      if (parent !== 'root' && !/^[a-zA-Z0-9_-]+$/.test(parent)) {
+        res.status(400).json({ status: 'error', message: 'Invalid parent id' });
+        return;
+      }
+      const foldersOnly = req.query.foldersOnly === 'true' || req.query.foldersOnly === '1';
       const items = await listDriveChildren(sessionId, parent, { foldersOnly });
       res.json({
         status: 'success',
         parent,
-        data: items,
+        items,
         folders: items.filter((i) => i.kind === 'folder'),
-        files: items.filter((i) => i.kind === 'file'),
       });
     } catch (err: any) {
-      const msg = err?.message || String(err);
       const needsApi =
-        /Drive API has not been used|disabled|ACCESS_TOKEN_SCOPE_INSUFFICIENT/i.test(msg);
+        /Drive API has not been used|ACCESS_TOKEN_SCOPE_INSUFFICIENT|insufficient authentication|연동되지/i.test(
+          err.message || ''
+        );
       res.status(needsApi ? 503 : 401).json({
         status: 'error',
-        message: msg,
-        hint: needsApi
-          ? 'Enable drive.googleapis.com on the GCP project, then retry folder refresh (not re-login).'
-          : 'Re-login with Google if the session expired.',
+        message: err.message,
       });
     }
   });

@@ -9,9 +9,10 @@ import { Keypair } from '@solana/web3.js';
 import dotenv from 'dotenv';
 
 import { compileSystemPrompt } from './server/prompt.js';
-import { savePrivateKeyToGCP } from './server/vault.js';
+import { savePrivateKeyToGCP, createAgentVaultKeypair } from './server/vault.js';
 import { verifyPayment } from './server/payment.js';
-import { ensureDriveDataStore } from './server/rag.js';
+import { ensureDriveDataStore, syncLocalCorpusToVertex } from './server/rag.js';
+import { ingestDriveSourceForAgent } from './server/drive-ingest.js';
 import { registerDriveAuthRoutes, isDriveAuthAvailable, isOAuthClientConfigured, requireGoogleSession, resolveSessionId, getSession } from './server/drive-oauth.js';
 import { loadTenants, listTenants, getTenant, upsertTenant } from './server/tenants.js';
 import { provisionCustomerProject, plannedProjectId, buildProvisionPlan, resolveTenancyMode } from './server/provision.js';
@@ -23,22 +24,43 @@ import {
   getAgent,
   putAgent,
   bumpInvoke,
+  deleteAgent,
   type AgentRecord,
 } from './server/agents-store.js';
 import {
   loadPayShCatalog,
   listCatalog,
+  listCatalogForA2A,
   registerAgentOnPayShCatalog,
   getCatalogEntry,
+  getCatalogPublishMode,
+  setCatalogPublishMode,
+  catalogPublishInfo,
 } from './server/paysh-catalog.js';
 import { loadWallets, listWallets, addWallet, setPrimaryWallet, removeWallet, getPrimaryWallet, ownerKeyFromEmail, updateWalletLabel } from './server/wallets.js';
 import { orchestrateA2ATurn } from './server/a2a.js';
+import { connectDb } from './server/db.js';
+import { registerPlatformAuthRoutes } from './server/auth-routes.js';
+import { getMeFromRequest } from './server/platform-auth.js';
+import { sharedTenantId, ensureSharedCustomerTenant } from './server/tenant-seed.js';
 
 dotenv.config();
 assertProductionSafety();
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
+app.disable('x-powered-by');
+
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  if (config.isProd) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  next();
+});
 
 app.use((req, res, next) => {
   const start = Date.now();
@@ -60,16 +82,9 @@ app.use((req, res, next) => {
   next();
 });
 
-loadTenants();
-loadAgents();
 loadPayShCatalog();
 loadWallets();
-// Ensure every ACTIVE agent is discoverable on pay.sh catalog for A2A
-for (const a of listAgents()) {
-  if (a.status !== 'PAUSED') {
-    void registerAgentOnPayShCatalog(a);
-  }
-}
+registerPlatformAuthRoutes(app);
 registerDriveAuthRoutes(app);
 
 /** Cloud Run / GCLB health */
@@ -87,11 +102,17 @@ app.get('/readyz', (_req, res) => {
   });
 });
 
-app.get('/api/status', (req, res) => {
+app.get('/api/status', async (req, res) => {
+  const agents = await listAgents();
+  const tenants = await listTenants();
   res.json({
     product: config.product,
     version: config.version,
     geminiConfigured: !!config.geminiApiKey,
+    vertexProject: config.gcpProject || null,
+    vertexSearchLocation: process.env.VERTEX_SEARCH_LOCATION || 'global',
+    vertexAiLocation: process.env.VERTEX_AI_LOCATION || process.env.GOOGLE_CLOUD_LOCATION || 'us-central1',
+    ragBackends: ['vertex_search', 'drive_local', 'vertex_gemini_adc', 'gemini_api_key'],
     gcpProject: config.gcpProject || null,
     tenantId: config.tenantId || null,
     tier: config.tier,
@@ -120,20 +141,22 @@ app.get('/api/status', (req, res) => {
     paymentModes: paymentNetworkInfo().modes,
     defaultAgentFeeUsdc: config.defaultAgentFeeUsdc,
     apiEndpoint: `${req.protocol}://${req.get('host')}`,
-    totalAgents: listAgents().length,
-    payShCatalogListings: listCatalog({ listedOnly: true }).length,
+    totalAgents: agents.length,
+    payShCatalogListings: listCatalog({ listedOnly: true, scope: 'all' }).length,
+    catalogPublishMode: getCatalogPublishMode(),
+    catalogRemoteConfigured: !!process.env.PAYSH_CATALOG_URL?.trim(),
     a2aEnabled: true,
-    totalTenants: listTenants().length,
+    totalTenants: tenants.length,
   });
 });
 
-app.get('/api/tenants', (_req, res) => {
+app.get('/api/tenants', async (_req, res) => {
   res.json({
     status: 'success',
     tenancyMode: resolveTenancyMode(),
     provisionMode: config.provisionMode,
     sharedProjectId: config.gcpProject || null,
-    data: listTenants(),
+    data: await listTenants(),
   });
 });
 
@@ -151,11 +174,12 @@ app.post('/api/tenants', requireGoogleSession, async (req, res) => {
       res.status(400).json({ status: 'error', message: 'tenantId and displayName required' });
       return;
     }
-    if (getTenant(tenantId) && !byoProjectId) {
+    const existingTenant = await getTenant(tenantId);
+    if (existingTenant && !byoProjectId) {
       res.status(409).json({
         status: 'error',
         message: 'Tenant already exists',
-        tenant: getTenant(tenantId),
+        tenant: existingTenant,
       });
       return;
     }
@@ -192,8 +216,8 @@ app.post('/api/tenants', requireGoogleSession, async (req, res) => {
   }
 });
 
-app.get('/api/tenants/:id', (req, res) => {
-  const t = getTenant(req.params.id);
+app.get('/api/tenants/:id', async (req, res) => {
+  const t = await getTenant(req.params.id);
   if (!t) {
     res.status(404).json({ status: 'error', message: 'Tenant not found' });
     return;
@@ -201,20 +225,20 @@ app.get('/api/tenants/:id', (req, res) => {
   res.json({ status: 'success', tenant: t });
 });
 
-app.patch('/api/tenants/:id', (req, res) => {
-  const existing = getTenant(req.params.id);
+app.patch('/api/tenants/:id', async (req, res) => {
+  const existing = await getTenant(req.params.id);
   if (!existing) {
     res.status(404).json({ status: 'error', message: 'Tenant not found' });
     return;
   }
-  const updated = upsertTenant({ ...existing, ...req.body, tenantId: existing.tenantId });
+  const updated = await upsertTenant({ ...existing, ...req.body, tenantId: existing.tenantId });
   res.json({ status: 'success', tenant: updated });
 });
 
 /** Redeploy / create tenant Cloud Run in shared project (Lab). */
 app.post('/api/tenants/:id/cloud-run', async (req, res) => {
   try {
-    const existing = getTenant(req.params.id);
+    const existing = await getTenant(req.params.id);
     if (!existing) {
       res.status(404).json({ status: 'error', message: 'Tenant not found' });
       return;
@@ -224,7 +248,7 @@ app.post('/api/tenants/:id/cloud-run', async (req, res) => {
       displayName: existing.displayName,
       tier: existing.tier,
     });
-    const updated = upsertTenant({
+    const updated = await upsertTenant({
       ...existing,
       cloudRunUri: cloudRun.uri || existing.cloudRunUri,
       cloudRunServiceName: cloudRun.serviceName,
@@ -245,18 +269,18 @@ app.post('/api/tenants/:id/cloud-run', async (req, res) => {
   }
 });
 
-app.get('/api/agents', (_req, res) => {
-  res.json({ status: 'success', data: listAgents() });
+app.get('/api/agents', async (_req, res) => {
+  res.json({ status: 'success', data: await listAgents() });
 });
 
-function walletOwnerFromReq(req: import('express').Request): string {
-  const sid = resolveSessionId(req);
+async function walletOwnerFromReq(req: import('express').Request): Promise<string> {
+  const sid = await resolveSessionId(req);
   const session = sid ? getSession(sid) : undefined;
   return ownerKeyFromEmail(session?.email);
 }
 
-app.get('/api/wallets', (req, res) => {
-  const owner = walletOwnerFromReq(req);
+app.get('/api/wallets', async (req, res) => {
+  const owner = await walletOwnerFromReq(req);
   const wallets = listWallets(owner);
   res.json({
     status: 'success',
@@ -266,9 +290,9 @@ app.get('/api/wallets', (req, res) => {
   });
 });
 
-app.post('/api/wallets', (req, res) => {
+app.post('/api/wallets', async (req, res) => {
   try {
-    const owner = walletOwnerFromReq(req);
+    const owner = await walletOwnerFromReq(req);
     const { address, label, source, makePrimary } = req.body || {};
     if (!address) {
       res.status(400).json({ status: 'error', message: 'address required' });
@@ -291,9 +315,9 @@ app.post('/api/wallets', (req, res) => {
   }
 });
 
-app.post('/api/wallets/:id/primary', (req, res) => {
+app.post('/api/wallets/:id/primary', async (req, res) => {
   try {
-    const owner = walletOwnerFromReq(req);
+    const owner = await walletOwnerFromReq(req);
     const wallet = setPrimaryWallet(owner, req.params.id);
     res.json({
       status: 'success',
@@ -306,9 +330,9 @@ app.post('/api/wallets/:id/primary', (req, res) => {
   }
 });
 
-app.patch('/api/wallets/:id', (req, res) => {
+app.patch('/api/wallets/:id', async (req, res) => {
   try {
-    const owner = walletOwnerFromReq(req);
+    const owner = await walletOwnerFromReq(req);
     const wallet = updateWalletLabel(owner, req.params.id, String(req.body?.label || ''));
     res.json({ status: 'success', wallet, data: listWallets(owner) });
   } catch (err: any) {
@@ -316,9 +340,9 @@ app.patch('/api/wallets/:id', (req, res) => {
   }
 });
 
-app.delete('/api/wallets/:id', (req, res) => {
+app.delete('/api/wallets/:id', async (req, res) => {
   try {
-    const owner = walletOwnerFromReq(req);
+    const owner = await walletOwnerFromReq(req);
     const data = removeWallet(owner, req.params.id);
     res.json({
       status: 'success',
@@ -331,6 +355,7 @@ app.delete('/api/wallets/:id', (req, res) => {
 });
 
 app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
+  let createdAgentId: string | null = null;
   try {
     const {
       role,
@@ -342,8 +367,6 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       agentName,
       perCallPriceUsdc,
       fee,
-      recipientWallet,
-      usePrimaryWallet,
     } = req.body;
 
     if (!role || !tone || !securityLevel) {
@@ -354,63 +377,165 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       return;
     }
 
-    const sid = resolveSessionId(req);
+    const me = await getMeFromRequest(req);
+    const sid = me.sessionId || (await resolveSessionId(req));
     const authSession = sid ? getSession(sid) : undefined;
-    const tenantId = bodyTenantId || authSession?.tenantId || config.tenantId || undefined;
-    const owner = ownerKeyFromEmail(authSession?.email);
-    const primary = getPrimaryWallet(owner);
 
-    let publicKey: string;
-    let secretKeyBase64: string | undefined;
-    let vaultMode: 'user_wallet' | 'default_vault' | 'generated' = 'default_vault';
+    await ensureSharedCustomerTenant();
+    const tenantId =
+      me.user?.tenantId ||
+      bodyTenantId ||
+      authSession?.tenantId ||
+      sharedTenantId() ||
+      config.tenantId ||
+      undefined;
 
-    const explicit =
-      typeof recipientWallet === 'string' && recipientWallet.trim()
-        ? String(recipientWallet).trim()
-        : null;
-    // Only use operator primary wallet when explicitly requested
-    const useUser =
-      usePrimaryWallet === true && !!primary?.address && !explicit;
+    const ownerEmail = me.user?.email || authSession?.email;
+    const owner = ownerKeyFromEmail(ownerEmail);
+    // User wallet = operator only (funding / display). Never agent vault.
+    const userPrimary = getPrimaryWallet(owner);
 
-    if (explicit) {
-      publicKey = explicit;
-      vaultMode = 'user_wallet';
-      secretKeyBase64 = undefined;
-    } else if (useUser) {
-      publicKey = primary!.address;
-      vaultMode = 'user_wallet';
-      secretKeyBase64 = undefined;
-    } else {
-      // A2A agent vault — lab default pubkey (not the operator "connected wallet")
-      publicKey = config.defaultAgentVaultPubkey;
-      vaultMode = 'default_vault';
-      secretKeyBase64 = undefined;
+    if (googleDriveFolderId && !sid) {
+      res.status(401).json({
+        status: 'error',
+        message: 'Drive 연동이 필요합니다. 마이페이지에서 Google을 연결하세요.',
+      });
+      return;
     }
 
+    // Agent vault = dedicated keypair per agent (security boundary)
     const agentId = `${role}-${tone}-${Math.random().toString(36).substr(2, 6)}`;
+    createdAgentId = agentId;
+    const vaultKeys = createAgentVaultKeypair();
+    const publicKey = vaultKeys.publicKey;
+    const secretKeyBase64 = vaultKeys.secretKeyBase64;
+    const vaultMode = 'agent_vault' as const;
+
     const systemPrompt = compileSystemPrompt(role, tone, securityLevel, customRole);
 
-    let vertexDataStoreId: string | undefined;
-    let indexingStatus: AgentRecord['status'] = 'ACTIVE';
-    if (googleDriveFolderId) {
-      const ds = await ensureDriveDataStore({
-        displayName: agentName || agentId,
-        driveFolderId: googleDriveFolderId,
-      });
-      vertexDataStoreId = ds.dataStoreId;
-      indexingStatus = ds.status === 'pending' ? 'INDEXING' : 'ACTIVE';
-    }
-
-    const gcpStorage = secretKeyBase64
-      ? await savePrivateKeyToGCP(agentId, secretKeyBase64)
-      : { path: `user-wallet:${publicKey}`, mock: false as boolean };
-
-    const parsedFee =
+    const parsedFeeEarly =
       typeof fee === 'number'
         ? fee
         : typeof perCallPriceUsdc === 'number'
           ? perCallPriceUsdc
-          : config.defaultAgentFeeUsdc;
+          : 0;
+
+    const pipeline: { step: string; status: 'ok' | 'skip' | 'warn'; detail: string }[] = [];
+    pipeline.push({
+      step: 'tenant_bind',
+      status: 'ok',
+      detail: `tenant=${tenantId} project=${config.gcpProject || 'n/a'} (shared GCP as customer)`,
+    });
+
+    // Persist vault before DB row so create never leaves CREATING orphans on vault failure
+    const gcpStorage = await savePrivateKeyToGCP(agentId, secretKeyBase64);
+    pipeline.push({
+      step: 'agent_vault',
+      status: gcpStorage.mock ? 'warn' : 'ok',
+      detail: `Dedicated agent vault ${publicKey.slice(0, 4)}…${publicKey.slice(-4)} (separate from user wallet ${
+        userPrimary?.address ? userPrimary.address.slice(0, 4) + '…' : 'none'
+      })`,
+    });
+    pipeline.push({
+      step: 'vault_persist',
+      status: gcpStorage.mock ? 'warn' : 'ok',
+      detail: gcpStorage.mock
+        ? `Dev local vault fallback: ${gcpStorage.path}`
+        : `Secret Manager: ${gcpStorage.path}`,
+    });
+
+    // Persist agent row early so RagDocument FK / catalog can attach
+    await putAgent({
+      id: agentId,
+      tenantId,
+      agentName,
+      role,
+      customRole,
+      tone,
+      securityLevel,
+      publicKey,
+      systemPrompt,
+      created: new Date().toISOString(),
+      invokeCount: 0,
+      googleDriveFolderId: googleDriveFolderId ? String(googleDriveFolderId) : undefined,
+      secretManagerPath: gcpStorage.path,
+      status: 'CREATING',
+      fee: parsedFeeEarly,
+      perCallPriceUsdc: parsedFeeEarly,
+    });
+    pipeline.push({ step: 'agent_record_draft', status: 'ok', detail: agentId });
+
+    let vertexDataStoreId: string | undefined;
+    let indexingStatus: AgentRecord['status'] = 'ACTIVE';
+    let driveIngest: { docs: number; message?: string } | null = null;
+
+    if (googleDriveFolderId) {
+      const ds = await ensureDriveDataStore({
+        displayName: agentName || agentId,
+        driveFolderId: String(googleDriveFolderId),
+      });
+      vertexDataStoreId = ds.dataStoreId;
+      indexingStatus =
+        ds.status === 'pending' || ds.status === 'error' ? 'INDEXING' : 'ACTIVE';
+      pipeline.push({
+        step: 'vertex_datastore',
+        status: ds.status === 'created' || ds.status === 'existing' ? 'ok' : 'warn',
+        detail: `${ds.message || ds.dataStoreId}${
+          (ds as any).engineId ? ` engine=${(ds as any).engineId}` : ''
+        }`,
+      });
+
+      try {
+        const corpus = await ingestDriveSourceForAgent({
+          sessionId: sid!,
+          agentId,
+          driveSourceId: String(googleDriveFolderId),
+        });
+        driveIngest = { docs: corpus.docs.length };
+        indexingStatus = corpus.docs.length > 0 ? 'ACTIVE' : indexingStatus;
+        pipeline.push({
+          step: 'drive_rag_ingest',
+          status: corpus.docs.length > 0 ? 'ok' : 'warn',
+          detail:
+            corpus.docs.length > 0
+              ? `Ingested ${corpus.docs.length} Drive doc(s)`
+              : 'No text-extractable files (Docs/Sheets/txt/md/json). PDF는 현재 스킵됩니다.',
+        });
+
+        if (vertexDataStoreId && corpus.docs.length > 0 && ds.status !== 'error') {
+          try {
+            const sync = await syncLocalCorpusToVertex(agentId, vertexDataStoreId);
+            pipeline.push({
+              step: 'vertex_import',
+              status: sync.imported > 0 ? 'ok' : 'warn',
+              detail: sync.message,
+            });
+            if (sync.imported > 0) indexingStatus = 'ACTIVE';
+          } catch (err: any) {
+            pipeline.push({
+              step: 'vertex_import',
+              status: 'warn',
+              detail: err?.message || 'Vertex import failed — local corpus still usable',
+            });
+          }
+        }
+      } catch (err: any) {
+        pipeline.push({
+          step: 'drive_rag_ingest',
+          status: 'warn',
+          detail: err?.message || 'Drive ingest failed — Google 연동/권한을 확인하세요',
+        });
+        indexingStatus = 'INDEXING';
+      }
+    } else {
+      pipeline.push({
+        step: 'drive_rag',
+        status: 'skip',
+        detail: 'No Drive folder/file selected — answers without RAG grounding',
+      });
+    }
+
+    const parsedFee = parsedFeeEarly;
 
     const newAgent: AgentRecord = {
       id: agentId,
@@ -424,7 +549,7 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       systemPrompt,
       created: new Date().toISOString(),
       invokeCount: 0,
-      googleDriveFolderId,
+      googleDriveFolderId: googleDriveFolderId ? String(googleDriveFolderId) : undefined,
       vertexDataStoreId,
       secretManagerPath: gcpStorage.path,
       status: indexingStatus,
@@ -432,9 +557,10 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       perCallPriceUsdc: parsedFee,
     };
 
-    putAgent(newAgent);
+    await putAgent(newAgent);
+    pipeline.push({ step: 'agent_record', status: 'ok', detail: agentId });
 
-    const tenant = tenantId ? getTenant(String(tenantId)) : undefined;
+    const tenant = tenantId ? await getTenant(String(tenantId)) : undefined;
     const runtimeBase =
       (tenant?.cloudRunUri && String(tenant.cloudRunUri).replace(/\/$/, '')) ||
       `${req.protocol}://${req.get('host')}`;
@@ -443,23 +569,165 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       baseUrl: runtimeBase,
       description: req.body.description,
     });
+    pipeline.push({
+      step: 'paysh_catalog',
+      status: 'ok',
+      detail: listing.catalogId || listing.agentId,
+    });
 
     res.status(201).json({
       status: 'success',
       agentId,
       publicKey,
+      agentVaultPubkey: publicKey,
       vaultMode,
+      userWallet: userPrimary
+        ? { address: userPrimary.address, label: userPrimary.label, role: 'operator_only' }
+        : null,
+      walletsSeparated: true,
+      note:
+        'Agent vault ≠ user wallet. Invoke/A2A paywall recipient is agentVaultPubkey only.',
       gcpVaultPath: gcpStorage.path,
       isGcpMocked: gcpStorage.mock,
       vertexDataStoreId,
+      driveIngest,
+      pipeline,
       agent: newAgent,
       payShCatalog: listing,
       runtimeBase,
       cloudRunUri: tenant?.cloudRunUri || null,
-      message:
-        vaultMode === 'user_wallet'
-          ? `Agent created — payouts go to your linked wallet ${publicKey.slice(0, 4)}…`
-          : `Agent created — A2A vault ${publicKey.slice(0, 4)}…${publicKey.slice(-4)} (default)`,
+      message: `Agent vault created ${publicKey.slice(0, 4)}…${publicKey.slice(-4)} (keys in Secret Manager${
+        gcpStorage.mock ? ' / local fallback' : ''
+      }). User wallet is separate.`,
+    });
+  } catch (err: any) {
+    if (createdAgentId) {
+      await deleteAgent(createdAgentId);
+    }
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
+  try {
+    const existing = await getAgent(req.params.id);
+    if (!existing) {
+      res.status(404).json({ status: 'error', message: 'Agent not found' });
+      return;
+    }
+
+    const {
+      role,
+      tone,
+      securityLevel,
+      customRole,
+      agentName,
+      fee,
+      perCallPriceUsdc,
+      status,
+      googleDriveFolderId,
+      description,
+    } = req.body || {};
+
+    const nextRole = role || existing.role;
+    const nextTone = tone || existing.tone;
+    const nextSecurity = securityLevel || existing.securityLevel;
+    const nextCustom =
+      customRole !== undefined ? customRole || undefined : existing.customRole;
+    const nextName = agentName !== undefined ? agentName : existing.agentName;
+    const nextFee =
+      typeof fee === 'number'
+        ? fee
+        : typeof perCallPriceUsdc === 'number'
+          ? perCallPriceUsdc
+          : existing.fee ?? existing.perCallPriceUsdc ?? 0;
+    const nextStatus =
+      status === 'PAUSED' || status === 'inactive' || status === 'paused'
+        ? 'PAUSED'
+        : status === 'ACTIVE' || status === 'active'
+          ? 'ACTIVE'
+          : existing.status || 'ACTIVE';
+
+    const folderChanged =
+      googleDriveFolderId !== undefined &&
+      String(googleDriveFolderId || '') !== String(existing.googleDriveFolderId || '');
+
+    let vertexDataStoreId = existing.vertexDataStoreId;
+    let driveIngest: { docs: number } | null = null;
+    let indexingStatus = nextStatus;
+
+    if (folderChanged && googleDriveFolderId) {
+      const me = await getMeFromRequest(req);
+      const sid = me.sessionId || (await resolveSessionId(req));
+      if (!sid) {
+        res.status(401).json({
+          status: 'error',
+          message: 'Drive 연동이 필요합니다. 마이페이지에서 Google을 연결하세요.',
+        });
+        return;
+      }
+      const ds = await ensureDriveDataStore({
+        displayName: nextName || existing.id,
+        driveFolderId: String(googleDriveFolderId),
+      });
+      vertexDataStoreId = ds.dataStoreId;
+      try {
+        const corpus = await ingestDriveSourceForAgent({
+          sessionId: sid,
+          agentId: existing.id,
+          driveSourceId: String(googleDriveFolderId),
+        });
+        driveIngest = { docs: corpus.docs.length };
+        if (vertexDataStoreId && corpus.docs.length > 0 && ds.status !== 'error') {
+          await syncLocalCorpusToVertex(existing.id, vertexDataStoreId).catch(() => null);
+        }
+        indexingStatus = corpus.docs.length > 0 ? 'ACTIVE' : 'INDEXING';
+      } catch {
+        indexingStatus = 'INDEXING';
+      }
+    }
+
+    const updated: AgentRecord = {
+      ...existing,
+      agentName: nextName,
+      role: nextRole,
+      customRole: nextCustom,
+      tone: nextTone,
+      securityLevel: nextSecurity,
+      systemPrompt: compileSystemPrompt(nextRole, nextTone, nextSecurity, nextCustom),
+      fee: nextFee,
+      perCallPriceUsdc: nextFee,
+      status: indexingStatus,
+      googleDriveFolderId:
+        googleDriveFolderId !== undefined
+          ? googleDriveFolderId
+            ? String(googleDriveFolderId)
+            : undefined
+          : existing.googleDriveFolderId,
+      vertexDataStoreId,
+      // Vault pubkey never changes on edit
+      publicKey: existing.publicKey,
+      secretManagerPath: existing.secretManagerPath,
+    };
+
+    await putAgent(updated);
+
+    const tenant = updated.tenantId ? await getTenant(String(updated.tenantId)) : undefined;
+    const runtimeBase =
+      (tenant?.cloudRunUri && String(tenant.cloudRunUri).replace(/\/$/, '')) ||
+      `${req.protocol}://${req.get('host')}`;
+    const listing = await registerAgentOnPayShCatalog(updated, {
+      baseUrl: runtimeBase,
+      description,
+    });
+
+    res.json({
+      status: 'success',
+      agent: updated,
+      driveIngest,
+      payShCatalog: listing,
+      updated: true,
+      message: 'Agent updated (same id/vault; catalog metadata synced)',
     });
   } catch (err: any) {
     res.status(500).json({ status: 'error', message: err.message });
@@ -477,8 +745,8 @@ app.post('/api/agents/preview-prompt', (req, res) => {
   res.json({ systemPrompt });
 });
 
-app.get('/api/agents/:id/balance', (req, res) => {
-  const agent = getAgent(req.params.id);
+app.get('/api/agents/:id/balance', async (req, res) => {
+  const agent = await getAgent(req.params.id);
   if (!agent) {
     res.status(404).json({ status: 'error', message: 'Agent not found' });
     return;
@@ -496,13 +764,38 @@ app.get('/api/agents/:id/balance', (req, res) => {
 });
 
 /** pay.sh catalog — discover agents other A2A callers can pay-invoke */
-app.get('/api/paysh/catalog', (_req, res) => {
+app.get('/api/paysh/catalog', (req, res) => {
+  const scopeRaw = String(req.query.scope || 'all').toLowerCase();
+  const scope =
+    scopeRaw === 'internal' || scopeRaw === 'main' || scopeRaw === 'all' ? scopeRaw : 'all';
   res.json({
     status: 'success',
     protocol: 'pay.sh / x402',
     network: networkLabel(),
     paymentNetwork: config.paymentNetwork,
-    data: listCatalog({ listedOnly: true }),
+    publishMode: getCatalogPublishMode(),
+    scope,
+    ...catalogPublishInfo(),
+    data: listCatalog({ listedOnly: true, scope }),
+  });
+});
+
+/** Dev: catalog publish target — internal | main | both */
+app.get('/api/paysh/catalog/mode', (_req, res) => {
+  res.json({ status: 'success', ...catalogPublishInfo() });
+});
+
+app.post('/api/paysh/catalog/mode', (req, res) => {
+  const mode = String(req.body?.mode || '').toLowerCase();
+  const result = setCatalogPublishMode(mode);
+  if (!result.ok) {
+    res.status(config.isProd ? 403 : 400).json({ status: 'error', message: result.error });
+    return;
+  }
+  res.json({
+    status: 'success',
+    message: `Catalog publish mode → ${result.mode}`,
+    ...catalogPublishInfo(),
   });
 });
 
@@ -527,18 +820,31 @@ app.post('/api/payment/network', (req, res) => {
     ...paymentNetworkInfo(),
   });
 });
+
 app.post('/api/paysh/catalog/:agentId/register', async (req, res) => {
   try {
-    const agent = getAgent(req.params.agentId);
+    const agent = await getAgent(req.params.agentId);
     if (!agent) {
       res.status(404).json({ status: 'error', message: 'Agent not found' });
       return;
     }
+    const override = req.body?.publishMode
+      ? String(req.body.publishMode).toLowerCase()
+      : undefined;
     const listing = await registerAgentOnPayShCatalog(agent, {
       baseUrl: `${req.protocol}://${req.get('host')}`,
       description: req.body?.description,
+      publishMode:
+        override === 'internal' || override === 'main' || override === 'both'
+          ? override
+          : undefined,
     });
-    res.json({ status: 'success', listing });
+    res.json({
+      status: 'success',
+      listing,
+      publishMode: getCatalogPublishMode(),
+      catalog: catalogPublishInfo(),
+    });
   } catch (err: any) {
     res.status(500).json({ status: 'error', message: err.message });
   }
@@ -547,13 +853,13 @@ app.post('/api/paysh/catalog/:agentId/register', async (req, res) => {
 app.post('/api/agents/:id/invoke', async (req, res) => {
   try {
     const agentId = req.params.id;
-    const { prompt, query, enableA2A } = req.body;
+    const { prompt, query, enableA2A, studioTest } = req.body || {};
     const userPrompt = prompt || query;
     const paymentProof =
       (req.headers['x-payment-proof'] as string) ||
       (req.headers['x-pay-sh-proof'] as string);
 
-    const agent = getAgent(agentId);
+    const agent = await getAgent(agentId);
     if (!agent) {
       res.status(404).json({ status: 'error', message: `Agent with ID ${agentId} not found.` });
       return;
@@ -578,13 +884,20 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
           ? agent.perCallPriceUsdc
           : config.defaultAgentFeeUsdc;
 
+    // Studio sandbox: logged-in operator tests their agent → Vertex/RAG, no human→agent paywall.
+    // External / catalog callers still hit x402 when fee>0.
+    const me = await getMeFromRequest(req);
+    const isStudioOwnerTest =
+      (studioTest === true || req.headers['x-solvamos-studio'] === '1') && me.connected === true;
+
     const runOrchestrated = async (paymentLogs: string[]) => {
       const result = await orchestrateA2ATurn({
         agent,
         userPrompt,
-        enablePeers: enableA2A !== false,
+        // Studio chat: answer via own Vertex/RAG first; peers only if explicitly enabled
+        enablePeers: isStudioOwnerTest ? enableA2A === true : enableA2A !== false,
       });
-      bumpInvoke(agentId);
+      await bumpInvoke(agentId);
       res.json({
         status: 'success',
         answer: result.answer,
@@ -594,15 +907,25 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
         ragMode: result.ragMode,
         paymentLogs,
         network: networkLabel(),
-        feeUsdc: feeAmount,
+        feeUsdc: isStudioOwnerTest ? 0 : feeAmount,
+        paywallSkipped: isStudioOwnerTest,
         payShCatalogId: listing!.catalogId,
+        generation: 'vertex_gemini_rag',
         a2a: {
           catalogUsed: result.catalogUsed,
           planningNote: result.planningNote,
           peerHops: result.peerHops,
+          spendTier: result.spendTier,
         },
       });
     };
+
+    if (isStudioOwnerTest) {
+      await runOrchestrated([
+        `[Studio Test] owner session — paywall skipped, Vertex Gemini + RAG (listed fee=${feeAmount} USDC still applies to external callers)`,
+      ]);
+      return;
+    }
 
     // Free tier — no paywall
     if (feeAmount === 0) {
@@ -648,6 +971,26 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
 });
 
 async function startServer() {
+  if (process.env.DATABASE_URL) {
+    try {
+      await connectDb();
+    } catch (err: any) {
+      console.error('[db] connect failed — sessions will use file cache only', err?.message || err);
+      if (config.isProd) throw err;
+    }
+  } else {
+    console.warn('[db] DATABASE_URL unset — JWT refresh works, but Google tokens won’t survive restarts');
+  }
+
+  await loadTenants();
+  await ensureSharedCustomerTenant();
+  await loadAgents();
+  for (const a of await listAgents()) {
+    if (a.status !== 'PAUSED') {
+      void registerAgentOnPayShCatalog(a);
+    }
+  }
+
   if (config.nodeEnv !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -668,4 +1011,7 @@ async function startServer() {
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('[boot] fatal', err);
+  process.exit(1);
+});

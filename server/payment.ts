@@ -7,6 +7,8 @@
 
 import { Connection } from '@solana/web3.js';
 import { config } from './config.js';
+import { dataFile, ensureDataDir } from './data-paths.js';
+import fs from 'fs';
 
 export type PaymentVerifyResult = {
   verified: boolean;
@@ -14,6 +16,54 @@ export type PaymentVerifyResult = {
   error?: string;
   network: string;
 };
+
+/** Prevent replay of the same on-chain / sandbox signature. */
+const REPLAY_FILE = dataFile('payment-replay.json');
+const REPLAY_TTL_MS = 7 * 24 * 3600 * 1000;
+let usedProofs: Record<string, number> = {};
+
+function loadReplayCache() {
+  try {
+    if (fs.existsSync(REPLAY_FILE)) {
+      usedProofs = JSON.parse(fs.readFileSync(REPLAY_FILE, 'utf8'));
+    }
+  } catch {
+    usedProofs = {};
+  }
+}
+
+function saveReplayCache() {
+  try {
+    ensureDataDir();
+    const now = Date.now();
+    const pruned: Record<string, number> = {};
+    for (const [k, t] of Object.entries(usedProofs)) {
+      if (now - t < REPLAY_TTL_MS) pruned[k] = t;
+    }
+    usedProofs = pruned;
+    fs.writeFileSync(REPLAY_FILE, JSON.stringify(usedProofs));
+  } catch (err) {
+    console.warn('[payment] replay cache persist failed', err);
+  }
+}
+
+loadReplayCache();
+
+function assertNotReplayed(signature: string, logs: string[]): string | null {
+  const key = signature.trim();
+  if (!key) return 'Empty payment proof';
+  const seen = usedProofs[key];
+  if (seen && Date.now() - seen < REPLAY_TTL_MS) {
+    logs.push(`[Replay] Rejected previously used proof`);
+    return 'Payment proof already used (replay blocked)';
+  }
+  return null;
+}
+
+function markProofUsed(signature: string) {
+  usedProofs[signature.trim()] = Date.now();
+  saveReplayCache();
+}
 
 function isSandboxProof(signature: string): boolean {
   return (
@@ -61,6 +111,11 @@ export async function verifyPayment(
     `[Split] total=${expectedUsdcAmount} USDC → agent ${(agentShare * 100).toFixed(0)}% / platform ${(platformShare * 100).toFixed(0)}%`
   );
 
+  const replayErr = assertNotReplayed(signature, logs);
+  if (replayErr) {
+    return { verified: false, logs, error: replayErr, network };
+  }
+
   // --- Sandbox / mock proofs ---
   if (isSandboxProof(signature)) {
     const sandboxOk = network === 'sandbox' || allowBypass;
@@ -82,6 +137,7 @@ export async function verifyPayment(
           ? `; platform ${expectedCreatorAmount.toFixed(6)} → ${treasury}`
           : ' (no PLATFORM_TREASURY_PUBKEY — agent-only check in live mode)')
     );
+    markProofUsed(signature);
     return { verified: true, logs, network };
   }
 
@@ -127,6 +183,7 @@ export async function verifyPayment(
       // When no treasury configured, require full fee to agent
       if (recipientChange >= expectedUsdcAmount * 0.98) {
         logs.push(`[SUCCESS] USDC payment verified (agent-only, no treasury)`);
+        markProofUsed(signature);
         return { verified: true, logs, network };
       }
       return {
@@ -139,6 +196,7 @@ export async function verifyPayment(
 
     if (recipientChange >= expectedAgentAmount * 0.98 && creatorOk) {
       logs.push(`[SUCCESS] USDC payment + split verified on ${network}`);
+      markProofUsed(signature);
       return { verified: true, logs, network };
     }
 
@@ -152,6 +210,7 @@ export async function verifyPayment(
     logs.push(`[RPC Error] ${err.message}`);
     if (allowBypass) {
       logs.push(`[Bypass] ALLOW_PAYMENT_BYPASS=true — accepting after RPC failure`);
+      markProofUsed(signature);
       return { verified: true, logs, network };
     }
     return {

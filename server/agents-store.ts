@@ -1,10 +1,10 @@
 /**
- * Agent metadata store (JSON file; swap for Firestore in customer project later).
+ * Agent metadata — PostgreSQL (Prisma).
  */
 
-import fs from 'fs';
 import { compileSystemPrompt } from './prompt.js';
-import { dataFile, ensureDataDir } from './data-paths.js';
+import { prisma } from './db.js';
+import type { Agent as DbAgent } from '@prisma/client';
 
 export interface AgentRecord {
   id: string;
@@ -22,66 +22,51 @@ export interface AgentRecord {
   vertexDataStoreId?: string;
   secretManagerPath?: string;
   status?: 'CREATING' | 'INDEXING' | 'ACTIVE' | 'PAUSED' | 'ERROR' | string;
-  /** Per-call fee in USDC (0 = free / no paywall) */
   fee?: number;
   perCallPriceUsdc?: number;
 }
 
-const AGENTS_FILE = dataFile('agents_db.json');
-let agents: Record<string, AgentRecord> = {};
-
-export function loadAgents() {
-  try {
-    if (fs.existsSync(AGENTS_FILE)) {
-      agents = JSON.parse(fs.readFileSync(AGENTS_FILE, 'utf8'));
-      console.log(`Loaded ${Object.keys(agents).length} agents from file.`);
-      ensureAcademicPeerSeed();
-      return;
-    }
-    seedDefaultAgents();
-  } catch (err) {
-    console.error('Error loading agents:', err);
-  }
-}
-
-function ensureAcademicPeerSeed() {
-  if (agents['academic-research-001']) return;
-  if (Object.keys(agents).length === 0) return;
-  agents['academic-research-001'] = {
-    id: 'academic-research-001',
-    agentName: 'Academic Research Peer',
-    role: 'academic',
-    tone: 'academic',
-    securityLevel: 'balanced',
-    publicKey: 'AcadPeer111111111111111111111111111111111111',
-    systemPrompt: compileSystemPrompt('academic', 'academic', 'balanced'),
-    created: new Date().toISOString(),
-    invokeCount: 0,
-    status: 'ACTIVE',
-    fee: 0.002,
-    perCallPriceUsdc: 0.002,
+function toRecord(a: DbAgent): AgentRecord {
+  return {
+    id: a.id,
+    tenantId: a.tenantId || undefined,
+    agentName: a.agentName || undefined,
+    role: a.role,
+    customRole: a.customRole || undefined,
+    tone: a.tone,
+    securityLevel: a.securityLevel,
+    publicKey: a.publicKey,
+    systemPrompt: a.systemPrompt,
+    created: a.createdAt.toISOString(),
+    invokeCount: a.invokeCount,
+    googleDriveFolderId: a.googleDriveFolderId || undefined,
+    vertexDataStoreId: a.vertexDataStoreId || undefined,
+    secretManagerPath: a.secretManagerPath || undefined,
+    status: a.status,
+    fee: a.feeUsdc,
+    perCallPriceUsdc: a.feeUsdc,
   };
-  saveAgents();
-  console.log('Seeded academic-research-001 for A2A pay.sh catalog demos.');
 }
 
-function seedDefaultAgents() {
-    const defaultId = 'support-copilot-001';
-    agents[defaultId] = {
-      id: defaultId,
-      agentName: 'Support Copilot',
-      role: 'support',
-      tone: 'professional',
-      securityLevel: 'strict',
-      publicKey: '6xP7XpU6ZqUvS9uN8tV7nN8dM9pU8vS7nN9tU8vS7nN9',
-      systemPrompt: compileSystemPrompt('support', 'professional', 'strict'),
-      created: new Date().toISOString(),
-      invokeCount: 24,
-      status: 'ACTIVE',
-      fee: 0.001,
-      perCallPriceUsdc: 0.001,
-    };
-    agents['academic-research-001'] = {
+export async function loadAgents(): Promise<void> {
+  const count = await prisma.agent.count();
+  if (count === 0) {
+    await seedDefaultAgents();
+  } else {
+    await ensureAcademicPeerSeed();
+  }
+  await ensureLocalSeedAgentsFree();
+  const n = await prisma.agent.count();
+  console.log(`Loaded ${n} agents from database.`);
+}
+
+const SEED_AGENT_IDS = ['support-copilot-001', 'academic-research-001'] as const;
+
+async function ensureAcademicPeerSeed() {
+  const existing = await prisma.agent.findUnique({ where: { id: 'academic-research-001' } });
+  if (existing) return;
+  await prisma.agent.create({
+    data: {
       id: 'academic-research-001',
       agentName: 'Academic Research Peer',
       role: 'academic',
@@ -89,41 +74,120 @@ function seedDefaultAgents() {
       securityLevel: 'balanced',
       publicKey: 'AcadPeer111111111111111111111111111111111111',
       systemPrompt: compileSystemPrompt('academic', 'academic', 'balanced'),
-      created: new Date().toISOString(),
-      invokeCount: 3,
+      invokeCount: 0,
       status: 'ACTIVE',
-      fee: 0.002,
-      perCallPriceUsdc: 0.002,
-    };
-    saveAgents();
+      // Lab default: free chat; A2A demo still works via catalog
+      feeUsdc: 0,
+    },
+  });
+  console.log('Seeded academic-research-001 for A2A pay.sh catalog demos.');
 }
 
-export function saveAgents() {
-  try {
-    ensureDataDir();
-    fs.writeFileSync(AGENTS_FILE, JSON.stringify(agents, null, 2), 'utf8');
-  } catch (err) {
-    console.error('agents save failed', err);
+async function seedDefaultAgents() {
+  await prisma.agent.create({
+    data: {
+      id: 'support-copilot-001',
+      agentName: 'Support Copilot',
+      role: 'support',
+      tone: 'professional',
+      securityLevel: 'strict',
+      publicKey: '6xP7XpU6ZqUvS9uN8tV7nN8dM9pU8vS7nN9tU8vS7nN9',
+      systemPrompt: compileSystemPrompt('support', 'professional', 'strict'),
+      invokeCount: 0,
+      status: 'ACTIVE',
+      feeUsdc: 0,
+    },
+  });
+  await ensureAcademicPeerSeed();
+}
+
+/** Local/lab: keep seed agents free so create→chat works without paywall. */
+export async function ensureLocalSeedAgentsFree(): Promise<void> {
+  if (process.env.NODE_ENV === 'production') return;
+  for (const id of SEED_AGENT_IDS) {
+    const row = await prisma.agent.findUnique({ where: { id } });
+    if (!row) continue;
+    if (row.feeUsdc !== 0) {
+      await prisma.agent.update({ where: { id }, data: { feeUsdc: 0 } });
+    }
   }
 }
 
-export function listAgents(): AgentRecord[] {
-  return Object.values(agents);
+export async function listAgents(): Promise<AgentRecord[]> {
+  const rows = await prisma.agent.findMany({ orderBy: { createdAt: 'desc' } });
+  return rows.map(toRecord);
 }
 
-export function getAgent(id: string): AgentRecord | undefined {
-  return agents[id];
+export async function getAgent(id: string): Promise<AgentRecord | undefined> {
+  const a = await prisma.agent.findUnique({ where: { id } });
+  return a ? toRecord(a) : undefined;
 }
 
-export function putAgent(agent: AgentRecord): AgentRecord {
-  agents[agent.id] = agent;
-  saveAgents();
-  return agent;
+export async function putAgent(agent: AgentRecord): Promise<AgentRecord> {
+  const fee =
+    typeof agent.fee === 'number'
+      ? agent.fee
+      : typeof agent.perCallPriceUsdc === 'number'
+        ? agent.perCallPriceUsdc
+        : 0.001;
+
+  const saved = await prisma.agent.upsert({
+    where: { id: agent.id },
+    create: {
+      id: agent.id,
+      tenantId: agent.tenantId || null,
+      agentName: agent.agentName || null,
+      role: agent.role,
+      customRole: agent.customRole || null,
+      tone: agent.tone,
+      securityLevel: agent.securityLevel,
+      publicKey: agent.publicKey,
+      systemPrompt: agent.systemPrompt,
+      invokeCount: agent.invokeCount || 0,
+      googleDriveFolderId: agent.googleDriveFolderId || null,
+      vertexDataStoreId: agent.vertexDataStoreId || null,
+      secretManagerPath: agent.secretManagerPath || null,
+      status: agent.status || 'ACTIVE',
+      feeUsdc: fee,
+    },
+    update: {
+      tenantId: agent.tenantId || null,
+      agentName: agent.agentName || null,
+      role: agent.role,
+      customRole: agent.customRole || null,
+      tone: agent.tone,
+      securityLevel: agent.securityLevel,
+      publicKey: agent.publicKey,
+      systemPrompt: agent.systemPrompt,
+      invokeCount: agent.invokeCount || 0,
+      googleDriveFolderId: agent.googleDriveFolderId || null,
+      vertexDataStoreId: agent.vertexDataStoreId || null,
+      secretManagerPath: agent.secretManagerPath || null,
+      status: agent.status || 'ACTIVE',
+      feeUsdc: fee,
+    },
+  });
+  return toRecord(saved);
 }
 
-export function bumpInvoke(id: string) {
-  const a = agents[id];
-  if (!a) return;
-  a.invokeCount += 1;
-  saveAgents();
+export async function bumpInvoke(id: string): Promise<void> {
+  await prisma.agent.update({
+    where: { id },
+    data: { invokeCount: { increment: 1 } },
+  });
 }
+
+export async function deleteAgent(id: string): Promise<void> {
+  await prisma.agent.delete({ where: { id } }).catch(() => undefined);
+}
+
+export type AgentPatch = {
+  agentName?: string;
+  role?: string;
+  customRole?: string | null;
+  tone?: string;
+  securityLevel?: string;
+  fee?: number;
+  status?: string;
+  googleDriveFolderId?: string | null;
+};

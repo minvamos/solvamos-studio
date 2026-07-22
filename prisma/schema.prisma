@@ -1,0 +1,188 @@
+// SolVamos Studio — platform database (Control Plane)
+// Env = fixed infra only. Mutable data lives in PostgreSQL (Cloud SQL).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Platform identity (email/password and/or Google)
+model User {
+  id               String    @id @default(cuid())
+  email            String    @unique
+  name             String?
+  picture          String?
+  /// scrypt/bcrypt hash — null if Google-only until password set
+  passwordHash     String?
+  /// Google subject (openid sub) when linked
+  googleSub        String?   @unique
+  emailVerifiedAt  DateTime?
+  /// Primary workspace tenant (shared lab GCP treated as customer)
+  primaryTenantId  String?
+  primaryTenant    Tenant?   @relation("UserPrimaryTenant", fields: [primaryTenantId], references: [id], onDelete: SetNull)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  sessions Session[]
+  wallets  Wallet[]
+  members  TenantMember[]
+
+  @@index([primaryTenantId])
+}
+
+/// Auth session — cookie sid → row; refresh JWT hashed here for rotation
+model Session {
+  id               String    @id
+  userId           String?
+  user             User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email            String?
+  name             String?
+  picture          String?
+  /// Google Drive OAuth tokens (server-only)
+  accessToken      String?   @db.Text
+  refreshToken     String?   @db.Text
+  expiry           DateTime?
+  /// password | oauth | adc | link
+  via              String    @default("password")
+  tenantId         String?
+  tenant           Tenant?   @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  /// SHA-256 of current refresh JWT (rotation + reuse detection)
+  refreshTokenHash String?
+  refreshExpiresAt DateTime?
+  revokedAt        DateTime?
+  userAgent        String?
+  ip               String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([email])
+  @@index([tenantId])
+  @@index([userId])
+  @@index([refreshTokenHash])
+}
+
+/// Customer workspace — Lab: maps to shared GOOGLE_CLOUD_PROJECT
+model Tenant {
+  id                  String   @id
+  displayName         String
+  projectId           String
+  folderId            String?
+  tier                String   @default("starter")
+  status              String   @default("active")
+  kmsKeyId            String?
+  cloudRunUri         String?
+  cloudRunServiceName String?
+  cloudRunStatus      String?
+  errorMessage        String?  @db.Text
+  byoProject          Boolean  @default(false)
+  tenancyMode         String?
+  sharedProject       Boolean  @default(true)
+  provisionNotes      Json?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  members       TenantMember[]
+  agents        Agent[]
+  sessions      Session[]
+  listings      CatalogListing[]
+  primaryUsers  User[]         @relation("UserPrimaryTenant")
+}
+
+model TenantMember {
+  tenantId  String
+  userId    String
+  role      String   @default("owner")
+  createdAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([tenantId, userId])
+}
+
+model Agent {
+  id                  String   @id
+  tenantId            String?
+  tenant              Tenant?  @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  agentName           String?
+  role                String
+  customRole          String?
+  tone                String
+  securityLevel       String
+  publicKey           String
+  systemPrompt        String   @db.Text
+  invokeCount         Int      @default(0)
+  googleDriveFolderId String?
+  vertexDataStoreId   String?
+  secretManagerPath   String?
+  status              String   @default("ACTIVE")
+  feeUsdc             Float    @default(0.001)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  listing CatalogListing?
+  ragDocs RagDocument[]
+
+  @@index([tenantId])
+  @@index([vertexDataStoreId])
+}
+
+model Wallet {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  address   String
+  label     String
+  source    String   @default("manual")
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, address])
+  @@index([userId])
+}
+
+model CatalogListing {
+  catalogId       String   @id
+  agentId         String   @unique
+  agent           Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  tenantId        String?
+  tenant          Tenant?  @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  name            String
+  description     String   @db.Text
+  role            String
+  tone            String
+  invokeUrl      String
+  recipientWallet String
+  feeUsdc         Float
+  token           String   @default("USDC")
+  network         String
+  usdcMint        String
+  status          String   @default("listed")
+  tags            String[]
+  listedAt        DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([status])
+}
+
+model RagDocument {
+  id          String   @id @default(cuid())
+  agentId     String
+  agent       Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  driveFileId String
+  name        String
+  mimeType    String
+  text        String   @db.Text
+  webViewLink String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([agentId, driveFileId])
+  @@index([agentId])
+}

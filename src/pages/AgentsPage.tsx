@@ -9,16 +9,20 @@ type Props = {
   agents: Agent[];
   onSelect: (agent: Agent) => void;
   onEdit: (agent: Agent) => void;
+  onToggleStatus?: (agent: Agent) => void;
 };
 
 type Filter = 'all' | 'active' | 'inactive';
 type SortKey = 'revenue' | 'calls' | 'name';
 
-export default function AgentsPage({ agents, onSelect, onEdit }: Props) {
+export default function AgentsPage({ agents, onSelect, onEdit, onToggleStatus }: Props) {
   const [filter, setFilter] = useState<Filter>('all');
   const [sort, setSort] = useState<SortKey>('calls');
 
-  const activeCount = agents.filter((a) => (a.status || 'active') !== 'inactive').length;
+  const activeCount = agents.filter((a) => {
+    const s = a.status || 'ACTIVE';
+    return s !== 'inactive' && s !== 'PAUSED';
+  }).length;
   const revenue24h = agents.reduce(
     (sum, a) => sum + (a.invokeCount || 0) * (a.fee ?? a.perCallPriceUsdc ?? 0.001),
     0
@@ -26,8 +30,13 @@ export default function AgentsPage({ agents, onSelect, onEdit }: Props) {
 
   const filtered = useMemo(() => {
     let list = [...agents];
-    if (filter === 'active') list = list.filter((a) => (a.status || 'active') !== 'inactive');
-    if (filter === 'inactive') list = list.filter((a) => a.status === 'inactive');
+    if (filter === 'active')
+      list = list.filter((a) => {
+        const s = a.status || 'ACTIVE';
+        return s !== 'inactive' && s !== 'PAUSED';
+      });
+    if (filter === 'inactive')
+      list = list.filter((a) => a.status === 'inactive' || a.status === 'PAUSED');
     list.sort((a, b) => {
       if (sort === 'name') {
         return (a.customRole || a.role).localeCompare(b.customRole || b.role);
@@ -118,9 +127,9 @@ export default function AgentsPage({ agents, onSelect, onEdit }: Props) {
           </div>
         )}
         {filtered.map((agent) => {
-          const inactive = agent.status === 'inactive';
-          const title = agent.customRole || roleLabel(agent.role);
-          const fee = agent.fee ?? agent.perCallPriceUsdc ?? 0.001;
+          const inactive = agent.status === 'inactive' || agent.status === 'PAUSED';
+          const title = agent.agentName || agent.customRole || roleLabel(agent.role);
+          const fee = agent.fee ?? agent.perCallPriceUsdc ?? 0;
           const rev = (agent.invokeCount || 0) * fee;
           return (
             <div
@@ -208,8 +217,10 @@ export default function AgentsPage({ agents, onSelect, onEdit }: Props) {
                     </button>
                     <button
                       type="button"
-                      className="px-3 py-2 rounded-lg border border-outline-variant/30 text-sm text-on-surface-variant hover:text-on-surface flex items-center gap-1"
-                      title="상태 토글은 서버 API 연동 예정"
+                      onClick={() => onToggleStatus?.(agent)}
+                      disabled={!onToggleStatus}
+                      className="px-3 py-2 rounded-lg border border-outline-variant/30 text-sm text-on-surface-variant hover:text-on-surface flex items-center gap-1 disabled:opacity-50"
+                      title={inactive ? 'Activate' : 'Pause'}
                     >
                       {inactive ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
                       {inactive ? 'Activate' : 'Pause'}

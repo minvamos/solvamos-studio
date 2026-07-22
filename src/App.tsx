@@ -10,7 +10,10 @@ import AppShell, { AppTab } from './AppShell';
 import StudioPage from './pages/StudioPage';
 import AgentsPage from './pages/AgentsPage';
 import SettlementsPage from './pages/SettlementsPage';
+import MyPage from './pages/MyPage';
 import WalletModal, { type WalletRow } from './components/WalletModal';
+import CreateAgentProgress, { CREATE_STEPS, EDIT_STEPS } from './components/CreateAgentProgress';
+import { formatAgentChatMessage } from './lib/formatAgentMessage';
 
 export default function App() {
   const [view, setView] = useState<'landing' | 'studio' | 'boot'>('boot');
@@ -18,11 +21,15 @@ export default function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<AppTab>('studio');
   const [networkSwitchBusy, setNetworkSwitchBusy] = useState(false);
+  const [catalogSwitchBusy, setCatalogSwitchBusy] = useState(false);
 
   const [agents, setAgents] = useState<Agent[]>([]);
   const [activeAgent, setActiveAgent] = useState<Agent | null>(null);
   const [serverStatus, setServerStatus] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [createStepIndex, setCreateStepIndex] = useState(0);
+  const [createPercent, setCreatePercent] = useState(0);
+  const [createDetail, setCreateDetail] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const [settlements, setSettlements] = useState<Settlement[]>([
@@ -56,11 +63,15 @@ export default function App() {
   ]);
 
   const [builderStep, setBuilderStep] = useState<1 | 2 | 3>(1);
+  const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
+  /** Drive folder id when edit started — only send folder on PATCH if user changed it */
+  const [editBaselineFolderId, setEditBaselineFolderId] = useState<string>('');
+  const [savingAsEdit, setSavingAsEdit] = useState(false);
   const [options, setOptions] = useState<PromptOptions>({
     role: 'support',
     tone: 'professional',
     securityLevel: 'strict',
-    fee: 0.001,
+    fee: 0,
   });
   const [agentName, setAgentName] = useState('사내 복지 안내 AI 비서');
   const [livePromptPreview, setLivePromptPreview] = useState('');
@@ -106,18 +117,27 @@ export default function App() {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const authFetch = (url: string, init?: RequestInit) => {
-    const sid =
-      (typeof window !== 'undefined' && localStorage.getItem('solvamos_drive_session')) ||
-      driveSessionId;
     return fetch(url, {
       ...init,
       credentials: 'include',
       cache: 'no-store',
       headers: {
         ...(init?.headers || {}),
-        ...(sid ? { 'X-SolVamos-Session': sid } : {}),
       },
     });
+  };
+
+  /** Cookie JWT first; refresh once if access expired. */
+  const ensureAuth = async (): Promise<any | null> => {
+    const me = await authFetch('/api/auth/me');
+    const data = await me.json();
+    if (data?.connected || data?.user?.connected) return data;
+    const refreshed = await authFetch('/api/auth/refresh', { method: 'POST' });
+    if (!refreshed.ok) return null;
+    const again = await authFetch('/api/auth/me');
+    const data2 = await again.json();
+    if (data2?.connected || data2?.user?.connected) return data2;
+    return null;
   };
 
   const fetchStatusAndAgents = async () => {
@@ -142,34 +162,36 @@ export default function App() {
   };
 
   const applyAuthUser = (data: any, sessionId?: string) => {
-    if (!data?.connected && !data?.user?.connected) return false;
-    const email = data.email || data.user?.email || null;
-    const name = data.name || data.user?.name || null;
-    const picture = data.picture || data.user?.picture || null;
-    const tenantId = data.tenantId || data.user?.tenantId || null;
+    const user = data?.user;
+    const connected = !!(data?.connected || user?.email);
+    if (!connected) return false;
+    const email = data.email || user?.email || null;
+    const name = data.name || user?.name || null;
+    const picture = data.picture || user?.picture || null;
+    const tenantId = data.tenantId || user?.tenantId || null;
     setDriveEmail(email);
     setUserName(name);
     setUserPicture(picture);
     if (tenantId) setTenantIdInput(tenantId);
-    if (sessionId) {
-      localStorage.setItem('solvamos_drive_session', sessionId);
-      setDriveSessionId(sessionId);
+    if (sessionId || data.sessionId) {
+      const sid = sessionId || data.sessionId;
+      localStorage.setItem('solvamos_drive_session', sid);
+      setDriveSessionId(sid);
     }
     localStorage.setItem('solvamos_entered', '1');
     return true;
   };
 
-  const loadDriveFolders = async (sessionId?: string, parentId = 'root') => {
+  const loadDriveFolders = async (_sessionId?: string, parentId = 'root') => {
     setDriveError(null);
     setDriveBusy(true);
     try {
       const q = new URLSearchParams();
-      if (sessionId) q.set('session', sessionId);
       q.set('parent', parentId);
       const foldersRes = await authFetch(`/api/drive/folders?${q.toString()}`);
       const foldersData = await foldersRes.json();
       if (foldersData.status === 'success') {
-        const items: DriveItem[] = (foldersData.data || []).map((f: any) => ({
+        const items: DriveItem[] = (foldersData.items || foldersData.data || []).map((f: any) => ({
           ...f,
           kind:
             f.kind ||
@@ -289,20 +311,12 @@ export default function App() {
     }
   };
 
-  const refreshAuthSession = async (sessionId?: string) => {
+  const refreshAuthSession = async (_sessionId?: string) => {
     try {
-      const sid =
-        sessionId ||
-        driveSessionId ||
-        localStorage.getItem('solvamos_drive_session') ||
-        undefined;
-      const res = await authFetch('/api/auth/me', {
-        headers: sid ? { 'X-SolVamos-Session': sid } : undefined,
-      });
-      const data = await res.json();
-      if (applyAuthUser(data, data.sessionId || sid)) {
+      const data = await ensureAuth();
+      if (data && applyAuthUser(data, data.sessionId || undefined)) {
         setView('studio');
-        await loadDriveFolders(data.sessionId || sid);
+        await loadDriveFolders(undefined);
         await fetchWallets();
         return true;
       }
@@ -313,16 +327,16 @@ export default function App() {
     }
   };
 
-  /** Start Google SSO (redirect) or ADC lab connect. */
-  const connectGoogleDrive = async () => {
+  /** Google OAuth: login | signup | link(Drive). */
+  const startGoogleOAuth = async (intent: 'login' | 'signup' | 'link' = 'login') => {
     setDriveBusy(true);
     setAuthError(null);
     try {
-      const res = await authFetch('/api/auth/google');
+      const res = await authFetch(`/api/auth/google?intent=${intent}`);
       const data = await res.json();
       if (data.status !== 'success') {
         setAuthError(
-          `${data.message || 'Google 로그인 실패'}${data.hint ? `\n\n${data.hint}` : ''}`
+          `${data.message || 'Google 인증 실패'}${data.hint ? `\n\n${data.hint}` : ''}`
         );
         return;
       }
@@ -332,11 +346,10 @@ export default function App() {
         setDriveSessionId(data.sessionId);
       }
 
-      // Local ADC PoC: no browser redirect
       if (data.mode === 'adc' || !data.authUrl) {
-        applyAuthUser(data, data.sessionId);
+        applyAuthUser({ ...data, connected: true, user: data.user || data }, data.sessionId);
         setView('studio');
-        await loadDriveFolders(data.sessionId);
+        if (intent !== 'link') await loadDriveFolders(undefined);
         return;
       }
 
@@ -349,31 +362,48 @@ export default function App() {
     }
   };
 
-  /** Reload Drive folders only — do not start a new OAuth redirect. */
-  const refreshDriveFolders = async () => {
-    setDriveBusy(true);
-    try {
-      const sid =
-        driveSessionId || localStorage.getItem('solvamos_drive_session') || undefined;
-      const me = await authFetch('/api/auth/me', {
-        headers: sid ? { 'X-SolVamos-Session': sid } : undefined,
-      });
-      const data = await me.json();
-      if (!applyAuthUser(data, data.sessionId || sid)) {
-        setDriveError('세션이 만료되었습니다. Google로 다시 로그인하세요.');
-        return;
-      }
-      await loadDriveFolders(data.sessionId || sid, driveParentId || 'root');
-    } finally {
-      setDriveBusy(false);
+  const connectGoogleDrive = async () => {
+    // Already logged in → link Drive; else login with Google
+    const me = await ensureAuth();
+    if (me?.user || me?.connected) {
+      await startGoogleOAuth('link');
+    } else {
+      await startGoogleOAuth('login');
     }
   };
 
-  const enterWorkspace = async () => {
+  const handleEmailAuth = async (payload: {
+    mode: 'signin' | 'signup';
+    email: string;
+    password: string;
+    name?: string;
+    orgName?: string;
+  }) => {
     setLandingBusy(true);
     setAuthError(null);
     try {
-      await connectGoogleDrive();
+      const path = payload.mode === 'signup' ? '/api/auth/register' : '/api/auth/login';
+      const res = await authFetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: payload.email,
+          password: payload.password,
+          name: payload.name,
+          orgName: payload.orgName,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.status !== 'success') {
+        setAuthError(data.message || '인증에 실패했습니다');
+        return;
+      }
+      applyAuthUser({ connected: true, ...data }, data.sessionId);
+      setView('studio');
+      await fetchWallets();
+      await fetchStatusAndAgents();
+    } catch (err: any) {
+      setAuthError(err.message || '요청 실패');
     } finally {
       setLandingBusy(false);
     }
@@ -382,6 +412,20 @@ export default function App() {
   const enterDevSkip = () => {
     localStorage.setItem('solvamos_entered', '1');
     setView('studio');
+  };
+
+  const refreshDriveFolders = async () => {
+    setDriveBusy(true);
+    try {
+      const data = await ensureAuth();
+      if (!data || !applyAuthUser(data, data.sessionId || undefined)) {
+        setDriveError('세션이 만료되었습니다. 다시 로그인하세요.');
+        return;
+      }
+      await loadDriveFolders(undefined, driveParentId || 'root');
+    } finally {
+      setDriveBusy(false);
+    }
   };
 
   const logout = async () => {
@@ -409,10 +453,9 @@ export default function App() {
 
   useEffect(() => {
     const boot = async () => {
-      const savedSid = localStorage.getItem('solvamos_drive_session') || '';
       const entered = localStorage.getItem('solvamos_entered') === '1';
       // Keep studio visible across refresh while we revalidate (no login flash)
-      if (entered && savedSid) {
+      if (entered) {
         setView('studio');
       }
 
@@ -420,23 +463,31 @@ export default function App() {
       const params = new URLSearchParams(window.location.search);
       const loggedIn =
         params.get('logged_in') === '1' ||
-        params.get('drive_connected') === '1';
-      const sessionFromUrl = params.get('session');
+        params.get('drive_connected') === '1' ||
+        params.get('google_linked') === '1';
       const emailFromUrl = params.get('email');
+      const authErr = params.get('auth_error');
 
-      if (loggedIn || sessionFromUrl) {
-        if (emailFromUrl) setDriveEmail(emailFromUrl);
-        if (sessionFromUrl) {
-          localStorage.setItem('solvamos_drive_session', sessionFromUrl);
-          setDriveSessionId(sessionFromUrl);
-        }
-        localStorage.setItem('solvamos_entered', '1');
+      if (authErr) {
+        setAuthError(authErr);
         window.history.replaceState({}, '', '/');
-        const ok = await refreshAuthSession(sessionFromUrl || savedSid || undefined);
-        if (ok) return;
+        setView('landing');
+        return;
       }
 
-      const ok = await refreshAuthSession(savedSid || driveSessionId || undefined);
+      if (loggedIn) {
+        if (emailFromUrl) setDriveEmail(emailFromUrl);
+        const linked = params.get('google_linked') === '1';
+        localStorage.setItem('solvamos_entered', '1');
+        window.history.replaceState({}, '', '/');
+        const ok = await refreshAuthSession();
+        if (ok) {
+          if (linked) setActiveTab('account');
+          return;
+        }
+      }
+
+      const ok = await refreshAuthSession();
       if (ok) return;
 
       // Only kick to landing if session truly dead
@@ -467,25 +518,93 @@ export default function App() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatHistory, activeAgent, pendingPayment]);
 
+  const beginEditAgent = (agent: Agent) => {
+    setActiveAgent(agent);
+    setEditingAgentId(agent.id);
+    setEditBaselineFolderId(agent.googleDriveFolderId || '');
+    setCreationResult(null);
+    setBuilderStep(1);
+    setOptions({
+      role: (agent.role as PromptOptions['role']) || 'support',
+      customRole: agent.customRole,
+      tone: (agent.tone as PromptOptions['tone']) || 'professional',
+      securityLevel: (agent.securityLevel as PromptOptions['securityLevel']) || 'strict',
+      fee: agent.fee ?? agent.perCallPriceUsdc ?? 0,
+    });
+    setAgentName(agent.agentName || agent.customRole || '');
+    setSelectedFolderId(agent.googleDriveFolderId || '');
+    setActiveTab('studio');
+  };
+
+  const startNewAgent = () => {
+    setEditingAgentId(null);
+    setEditBaselineFolderId('');
+    setActiveAgent(null);
+    setCreationResult(null);
+    setBuilderStep(1);
+    setOptions({
+      role: 'support',
+      tone: 'professional',
+      securityLevel: 'strict',
+      fee: 0,
+    });
+    setAgentName('사내 복지 안내 AI 비서');
+    setSelectedFolderId('');
+    setSelectedDriveName(null);
+    setActiveTab('studio');
+  };
+
   const handleCreateAgent = async () => {
+    // 편집 모드(연필 또는 생성 직후 유지된 editingAgentId)만 PATCH. 그 외는 신규 생성.
+    const targetId = editingAgentId;
+    const isEdit = !!targetId;
+    setSavingAsEdit(isEdit);
+
     setIsLoading(true);
     setBuilderStep(2);
+    setCreateStepIndex(0);
+    setCreatePercent(6);
+    setCreateDetail(isEdit ? '에이전트 업데이트 중…' : '요청 준비 중…');
+
+    const stepsLen = isEdit ? EDIT_STEPS.length : CREATE_STEPS.length;
+    const tick = window.setInterval(() => {
+      setCreateStepIndex((i) => Math.min(i + 1, stepsLen - 1));
+      setCreatePercent((p) => Math.min(p + (isEdit ? 28 : 14), 88));
+    }, isEdit ? 500 : 1600);
+
     try {
-      await new Promise((resolve) => setTimeout(resolve, 800));
-      const payload = {
+      const folderChanged =
+        isEdit && (selectedFolderId || '') !== (editBaselineFolderId || '');
+
+      const payload: Record<string, unknown> = {
         ...options,
         customRole:
           options.role === 'custom'
             ? agentName || options.customRole || '사내 HR/복지 안내'
             : options.customRole,
-        googleDriveFolderId: selectedFolderId || undefined,
         tenantId: tenantIdInput || undefined,
-        usePrimaryWallet: false,
-        // Agent A2A vault defaults server-side to DEFAULT_AGENT_VAULT_PUBKEY
-        recipientWallet: undefined,
+        agentName,
       };
-      const res = await fetch('/api/agents/create', {
-        method: 'POST',
+
+      // 생성: 폴더 선택 시 포함. 편집: 폴더를 바꿨을 때만 포함(재수집 방지)
+      if (!isEdit) {
+        if (selectedFolderId) payload.googleDriveFolderId = selectedFolderId;
+      } else if (folderChanged) {
+        payload.googleDriveFolderId = selectedFolderId || '';
+      }
+
+      setCreateDetail(
+        isEdit
+          ? folderChanged
+            ? '메타 저장 · Drive 소스 변경 재수집'
+            : '메타·요금 저장 (vault/ID 유지)'
+          : selectedFolderId
+            ? `Drive 소스 ${selectedDriveName || selectedFolderId} 수집 · Vertex · 카탈로그…`
+            : 'Drive 미선택 — 메타·카탈로그만 생성'
+      );
+
+      const res = await fetch(isEdit ? `/api/agents/${targetId}` : '/api/agents/create', {
+        method: isEdit ? 'PATCH' : 'POST',
         credentials: 'include',
         cache: 'no-store',
         headers: {
@@ -496,22 +615,54 @@ export default function App() {
       });
       const data = await res.json();
 
+      window.clearInterval(tick);
+      setCreateStepIndex(stepsLen - 1);
+      setCreatePercent(100);
+
       if (data.status === 'success') {
-        setCreationResult(data);
-        setAgents((prev) => [data.agent, ...prev]);
-        setActiveAgent(data.agent);
+        const ingestNote =
+          data.driveIngest?.docs != null
+            ? `Drive 문서 ${data.driveIngest.docs}건 주입`
+            : null;
+        setCreateDetail(
+          [
+            ingestNote,
+            data.payShCatalog?.catalogId &&
+              (isEdit
+                ? `catalog sync ${data.payShCatalog.catalogId}`
+                : `pay.sh ${data.payShCatalog.catalogId}`),
+          ]
+            .filter(Boolean)
+            .join(' · ') || data.message
+        );
+        setCreationResult({ ...data, _wasEdit: isEdit });
+        const saved = data.agent as Agent;
+        setAgents((prev) => {
+          const without = prev.filter((a) => a.id !== saved.id);
+          return [saved, ...without];
+        });
+        setActiveAgent(saved);
+        // 저장 후에도 편집 모드 유지 → 다시 누르면 PATCH (신규 게시 방지)
+        setEditingAgentId(saved.id);
+        setEditBaselineFolderId(saved.googleDriveFolderId || '');
         setBuilderStep(3);
         setActiveTab('studio');
+        await new Promise((r) => setTimeout(r, 450));
       } else {
-        alert(`Error creating agent: ${data.message}`);
+        alert(`Error ${isEdit ? 'updating' : 'creating'} agent: ${data.message}`);
         setBuilderStep(1);
       }
     } catch (err) {
+      window.clearInterval(tick);
       console.error(err);
-      alert('Network failure compiling agent');
+      alert(isEdit ? 'Network failure updating agent' : 'Network failure compiling agent');
       setBuilderStep(1);
     } finally {
       setIsLoading(false);
+      setSavingAsEdit(false);
+      setCreatePercent(0);
+      setCreateStepIndex(0);
+      setCreateDetail(null);
     }
   };
 
@@ -554,7 +705,7 @@ export default function App() {
           {
             id: 'loading-placeholder',
             sender: 'system',
-            text: '⚡ Initiating secure agent-to-agent channel (pay.sh protocol handshake)...',
+            text: '⏳ Vertex AI Gemini 응답 생성 중… (GCP ADC)',
             timestamp: new Date().toLocaleTimeString(),
             paymentStatus: 'none',
           },
@@ -565,15 +716,21 @@ export default function App() {
     try {
       const res = await fetch(`/api/agents/${agentId}/invoke`, {
         method: 'POST',
-        headers,
-        body: JSON.stringify({ prompt: promptText }),
+        credentials: 'include',
+        headers: {
+          ...headers,
+          'X-SolVamos-Studio': '1',
+        },
+        body: JSON.stringify({
+          prompt: promptText,
+          studioTest: true,
+          enableA2A: false,
+        }),
       });
       const data = await res.json();
 
-      setChatHistory((prev) => ({
-        ...prev,
-        [agentId]: (prev[agentId] || []).filter((m) => m.id !== 'loading-placeholder'),
-      }));
+      const withoutLoading = (msgs: Message[]) =>
+        msgs.filter((m) => m.id !== 'loading-placeholder');
 
       if (res.status === 402) {
         setPendingPayment({
@@ -596,7 +753,7 @@ export default function App() {
 
         setChatHistory((prev) => ({
           ...prev,
-          [agentId]: [...(prev[agentId] || []), paywallMessage],
+          [agentId]: [...withoutLoading(prev[agentId] || []), paywallMessage],
         }));
       } else if (data.status === 'success') {
         const hops = (data.a2a?.peerHops || []).map((h: any) => ({
@@ -621,7 +778,7 @@ export default function App() {
         const agentResponse: Message = {
           id: Math.random().toString(36).substr(2, 9),
           sender: 'agent',
-          text: `${data.data}${hopNote}`,
+          text: `${formatAgentChatMessage(String(data.data ?? data.answer ?? ''))}${hopNote}`,
           timestamp: new Date().toLocaleTimeString(),
           confidence: data.confidence,
           paymentStatus: signature ? 'verified' : 'none',
@@ -646,7 +803,7 @@ export default function App() {
 
         setChatHistory((prev) => ({
           ...prev,
-          [agentId]: [...(prev[agentId] || []), agentResponse],
+          [agentId]: [...withoutLoading(prev[agentId] || []), agentResponse],
         }));
 
         if (data.paymentLogs) setPaymentLogs(data.paymentLogs);
@@ -677,7 +834,7 @@ export default function App() {
 
         setChatHistory((prev) => ({
           ...prev,
-          [agentId]: [...(prev[agentId] || []), errorMessage],
+          [agentId]: [...withoutLoading(prev[agentId] || []), errorMessage],
         }));
         if (data.logs) setPaymentLogs(data.logs);
       }
@@ -685,12 +842,8 @@ export default function App() {
       console.error(err);
       setChatHistory((prev) => ({
         ...prev,
-        [agentId]: (prev[agentId] || []).filter((m) => m.id !== 'loading-placeholder'),
-      }));
-      setChatHistory((prev) => ({
-        ...prev,
         [agentId]: [
-          ...(prev[agentId] || []),
+          ...(prev[agentId] || []).filter((m) => m.id !== 'loading-placeholder'),
           {
             id: Math.random().toString(36).substr(2, 9),
             sender: 'system',
@@ -732,6 +885,37 @@ export default function App() {
       alert('결제 네트워크 전환 중 오류');
     } finally {
       setNetworkSwitchBusy(false);
+    }
+  };
+
+  const switchCatalogPublishMode = async (mode: 'internal' | 'main' | 'both') => {
+    setCatalogSwitchBusy(true);
+    try {
+      const res = await fetch('/api/paysh/catalog/mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.status !== 'success') {
+        alert(data.message || '카탈로그 게시 모드 전환 실패');
+        return;
+      }
+      await fetchStatusAndAgents();
+      setPaymentLogs((prev) => [
+        ...prev,
+        `[Catalog publish] → ${data.publishMode}` +
+          (data.remoteUrlConfigured
+            ? ` (remote ${data.remoteUrl})`
+            : data.publishMode !== 'internal'
+              ? ' (lab main mirror)'
+              : ''),
+      ]);
+    } catch (err) {
+      console.error(err);
+      alert('카탈로그 모드 전환 중 오류');
+    } finally {
+      setCatalogSwitchBusy(false);
     }
   };
 
@@ -797,7 +981,8 @@ export default function App() {
   if (view === 'landing') {
     return (
       <Landing
-        onContinue={enterWorkspace}
+        onEmailSubmit={handleEmailAuth}
+        onGoogle={(intent) => startGoogleOAuth(intent)}
         onDevSkip={enterDevSkip}
         oauthConfigured={!!serverStatus?.oauthConfigured}
         busy={landingBusy || driveBusy}
@@ -808,6 +993,13 @@ export default function App() {
 
   return (
     <>
+    <CreateAgentProgress
+      open={isLoading}
+      activeIndex={createStepIndex}
+      percent={createPercent}
+      detail={createDetail}
+      mode={savingAsEdit ? 'edit' : 'create'}
+    />
     <AppShell
       activeTab={activeTab}
       onNavigate={setActiveTab}
@@ -824,6 +1016,10 @@ export default function App() {
       paymentNetwork={serverStatus?.paymentNetwork}
       onPaymentNetworkChange={switchPaymentNetwork}
       paymentSwitchBusy={networkSwitchBusy}
+      catalogPublishMode={serverStatus?.catalogPublishMode || 'internal'}
+      onCatalogPublishModeChange={switchCatalogPublishMode}
+      catalogSwitchBusy={catalogSwitchBusy}
+      catalogRemoteConfigured={!!serverStatus?.catalogRemoteConfigured}
     >
       {activeTab === 'studio' && (
         <StudioPage
@@ -835,7 +1031,9 @@ export default function App() {
           isLoading={isLoading}
           builderStep={builderStep}
           creationResult={creationResult}
+          editingAgentId={editingAgentId}
           onCreate={handleCreateAgent}
+          onStartNewAgent={startNewAgent}
           driveEmail={driveEmail}
           primaryWalletAddress={primaryWallet?.address || null}
           primaryWalletLabel={primaryWallet?.label || null}
@@ -875,26 +1073,48 @@ export default function App() {
         <AgentsPage
           agents={agents}
           onSelect={(agent) => {
-            setActiveAgent(agent);
-            setActiveTab('studio');
+            beginEditAgent(agent);
           }}
-          onEdit={(agent) => {
-            setActiveAgent(agent);
-            setOptions({
-              role: (agent.role as PromptOptions['role']) || 'support',
-              customRole: agent.customRole,
-              tone: (agent.tone as PromptOptions['tone']) || 'professional',
-              securityLevel:
-                (agent.securityLevel as PromptOptions['securityLevel']) || 'strict',
-              fee: agent.fee ?? agent.perCallPriceUsdc ?? 0.001,
-            });
-            setAgentName(agent.customRole || '');
-            setActiveTab('studio');
+          onEdit={beginEditAgent}
+          onToggleStatus={async (agent) => {
+            const next =
+              agent.status === 'PAUSED' || agent.status === 'inactive' ? 'ACTIVE' : 'PAUSED';
+            try {
+              const res = await fetch(`/api/agents/${agent.id}`, {
+                method: 'PATCH',
+                credentials: 'include',
+                headers: {
+                  'Content-Type': 'application/json',
+                  ...(driveSessionId ? { 'X-SolVamos-Session': driveSessionId } : {}),
+                },
+                body: JSON.stringify({ status: next }),
+              });
+              const data = await res.json();
+              if (data.status === 'success' && data.agent) {
+                setAgents((prev) =>
+                  prev.map((a) => (a.id === agent.id ? { ...a, ...data.agent } : a))
+                );
+                if (activeAgent?.id === agent.id) setActiveAgent(data.agent);
+              } else {
+                alert(data.message || '상태 변경 실패');
+              }
+            } catch (err) {
+              console.error(err);
+              alert('상태 변경 네트워크 오류');
+            }
           }}
         />
       )}
       {activeTab === 'settlements' && (
         <SettlementsPage settlements={settlements} agents={agents} />
+      )}
+      {activeTab === 'account' && (
+        <MyPage
+          authFetch={authFetch}
+          onLinked={() => {
+            void refreshAuthSession();
+          }}
+        />
       )}
     </AppShell>
     <WalletModal

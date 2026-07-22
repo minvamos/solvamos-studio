@@ -1,9 +1,9 @@
 /**
- * Tenant registry: tenant_id → GCP project_id
+ * Tenant registry — PostgreSQL (Prisma).
  */
 
-import fs from 'fs';
-import { dataFile, ensureDataDir } from './data-paths.js';
+import { prisma } from './db.js';
+import type { Tenant as DbTenant } from '@prisma/client';
 
 export type TenantRecord = {
   tenantId: string;
@@ -19,49 +19,90 @@ export type TenantRecord = {
   cloudRunStatus?: 'active' | 'pending_image' | 'skipped' | 'error' | string;
   errorMessage?: string;
   byoProject?: boolean;
-  /** shared = one PoC GCP project; isolated = cust-{id}-prod under Org */
   tenancyMode?: 'shared' | 'isolated';
   sharedProject?: boolean;
   provisionNotes?: string[];
 };
 
-const TENANTS_FILE = dataFile('tenants_db.json');
-
-let tenants: Record<string, TenantRecord> = {};
-
-export function loadTenants() {
-  try {
-    if (fs.existsSync(TENANTS_FILE)) {
-      tenants = JSON.parse(fs.readFileSync(TENANTS_FILE, 'utf8'));
-    }
-  } catch (err) {
-    console.error('Failed to load tenants_db.json', err);
-  }
+function toRecord(t: DbTenant): TenantRecord {
+  return {
+    tenantId: t.id,
+    displayName: t.displayName,
+    projectId: t.projectId,
+    folderId: t.folderId || undefined,
+    tier: t.tier as TenantRecord['tier'],
+    status: t.status as TenantRecord['status'],
+    createdAt: t.createdAt.toISOString(),
+    kmsKeyId: t.kmsKeyId || undefined,
+    cloudRunUri: t.cloudRunUri || undefined,
+    cloudRunServiceName: t.cloudRunServiceName || undefined,
+    cloudRunStatus: t.cloudRunStatus || undefined,
+    errorMessage: t.errorMessage || undefined,
+    byoProject: t.byoProject,
+    tenancyMode: (t.tenancyMode as TenantRecord['tenancyMode']) || undefined,
+    sharedProject: t.sharedProject,
+    provisionNotes: Array.isArray(t.provisionNotes)
+      ? (t.provisionNotes as string[])
+      : undefined,
+  };
 }
 
-function save() {
-  try {
-    ensureDataDir();
-    fs.writeFileSync(TENANTS_FILE, JSON.stringify(tenants, null, 2), 'utf8');
-  } catch (err) {
-    console.error('Failed to save tenants_db.json', err);
-  }
+export async function loadTenants(): Promise<void> {
+  const n = await prisma.tenant.count();
+  console.log(`Loaded ${n} tenants from database.`);
 }
 
-export function listTenants(): TenantRecord[] {
-  return Object.values(tenants);
+export async function listTenants(): Promise<TenantRecord[]> {
+  const rows = await prisma.tenant.findMany({ orderBy: { createdAt: 'desc' } });
+  return rows.map(toRecord);
 }
 
-export function getTenant(tenantId: string): TenantRecord | undefined {
-  return tenants[tenantId];
+export async function getTenant(tenantId: string): Promise<TenantRecord | undefined> {
+  const t = await prisma.tenant.findUnique({ where: { id: tenantId } });
+  return t ? toRecord(t) : undefined;
 }
 
-export function upsertTenant(record: TenantRecord): TenantRecord {
-  tenants[record.tenantId] = record;
-  save();
-  return record;
+export async function upsertTenant(record: TenantRecord): Promise<TenantRecord> {
+  const saved = await prisma.tenant.upsert({
+    where: { id: record.tenantId },
+    create: {
+      id: record.tenantId,
+      displayName: record.displayName,
+      projectId: record.projectId,
+      folderId: record.folderId || null,
+      tier: record.tier,
+      status: record.status,
+      kmsKeyId: record.kmsKeyId || null,
+      cloudRunUri: record.cloudRunUri || null,
+      cloudRunServiceName: record.cloudRunServiceName || null,
+      cloudRunStatus: record.cloudRunStatus || null,
+      errorMessage: record.errorMessage || null,
+      byoProject: !!record.byoProject,
+      tenancyMode: record.tenancyMode || null,
+      sharedProject: record.sharedProject !== false,
+      provisionNotes: record.provisionNotes || undefined,
+    },
+    update: {
+      displayName: record.displayName,
+      projectId: record.projectId,
+      folderId: record.folderId || null,
+      tier: record.tier,
+      status: record.status,
+      kmsKeyId: record.kmsKeyId || null,
+      cloudRunUri: record.cloudRunUri || null,
+      cloudRunServiceName: record.cloudRunServiceName || null,
+      cloudRunStatus: record.cloudRunStatus || null,
+      errorMessage: record.errorMessage || null,
+      byoProject: !!record.byoProject,
+      tenancyMode: record.tenancyMode || null,
+      sharedProject: record.sharedProject !== false,
+      provisionNotes: record.provisionNotes || undefined,
+    },
+  });
+  return toRecord(saved);
 }
 
-export function projectIdForTenant(tenantId: string): string | undefined {
-  return tenants[tenantId]?.projectId;
+export async function projectIdForTenant(tenantId: string): Promise<string | undefined> {
+  const t = await getTenant(tenantId);
+  return t?.projectId;
 }

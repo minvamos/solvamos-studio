@@ -1,9 +1,15 @@
 /**
- * Vertex AI Search (Discovery Engine) retrieve + Gemini grounded answer.
+ * Vertex AI Search retrieve + Vertex Gemini (ADC) grounded answer.
+ * Falls back to local Drive corpus when Search is empty / indexing.
  */
 
-import { GoogleAuth } from 'google-auth-library';
-import { GoogleGenAI } from '@google/genai';
+import { retrieveFromLocalCorpus, loadLocalRagCorpus } from './drive-ingest.js';
+import {
+  createVertexSearchDataStore,
+  importCorpusToVertexDataStore,
+} from './vertex-search.js';
+import { generateAnswer } from './vertex-generate.js';
+import { config } from './config.js';
 
 export type RagCitation = { title?: string; uri?: string; snippet?: string };
 
@@ -11,7 +17,9 @@ export type RagResult = {
   answer: string;
   confidence: number;
   citations: RagCitation[];
-  mode: 'vertex_search' | 'gemini_only' | 'demo';
+  mode: 'vertex_search' | 'drive_local' | 'gemini_only' | 'demo';
+  generationBackend?: string;
+  retrievalError?: string;
 };
 
 function projectId(): string | undefined {
@@ -22,25 +30,14 @@ function dataStorePath(dataStoreId?: string): string | null {
   const project = projectId();
   const location = process.env.VERTEX_SEARCH_LOCATION || 'global';
   const collection = process.env.VERTEX_SEARCH_COLLECTION || 'default_collection';
-  const store =
-    dataStoreId ||
-    process.env.VERTEX_DATA_STORE_ID ||
-    process.env.DISCOVERY_ENGINE_DATA_STORE_ID;
+  const store = dataStoreId;
   if (!project || !store) return null;
   return `projects/${project}/locations/${location}/collections/${collection}/dataStores/${store}`;
 }
 
 async function accessToken(): Promise<string | null> {
-  try {
-    const auth = new GoogleAuth({
-      scopes: ['https://www.googleapis.com/auth/cloud-platform'],
-    });
-    const client = await auth.getClient();
-    const token = await client.getAccessToken();
-    return token.token || null;
-  } catch {
-    return null;
-  }
+  const { getGcpAccessToken } = await import('./vertex-search.js');
+  return getGcpAccessToken();
 }
 
 /** Search / retrieve snippets from Vertex AI Search */
@@ -54,7 +51,7 @@ export async function retrieveFromVertexSearch(
       snippets: [],
       citations: [],
       ok: false,
-      error: 'VERTEX_DATA_STORE_ID / GOOGLE_CLOUD_PROJECT not configured',
+      error: 'dataStoreId / GOOGLE_CLOUD_PROJECT not configured',
     };
   }
 
@@ -81,10 +78,13 @@ export async function retrieveFromVertexSearch(
       },
       body: JSON.stringify({
         query,
-        pageSize: 5,
+        pageSize: 8,
         contentSearchSpec: {
           snippetSpec: { returnSnippet: true },
-          extractiveContentSpec: { maxExtractiveAnswerCount: 2 },
+          extractiveContentSpec: {
+            maxExtractiveAnswerCount: 3,
+            maxExtractiveSegmentCount: 3,
+          },
         },
       }),
     });
@@ -108,15 +108,24 @@ export async function retrieveFromVertexSearch(
       const derived = doc.derivedStructData || doc.structData || {};
       const title = derived.title || doc.name;
       const link = derived.link || derived.uri;
-      const snips = (derived.snippets || [])
-        .map((s: any) => s.snippet)
-        .filter(Boolean);
+      const snips = (derived.snippets || []).map((s: any) => s.snippet).filter(Boolean);
       const extractive = (derived.extractive_answers || derived.extractiveAnswers || [])
         .map((e: any) => e.content)
         .filter(Boolean);
-      const piece = [...snips, ...extractive].join('\n');
-      if (piece) snippets.push(piece);
-      citations.push({ title, uri: link, snippet: piece?.slice(0, 240) });
+      const segments = (derived.extractive_segments || derived.extractiveSegments || [])
+        .map((e: any) => e.content)
+        .filter(Boolean);
+      const piece = [...snips, ...extractive, ...segments].join('\n');
+      if (piece) snippets.push(`[${title}]\n${piece}`);
+      else if (derived.title && typeof derived === 'object') {
+        // content may be in document.content
+        const contentText =
+          doc.content?.rawBytes
+            ? Buffer.from(doc.content.rawBytes, 'base64').toString('utf8').slice(0, 2000)
+            : '';
+        if (contentText) snippets.push(`[${title}]\n${contentText}`);
+      }
+      citations.push({ title, uri: link, snippet: (piece || title || '').slice(0, 240) });
     }
 
     return { snippets, citations, ok: true };
@@ -125,67 +134,104 @@ export async function retrieveFromVertexSearch(
   }
 }
 
-/** Ensure a Drive-backed data store id is recorded (provision stub / real API). */
 export async function ensureDriveDataStore(opts: {
   displayName: string;
   driveFolderId: string;
-}): Promise<{ dataStoreId: string; status: 'created' | 'existing' | 'pending'; message?: string }> {
-  const configured = process.env.VERTEX_DATA_STORE_ID;
-  if (configured) {
-    return {
-      dataStoreId: configured,
-      status: 'existing',
-      message: `Using configured data store; bind Drive folder ${opts.driveFolderId} in console if needed`,
-    };
-  }
+}): Promise<{
+  dataStoreId: string;
+  status: 'created' | 'existing' | 'pending' | 'error';
+  message?: string;
+  engineId?: string;
+}> {
+  return createVertexSearchDataStore(opts);
+}
 
-  // Real create requires Discovery Engine admin APIs + Workspace connector setup.
-  // We mint a deterministic id and mark pending for the provisioner / ops runbook.
-  const safe = opts.displayName.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 40);
-  const dataStoreId = `solvamos-${safe || 'drive'}-${opts.driveFolderId.slice(0, 8)}`;
-  return {
-    dataStoreId,
-    status: 'pending',
-    message:
-      'Data store id reserved. Complete Drive connector binding via Terraform/console (Domain-wide Delegation or OAuth).',
-  };
+export async function syncLocalCorpusToVertex(
+  agentId: string,
+  dataStoreId: string
+): Promise<{ imported: number; message: string }> {
+  const { loadLocalRagCorpusAsync } = await import('./drive-ingest.js');
+  const corpus = (await loadLocalRagCorpusAsync(agentId)) || loadLocalRagCorpus(agentId);
+  if (!corpus) return { imported: 0, message: 'No local corpus' };
+  return importCorpusToVertexDataStore(dataStoreId, corpus);
 }
 
 export async function generateGroundedAnswer(opts: {
   systemPrompt: string;
   userPrompt: string;
   dataStoreId?: string;
+  agentId?: string;
   geminiApiKey?: string;
+  /** Skip Search/Drive retrieval (faster for greetings / general chat) */
+  skipRetrieval?: boolean;
 }): Promise<RagResult> {
-  const retrieval = await retrieveFromVertexSearch(opts.userPrompt, opts.dataStoreId);
-  const contextBlock =
-    retrieval.snippets.length > 0
-      ? `\n\n[GROUNDED CONTEXT FROM VERTEX AI SEARCH / CUSTOMER DRIVE]\n${retrieval.snippets.join('\n---\n')}\n`
-      : '\n\n[GROUNDED CONTEXT] None retrieved. Prefer saying insufficient_grounded_data if security is strict.\n';
+  let snippets: string[] = [];
+  let citations: RagCitation[] = [];
+  let mode: RagResult['mode'] = 'gemini_only';
+  let retrievalError: string | undefined;
 
-  if (!opts.geminiApiKey) {
-    return {
-      answer: `[DEMO] Payment OK. RAG mode=${retrieval.ok ? 'vertex_search' : 'unavailable'}.\nQuery: ${opts.userPrompt}\n${contextBlock}`,
-      confidence: retrieval.ok ? 0.7 : 0.4,
-      citations: retrieval.citations,
-      mode: 'demo',
-    };
+  if (!opts.skipRetrieval) {
+    const retrieval = await retrieveFromVertexSearch(opts.userPrompt, opts.dataStoreId);
+    snippets = retrieval.snippets;
+    citations = retrieval.citations;
+    mode = retrieval.ok && snippets.length ? 'vertex_search' : 'gemini_only';
+    retrievalError = retrieval.error;
+
+    if (!snippets.length && opts.agentId) {
+      const local = retrieveFromLocalCorpus(opts.agentId, opts.userPrompt);
+      if (local.ok && local.snippets.length) {
+        snippets = local.snippets;
+        citations = local.citations;
+        mode = 'drive_local';
+        retrievalError = retrieval.error
+          ? `${retrieval.error} (fell back to local Drive corpus)`
+          : undefined;
+      }
+    }
+
+    // If still empty, dump top of local / DB corpus so LLM has something
+    if (!snippets.length && opts.agentId) {
+      const { loadLocalRagCorpusAsync } = await import('./drive-ingest.js');
+      const corpus =
+        (await loadLocalRagCorpusAsync(opts.agentId)) || loadLocalRagCorpus(opts.agentId);
+      if (corpus?.docs?.length) {
+        snippets = corpus.docs.slice(0, 5).map((d) => `[${d.name}]\n${d.text.slice(0, 3000)}`);
+        citations = corpus.docs.slice(0, 5).map((d) => ({
+          title: d.name,
+          uri: d.webViewLink,
+          snippet: d.text.slice(0, 200),
+        }));
+        mode = 'drive_local';
+      }
+    }
   }
 
-  const ai = new GoogleGenAI({ apiKey: opts.geminiApiKey });
-  const response = await ai.models.generateContent({
-    model: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
-    contents: `${contextBlock}\n\nUser query: ${opts.userPrompt}`,
-    config: {
-      systemInstruction: opts.systemPrompt,
-      temperature: 0.4,
-    },
+  const contextBlock =
+    snippets.length > 0
+      ? `\n\n[GROUNDED CONTEXT FROM ${
+          mode === 'drive_local' ? 'GOOGLE DRIVE (local ingest)' : 'VERTEX AI SEARCH'
+        }]\n${snippets.join('\n---\n')}\n[/GROUNDED CONTEXT]\n`
+      : `\n\n[GROUNDED CONTEXT] None retrieved.
+You MUST still answer as a helpful conversational agent (greetings, weather, general Q&A, product help).
+Do not return JSON status objects. Write a natural chat reply in the user's language.
+[/GROUNDED CONTEXT]\n`;
+
+  const gen = await generateAnswer({
+    systemPrompt: opts.systemPrompt,
+    userPrompt: opts.userPrompt,
+    contextBlock,
+    geminiApiKey: opts.geminiApiKey || config.geminiApiKey,
   });
 
+  const { formatAgentChatMessage } = await import('./format-reply.js');
+  const answer = formatAgentChatMessage(gen.text);
+
   return {
-    answer: response.text || 'No response text generated',
-    confidence: retrieval.ok && retrieval.snippets.length ? 0.92 : 0.65,
-    citations: retrieval.citations,
-    mode: retrieval.ok ? 'vertex_search' : 'gemini_only',
+    answer,
+    confidence: snippets.length ? (gen.backend === 'extractive' ? 0.75 : 0.92) : 0.7,
+    citations,
+    mode: gen.backend === 'extractive' && !snippets.length ? 'demo' : mode,
+    generationBackend: gen.backend,
+    retrievalError,
   };
 }

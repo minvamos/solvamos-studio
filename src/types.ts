@@ -6,6 +6,7 @@
 export interface Agent {
   id: string;
   tenantId?: string;
+  agentName?: string;
   role: string;
   customRole?: string;
   tone: string;
