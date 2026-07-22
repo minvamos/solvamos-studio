@@ -22,6 +22,8 @@ export interface AgentRecord {
   vertexDataStoreId?: string;
   secretManagerPath?: string;
   status?: 'CREATING' | 'INDEXING' | 'ACTIVE' | 'PAUSED' | 'ERROR' | string;
+  /** Per-call fee in USDC (0 = free / no paywall) */
+  fee?: number;
   perCallPriceUsdc?: number;
 }
 
@@ -46,7 +48,8 @@ export function loadAgents() {
       created: new Date().toISOString(),
       invokeCount: 24,
       status: 'ACTIVE',
-      perCallPriceUsdc: 0.01,
+      fee: 0.001,
+      perCallPriceUsdc: 0.001,
     };
     saveAgents();
   } catch (err) {

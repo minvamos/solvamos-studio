@@ -12,12 +12,12 @@ import dotenv from 'dotenv';
 
 import { compileSystemPrompt } from './server/prompt.js';
 import { savePrivateKeyToGCP } from './server/vault.js';
-import { verifySolanaDevnetPayment } from './server/payment.js';
+import { verifyPayment } from './server/payment.js';
 import { ensureDriveDataStore, generateGroundedAnswer } from './server/rag.js';
 import { registerDriveAuthRoutes } from './server/drive-oauth.js';
 import { loadTenants, listTenants, getTenant, upsertTenant } from './server/tenants.js';
 import { provisionCustomerProject, plannedProjectId } from './server/provision.js';
-import { config, assertProductionSafety } from './server/config.js';
+import { config, assertProductionSafety, networkLabel } from './server/config.js';
 import {
   loadAgents,
   listAgents,
@@ -87,6 +87,13 @@ app.get('/api/status', (req, res) => {
     oauthConfigured: !!(config.googleClientId && config.googleClientSecret),
     allowLocalVaultFallback: config.allowLocalVaultFallback,
     allowPaymentBypass: config.allowPaymentBypass,
+    paymentNetwork: config.paymentNetwork,
+    networkLabel: networkLabel(),
+    solanaRpcUrl: config.solanaRpcUrl,
+    usdcMint: config.usdcMint,
+    platformFeeShare: config.platformFeeShare,
+    platformTreasuryConfigured: !!config.platformTreasuryPubkey,
+    defaultAgentFeeUsdc: config.defaultAgentFeeUsdc,
     apiEndpoint: `${req.protocol}://${req.get('host')}`,
     totalAgents: listAgents().length,
     totalTenants: listTenants().length,
@@ -165,6 +172,7 @@ app.post('/api/agents/create', async (req, res) => {
       tenantId,
       agentName,
       perCallPriceUsdc,
+      fee,
     } = req.body;
 
     if (!role || !tone || !securityLevel) {
@@ -194,6 +202,13 @@ app.post('/api/agents/create', async (req, res) => {
 
     const gcpStorage = await savePrivateKeyToGCP(agentId, secretKeyBase64);
 
+    const parsedFee =
+      typeof fee === 'number'
+        ? fee
+        : typeof perCallPriceUsdc === 'number'
+          ? perCallPriceUsdc
+          : config.defaultAgentFeeUsdc;
+
     const newAgent: AgentRecord = {
       id: agentId,
       tenantId,
@@ -210,7 +225,8 @@ app.post('/api/agents/create', async (req, res) => {
       vertexDataStoreId,
       secretManagerPath: gcpStorage.path,
       status: indexingStatus,
-      perCallPriceUsdc: perCallPriceUsdc ?? 0.01,
+      fee: parsedFee,
+      perCallPriceUsdc: parsedFee,
     };
 
     putAgent(newAgent);
@@ -275,48 +291,70 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
       return;
     }
 
-    const feeAmount = config.agentFeeSol;
+    const feeAmount =
+      typeof agent.fee === 'number'
+        ? agent.fee
+        : typeof agent.perCallPriceUsdc === 'number'
+          ? agent.perCallPriceUsdc
+          : config.defaultAgentFeeUsdc;
+
+    const runRag = async (paymentLogs: string[]) => {
+      const rag = await generateGroundedAnswer({
+        systemPrompt: agent.systemPrompt,
+        userPrompt,
+        dataStoreId: agent.vertexDataStoreId,
+        geminiApiKey: config.geminiApiKey || undefined,
+      });
+      bumpInvoke(agentId);
+      res.json({
+        status: 'success',
+        answer: rag.answer,
+        data: rag.answer,
+        confidence: rag.confidence,
+        citations: rag.citations,
+        ragMode: rag.mode,
+        paymentLogs,
+        network: networkLabel(),
+        feeUsdc: feeAmount,
+      });
+    };
+
+    // Free tier — no paywall
+    if (feeAmount === 0) {
+      await runRag([`[Free Tier] fee=0 USDC — paywall skipped on ${networkLabel()}`]);
+      return;
+    }
 
     if (!paymentProof) {
+      const agentShare = 1 - config.platformFeeShare;
       res.status(402).json({
         status: 'payment_required',
         amount: feeAmount,
-        token: 'SOL',
+        token: 'USDC',
         recipientWallet: agent.publicKey,
-        network: 'solana-devnet',
-        message: `HTTP 402: SolVamos pay.sh paywall. Pay ${feeAmount} Devnet SOL to [${agent.publicKey}] and retry with X-PAYMENT-PROOF.`,
+        platformTreasury: config.platformTreasuryPubkey || null,
+        agentShareUsdc: feeAmount * agentShare,
+        platformShareUsdc: feeAmount * config.platformFeeShare,
+        network: networkLabel(),
+        paymentNetwork: config.paymentNetwork,
+        usdcMint: config.usdcMint,
+        message: `HTTP 402: Pay ${feeAmount} USDC on ${networkLabel()} (≈${(agentShare * 100).toFixed(0)}% agent / ${(config.platformFeeShare * 100).toFixed(0)}% platform). Attach signature in X-PAYMENT-PROOF.`,
       });
       return;
     }
 
-    const audit = await verifySolanaDevnetPayment(paymentProof, agent.publicKey, feeAmount);
+    const audit = await verifyPayment(paymentProof, agent.publicKey, feeAmount);
     if (!audit.verified) {
       res.status(402).json({
         status: 'payment_verification_failed',
         message: `On-chain validation failed: ${audit.error || 'Transaction verification error'}`,
         logs: audit.logs,
+        network: audit.network,
       });
       return;
     }
 
-    const rag = await generateGroundedAnswer({
-      systemPrompt: agent.systemPrompt,
-      userPrompt,
-      dataStoreId: agent.vertexDataStoreId,
-      geminiApiKey: config.geminiApiKey || undefined,
-    });
-
-    bumpInvoke(agentId);
-
-    res.json({
-      status: 'success',
-      answer: rag.answer,
-      data: rag.answer,
-      confidence: rag.confidence,
-      citations: rag.citations,
-      ragMode: rag.mode,
-      paymentLogs: audit.logs,
-    });
+    await runRag(audit.logs);
   } catch (err: any) {
     res.status(500).json({ status: 'error', message: err.message });
   }

@@ -18,6 +18,8 @@ export interface Agent {
   vertexDataStoreId?: string;
   secretManagerPath?: string;
   status?: string;
+  fee?: number;
+  perCallPriceUsdc?: number;
 }
 
 export interface DriveFolder {
@@ -42,6 +44,8 @@ export interface PromptOptions {
   customRole?: string;
   tone: 'professional' | 'casual' | 'academic' | 'cyberpunk';
   securityLevel: 'strict' | 'balanced' | 'permissive';
+  /** Per-call USDC fee; 0 = free */
+  fee?: number;
 }
 
 export interface Settlement {

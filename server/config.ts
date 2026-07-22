@@ -4,15 +4,42 @@
 
 export type CustomerTier = 'starter' | 'professional' | 'enterprise';
 
+/** sandbox = pay.sh local sandbox proofs; localnet = solana-test-validator; devnet = public Devnet */
+export type PaymentNetwork = 'sandbox' | 'localnet' | 'devnet';
+
 function bool(name: string, fallback = false): boolean {
   const v = process.env[name];
   if (v === undefined || v === '') return fallback;
   return v === 'true' || v === '1' || v === 'yes';
 }
 
+function resolvePaymentNetwork(): PaymentNetwork {
+  const raw = (process.env.PAYMENT_NETWORK || process.env.SOLANA_NETWORK || 'devnet').toLowerCase();
+  if (raw === 'sandbox' || raw === 'paysh' || raw === 'pay.sh') return 'sandbox';
+  if (raw === 'localnet' || raw === 'local' || raw === 'localhost') return 'localnet';
+  return 'devnet';
+}
+
+function defaultRpc(network: PaymentNetwork): string {
+  if (process.env.SOLANA_RPC_URL) return process.env.SOLANA_RPC_URL;
+  if (network === 'localnet') return 'http://127.0.0.1:8899';
+  if (network === 'sandbox') return process.env.PAYSH_SANDBOX_RPC || 'http://127.0.0.1:8899';
+  return 'https://api.devnet.solana.com';
+}
+
+function defaultUsdcMint(network: PaymentNetwork): string {
+  if (process.env.USDC_MINT) return process.env.USDC_MINT;
+  // Devnet USDC (Circle faucet mint commonly used in demos)
+  if (network === 'devnet') return '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
+  // Localnet / sandbox: set USDC_MINT after creating a local mint
+  return process.env.USDC_MINT_LOCAL || 'LocalUsdC111111111111111111111111111111111';
+}
+
+const paymentNetwork = resolvePaymentNetwork();
+
 export const config = {
   product: 'SolVamos Studio',
-  version: '0.6.0',
+  version: '0.7.0',
   port: Number(process.env.PORT) || 3000,
   nodeEnv: process.env.NODE_ENV || 'development',
   isProd: process.env.NODE_ENV === 'production',
@@ -45,8 +72,20 @@ export const config = {
   allowLocalVaultFallback: bool('ALLOW_LOCAL_VAULT_FALLBACK', process.env.NODE_ENV !== 'production'),
   allowPaymentBypass: bool('ALLOW_PAYMENT_BYPASS', process.env.NODE_ENV !== 'production'),
 
-  solanaRpcUrl: process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com',
-  agentFeeSol: Number(process.env.AGENT_FEE_SOL || 0.01),
+  paymentNetwork,
+  solanaRpcUrl: defaultRpc(paymentNetwork),
+  usdcMint: defaultUsdcMint(paymentNetwork),
+  /** Platform take-rate (0.1 = 10%). Rest goes to agent vault. */
+  platformFeeShare: Math.min(1, Math.max(0, Number(process.env.PLATFORM_FEE_SHARE || 0.1))),
+  /**
+   * 플랫폼 10% 수금 지갑.
+   * 기본값 = SolVamos 개발/테스트용 계좌(팀에서 발급한 CREATOR_WALLET).
+   * 프로덕션·다른 환경은 PLATFORM_TREASURY_PUBKEY 로 반드시 오버라이드.
+   */
+  platformTreasuryPubkey:
+    process.env.PLATFORM_TREASURY_PUBKEY ||
+    'AoUNKE8uQ8y1FEtU6YSFCsopK9veP6jZ6EGNoULjdwva',
+  defaultAgentFeeUsdc: Number(process.env.DEFAULT_AGENT_FEE_USDC || 0.001),
 };
 
 export function assertProductionSafety() {
@@ -58,11 +97,19 @@ export function assertProductionSafety() {
   if (config.allowPaymentBypass) {
     problems.push('ALLOW_PAYMENT_BYPASS must be false in production');
   }
+  if (config.paymentNetwork === 'sandbox') {
+    problems.push('PAYMENT_NETWORK=sandbox must not be used in production');
+  }
   if (!config.gcpProject) {
     problems.push('GOOGLE_CLOUD_PROJECT is required in production');
   }
   if (problems.length) {
     console.error('[SolVamos] Production safety check failed:\n - ' + problems.join('\n - '));
-    // Soft-fail: log loudly but allow boot so Cloud Run can still serve /healthz during rollout
   }
+}
+
+export function networkLabel(): string {
+  if (config.paymentNetwork === 'sandbox') return 'pay.sh-sandbox';
+  if (config.paymentNetwork === 'localnet') return 'solana-localnet';
+  return 'solana-devnet';
 }

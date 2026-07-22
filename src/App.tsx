@@ -82,6 +82,7 @@ export default function App() {
     role: 'support',
     tone: 'professional',
     securityLevel: 'strict',
+    fee: 0.001,
   });
   const [livePromptPreview, setLivePromptPreview] = useState('');
   const [creationResult, setCreationResult] = useState<any>(null);
@@ -95,6 +96,8 @@ export default function App() {
     token: string;
     recipientWallet: string;
     prompt: string;
+    network?: string;
+    paymentNetwork?: string;
   } | null>(null);
   const [paymentLogs, setPaymentLogs] = useState<string[]>([]);
   const [isVerifyingPayment, setIsVerifyingPayment] = useState(false);
@@ -322,15 +325,17 @@ export default function App() {
         setPendingPayment({
           agentId,
           amount: data.amount,
-          token: data.token,
+          token: data.token || 'USDC',
           recipientWallet: data.recipientWallet,
           prompt: promptText,
+          network: data.network,
+          paymentNetwork: data.paymentNetwork,
         });
         
         const paywallMessage: Message = {
           id: Math.random().toString(36).substr(2, 9),
           sender: 'system',
-          text: `🔒 SOLVAMOS pay.sh SECURE PAYWALL BLOCK:\n\nThis agent requires on-chain Devnet payment verification to trigger its Vertex AI RAG compiled engine.\n\nFee required: ${data.amount} ${data.token}\nDestination Public Key: ${data.recipientWallet}`,
+          text: `🔒 SOLVAMOS pay.sh SECURE PAYWALL BLOCK:\n\nNetwork: ${data.network || data.paymentNetwork || '—'}\nFee: ${data.amount} ${data.token || 'USDC'}\nAgent vault: ${data.recipientWallet}\nPlatform share: ${data.platformShareUsdc ?? '—'} USDC\n\nAttach X-PAYMENT-PROOF after settlement.`,
           timestamp: new Date().toLocaleTimeString(),
           paymentStatus: 'pending_proof',
         };
@@ -430,28 +435,37 @@ export default function App() {
     }
   };
 
-  // Simulate on-chain transaction signature creation and auto-retry
+  // Simulate / attach payment proof (sandbox vs real signature)
   const handleAcknowledgeAndSign = async (useRandomSig = true) => {
     if (!pendingPayment) return;
-    
-    // Create a mock transaction signature
-    const signature = useRandomSig 
-      ? `MOCK_TX_${Math.random().toString(36).substr(2, 10).toUpperCase()}_${Date.now().toString().slice(-4)}`
-      : customSignature.trim();
+
+    const net =
+      pendingPayment.paymentNetwork ||
+      serverStatus?.paymentNetwork ||
+      'devnet';
+
+    let signature: string;
+    if (useRandomSig) {
+      // pay.sh sandbox / local mock proofs — accepted when PAYMENT_NETWORK=sandbox (or bypass)
+      const prefix = net === 'sandbox' ? 'PAYSH_LOCAL_' : net === 'localnet' ? 'SANDBOX_TX_' : 'MOCK_TX_';
+      signature = `${prefix}${Math.random().toString(36).substr(2, 10).toUpperCase()}_${Date.now().toString().slice(-4)}`;
+    } else {
+      signature = customSignature.trim();
+    }
 
     if (!signature) {
-      alert('Please enter a valid Solana transaction signature hash.');
+      alert('Solana / pay.sh 트랜잭션 서명을 입력하세요. (devnet·localnet 실서명 또는 sandbox 증명)');
       return;
     }
 
     setPaymentLogs([
-      `[Signature Generated] Local sandbox wallet signed transaction payload.`,
-      `[Client Handshake] Preparing transaction signature package...`,
+      `[Network] ${net} (${pendingPayment.network || serverStatus?.networkLabel || ''})`,
+      `[Proof] ${useRandomSig ? 'Generated sandbox-style proof' : 'Using pasted on-chain signature'}`,
       `Signature: ${signature}`,
-      `Broadcasting proof to x402 gateway: POST /api/agents/${pendingPayment.agentId}/invoke`
+      `Fee: ${pendingPayment.amount} ${pendingPayment.token}`,
+      `Broadcasting: POST /api/agents/${pendingPayment.agentId}/invoke`,
     ]);
 
-    // Retry invocation with signature proof header attached!
     await invokeAgent(pendingPayment.agentId, pendingPayment.prompt, signature);
     setCustomSignature('');
   };
@@ -761,10 +775,48 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* 4. Customer Google Workspace Drive */}
+                    {/* 4. API USAGE FEE (USDC) */}
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center">
+                        <label className="text-xs font-mono font-bold uppercase tracking-widest text-[#4285F4]">
+                          4. API 이용료 설정 (USDC)
+                        </label>
+                        <span className="text-xs font-bold font-mono text-[#14F195] bg-[#14F195]/10 px-2 py-0.5 rounded border border-[#14F195]/20">
+                          {options.fee === 0 ? '무료 (Paywall 없음)' : `${options.fee} USDC`}
+                        </span>
+                      </div>
+                      <div className="bg-[#152031] p-4 rounded-xl border border-[#ffffff1a] space-y-3">
+                        <input
+                          type="range"
+                          min="0"
+                          max="0.2"
+                          step="0.001"
+                          value={options.fee !== undefined ? options.fee : 0.001}
+                          onChange={(e) =>
+                            setOptions({
+                              ...options,
+                              fee: parseFloat(parseFloat(e.target.value).toFixed(3)),
+                            })
+                          }
+                          className="w-full accent-[#14F195] cursor-pointer h-1.5 bg-[#081425] rounded-lg appearance-none"
+                        />
+                        <div className="flex justify-between text-[10px] text-[#94A3B8] font-mono">
+                          <span>무료 (0)</span>
+                          <span>기본 (0.001)</span>
+                          <span>최대 (0.2)</span>
+                        </div>
+                        <p className="text-[10px] text-[#94A3B8]/70 leading-relaxed">
+                          * 유료 시 검증 기준은 이용료의 약 90% 에이전트 지갑 + 10% 플랫폼 트레저리(환경변수).
+                          네트워크: {serverStatus?.networkLabel || serverStatus?.paymentNetwork || 'devnet'}
+                          {' '}(PAYMENT_NETWORK=sandbox|localnet|devnet)
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* 5. Customer Google Workspace Drive */}
                     <div className="space-y-2">
                       <label className="text-xs font-mono font-bold uppercase tracking-widest text-[#4285F4] flex items-center gap-1.5">
-                        <HardDrive className="h-3.5 w-3.5" /> 4. 고객 Google Drive 폴더 (RAG)
+                        <HardDrive className="h-3.5 w-3.5" /> 5. 고객 Google Drive 폴더 (RAG)
                       </label>
                       <div className="bg-[#081425] rounded-xl p-3 border border-[#ffffff1a] space-y-2">
                         <div className="flex gap-2">
@@ -819,7 +871,7 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* 5. REAL-TIME COMPILER DRIFT PREVIEW */}
+                    {/* 6. REAL-TIME COMPILER DRIFT PREVIEW */}
                     <div className="space-y-1.5">
                       <div className="flex justify-between items-center">
                         <label className="text-xs font-mono font-bold uppercase tracking-widest text-[#4285F4]">프롬프트 실시간 컴파일 상태</label>
@@ -1002,6 +1054,7 @@ export default function App() {
                         <div className="flex gap-4 text-[11px] font-mono text-[#94A3B8]">
                           <span>매너: <strong className="text-white capitalize">{agent.tone}</strong></span>
                           <span>가드레일: <strong className="text-amber-300 capitalize">{agent.securityLevel}</strong></span>
+                          <span>이용료: <strong className="text-[#14F195]">{agent.fee === 0 ? '무료' : `${agent.fee ?? agent.perCallPriceUsdc ?? 0.001} USDC`}</strong></span>
                         </div>
                       </div>
 
@@ -1174,7 +1227,7 @@ export default function App() {
                           에이전트 실시간 연동: {activeAgent.id}
                         </p>
                         <p className="leading-relaxed">
-                          프롬프트를 입력하세요. 에이전트 게이트웨이가 실행(execution)을 감지하면 <span className="text-[#14F195] font-semibold">HTTP 402 Payment Required</span> 프로토콜을 동작시켜 온체인 정산 증명(Signature)을 요구합니다. 아래 버튼을 눌러 승인 시 즉시 Devnet 상에 0.01 SOL 결제 트랜잭션을 전송하여 암호화를 해제합니다.
+                          프롬프트를 입력하세요. 이용료가 0보다 크면 HTTP 402 후 {activeAgent.fee === 0 ? '0' : (activeAgent.fee ?? 0.001)} USDC 증명이 필요합니다 (네트워크: {serverStatus?.networkLabel || 'devnet'}).
                         </p>
                       </div>
 
@@ -1234,7 +1287,10 @@ export default function App() {
                             <div>
                               <h4 className="text-white font-bold text-xs">에이전트 가상 터널 암호화 해제</h4>
                               <p className="text-[11px] text-[#94A3B8]/80 leading-relaxed mt-0.5">
-                                안전하게 생성된 에이전트 전용 볼트(Vault) 지갑 주소로 {pendingPayment.amount} SOL 결제 트랜잭션을 브로드캐스팅합니다.
+                                에이전트 볼트(Vault)로 {pendingPayment.amount} {pendingPayment.token || 'USDC'} 결제 증명을 제출합니다.
+                                <span className="block mt-1 text-[#14F195]/80">
+                                  네트워크: {pendingPayment.network || serverStatus?.networkLabel || '—'}
+                                </span>
                               </p>
                             </div>
                           </div>
@@ -1244,7 +1300,10 @@ export default function App() {
                               onClick={() => handleAcknowledgeAndSign(true)}
                               className="w-full bg-[#14F195] hover:bg-[#14F195]/90 text-[#081425] font-bold py-2.5 px-3 rounded-lg text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-lg shadow-[#14F195]/10"
                             >
-                              <Wallet className="h-3.5 w-3.5" /> 간편 확인 및 온체인 자동 서명 생성 (수수료 0.01 SOL)
+                              <Wallet className="h-3.5 w-3.5" />{' '}
+                              {serverStatus?.paymentNetwork === 'sandbox' || serverStatus?.allowPaymentBypass
+                                ? `샌드박스/테스트 증명 (${pendingPayment.amount} USDC)`
+                                : `테스트 증명 생성 · 실서명은 아래에 붙여넣기`}
                             </button>
 
                             <div className="relative flex items-center justify-center">
@@ -1257,7 +1316,7 @@ export default function App() {
                                 type="text"
                                 value={customSignature}
                                 onChange={(e) => setCustomSignature(e.target.value)}
-                                placeholder="Solana Devnet 트랜잭션 서명 해시를 입력하세요"
+                                placeholder="Devnet/localnet USDC tx signature (또는 sandbox 증명)"
                                 className="flex-1 bg-[#081425] text-xs font-mono px-3 py-1.5 rounded-lg border border-[#ffffff1a] text-white focus:outline-none focus:border-[#4285F4]"
                               />
                               <button
@@ -1370,7 +1429,7 @@ export default function App() {
       {/* Bottom Status Bar */}
       <footer className="h-8 bg-[#040e1f] border-t border-[#ffffff1a] flex items-center justify-between px-6 text-[10px] font-mono text-[#94A3B8]">
         <div className="flex gap-6">
-          <span>RPC: {serverStatus?.apiEndpoint ? 'devnet' : '—'}</span>
+          <span>Pay: {serverStatus?.networkLabel || serverStatus?.paymentNetwork || '—'}</span>
           <span className="flex items-center gap-1">
             <span className={`w-1.5 h-1.5 rounded-full ${serverStatus?.vertexDataStore ? 'bg-[#14F195]' : 'bg-amber-400'}`} />
             Vertex Search: {serverStatus?.vertexDataStore ? '구성됨' : '미구성'}
@@ -1379,7 +1438,7 @@ export default function App() {
           <span>Tier: {serverStatus?.tier || 'starter'}</span>
         </div>
         <div className="flex gap-4">
-          <span>SolVamos Studio {serverStatus?.version || 'v0.6.0'}</span>
+          <span>SolVamos Studio {serverStatus?.version || 'v0.7.0'}</span>
           <span className="text-[#4285F4]">Cloud Run paywall + Search RAG</span>
         </div>
       </footer>
