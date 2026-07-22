@@ -2,7 +2,7 @@
 # 자동 배포 1순위: .github/workflows/deploy-cloudrun.yml (main push)
 substitutions:
   _REGION: asia-northeast3
-  _REPO: solvamos
+  _REPO: solvamos-img
   _SERVICE: solvamos-studio
   _TIER: starter
   _MIN_INSTANCES: "0"

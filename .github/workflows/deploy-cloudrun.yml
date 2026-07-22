@@ -18,7 +18,7 @@ concurrency:
 env:
   PROJECT_ID: project-64269e62-555d-4979-88e
   REGION: asia-northeast3
-  AR_REPO: solvamos
+  AR_REPO: solvamos-img
   SERVICE: solvamos-studio
   TIER: starter
   NODE_VERSION: "20"
