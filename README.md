@@ -37,61 +37,83 @@
 - **AI**: Gemini SDK (`@google/genai` 패키지 사용), Vertex AI Search (Discovery Engine)
 - **Blockchain**: Solana Devnet (pay.sh 프로토콜 API 명세 시뮬레이션)
 - **Storage & State**: 로컬 및 메모리 저장소, JSON DB 구조 동기화
-- **Cloud**: GCP Secret Manager, Cloud KMS, Cloud Run (`solvamos-cloudrun` 배포)
-- **Google APIs**: OAuth 2.0, Google Drive API (`drive.readonly`)
+- **Cloud**: GCP Secret Manager, Cloud KMS, Cloud Run (GitHub Actions CI)
+- **Google APIs**: OAuth 2.0 SSO + Google Drive API (`drive.readonly`)
 
 ---
 
-## 설치 및 시작 가이드
+## 설치 및 로컬 구동
 
-### 필수 요구사항
-- Node.js 18 이상
-- npm 또는 Bun 패키지 매니저
+### 필수
+- **Node.js 20+** (권장; Dockerfile도 20)
+- npm
 
-### 1. 저장소 클론 및 패키지 설치
+### 1. 클론 · 설치
 ```bash
-git clone https://github.com/your-username/solvamos-studio.git
+git clone https://github.com/minvamos/solvamos-studio.git
+# Lab fork: https://github.com/mikohatsu/solvamos-studio.git
 cd solvamos-studio
 npm install
 ```
 
-### 2. 환경 변수 설정
-프로젝트 루트 폴더에 `.env` 파일을 생성하고 다음 변수들을 추가해 주세요. (참고: `.env.example` 파일)
-```env
-# Gemini API Key (서버측 비공개 키)
-GEMINI_API_KEY=your_gemini_api_key_here
+### 2. 환경 변수
+```bash
+cp .env.example .env
+```
 
-# (선택) Google OAuth — Drive 연동
+로컬 Lab 최소 예시 (상세·금지 플래그: [`docs/DEPLOY_ENV.md`](../docs/DEPLOY_ENV.md)):
+
+```env
+GEMINI_API_KEY=
+APP_URL=http://localhost:3000
+PORT=3000
+NODE_ENV=development
+
+# Google SSO + Drive (필수에 가깝음 — 로그인/Drive 브라우저)
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 OAUTH_REDIRECT_URI=http://localhost:3000/api/auth/google/callback
+ALLOW_ADC_DRIVE=false
 
-# (선택) GCP
 GOOGLE_CLOUD_PROJECT=
+TENANCY_MODE=shared
+ALLOW_LOCAL_VAULT_FALLBACK=true
+ALLOW_PAYMENT_BYPASS=true
+PAYMENT_NETWORK=sandbox
+PLATFORM_TREASURY_PUBKEY=AoUNKE8uQ8y1FEtU6YSFCsopK9veP6jZ6EGNoULjdwva
 ```
 
-### 3. 개발 서버 실행
+OAuth Web Client에 **localhost** origins/redirect를 넣어야 합니다.  
+런북: [`docs/DRIVE_OAUTH_SETUP.md`](../docs/DRIVE_OAUTH_SETUP.md)
+
+에이전트/세션 JSON은 로컬에서 `.data/` 아래(프로덕션 Cloud Run은 `/tmp/solvamos-data`)에 저장됩니다.
+
+### 3. 개발 서버
 ```bash
-# 풀스택 모드로 개발 서버 및 백엔드 실행
 npm run dev
 ```
-개발 서버가 성공적으로 시작되면 브라우저에서 `http://localhost:3000`으로 접속할 수 있습니다.
+브라우저: [http://localhost:3000](http://localhost:3000)
 
-### 4. 빌드 및 프로덕션 실행
 ```bash
-# 프론트엔드 빌드 및 백엔드 esbuild 컴파일
-npm run build
+npm run lint    # tsc --noEmit
+npm run smoke   # 서버 기동 중일 때 /api/status 등 스모크
+```
 
-# 서비스 실행
-npm start
+### 4. 로컬 프로덕션 빌드
+```bash
+npm run build   # Vite + esbuild → dist/
+npm start       # NODE_ENV=production 권장; PORT 기본 3000 (Cloud Run은 8080)
 ```
 
 ### 5. Cloud Run 배포
+- **자동:** `main` 머지 → GitHub Actions → Artifact Registry → Cloud Run  
+  런북: [`docs/CICD_CLOUDRUN.md`](../docs/CICD_CLOUDRUN.md)
+- **수동 비상:**
 ```powershell
 cd ../solvamos-cloudrun
 .\scripts\deploy.ps1 -ProjectId "YOUR_PROJECT" -Tier "starter"
 ```
-GCP 콘솔·시크릿·Vertex Data Store 설정은 [`docs/GCP_SETUP.md`](../docs/GCP_SETUP.md)를 참고하세요.
+콘솔·시크릿·Vertex: [`docs/GCP_SETUP.md`](../docs/GCP_SETUP.md)
 
 ---
 
