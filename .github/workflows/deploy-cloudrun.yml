@@ -267,10 +267,11 @@ jobs:
       - name: Bind runtime URL + OAuth secrets (preserve across deploys)
         env:
           GOOGLE_CLIENT_ID_VAR: ${{ vars.GOOGLE_CLIENT_ID }}
+          PROJECT_NUMBER_VAR: ${{ vars.GCP_PROJECT_NUMBER }}
         run: |
           set -euo pipefail
-          PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format='value(projectNumber)')
-          # Prefer regional URL (Console format)
+          # Prefer Variable / known Lab number — avoids cloudresourcemanager API on CI SA
+          PROJECT_NUMBER="${PROJECT_NUMBER_VAR:-74094114833}"
           URL="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 
           UPDATE_ENV="APP_URL=${URL},OAUTH_REDIRECT_URI=${URL}/api/auth/google/callback"
