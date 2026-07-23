@@ -885,7 +885,7 @@ export default function App() {
     }
   };
 
-  const switchPaymentNetwork = async (network: 'sandbox' | 'devnet') => {
+  const switchPaymentNetwork = async (network: 'localnet' | 'devnet' | 'sandbox') => {
     setNetworkSwitchBusy(true);
     try {
       const res = await fetch('/api/payment/network', {
@@ -902,11 +902,13 @@ export default function App() {
       setPendingPayment(null);
       setPaymentLogs([
         `[Payment mode] → ${data.paymentNetwork} (${data.networkLabel})`,
+        `pay.sh: ${data.paySh?.label || ''}`,
+        `Gateway: ${data.gateway?.state || 'unknown'} pid=${data.gateway?.pid || '—'}`,
         `RPC: ${data.solanaRpcUrl}`,
         `USDC mint: ${data.usdcMint}`,
-        data.sandboxProofsAllowed
-          ? 'Sandbox proofs (PAYSH_LOCAL_ / PAYSH_A2A_) allowed'
-          : 'Devnet/product: paste a real USDC transfer signature',
+        data.paymentNetwork === 'devnet'
+          ? 'Devnet: on-chain USDC via pay.sh (not mainnet)'
+          : 'Localnet: pay --sandbox (Surfpool, no real funds)',
       ]);
     } catch (err) {
       console.error(err);
@@ -954,14 +956,18 @@ export default function App() {
 
     let signature: string;
     if (useRandomSig) {
-      if (net !== 'sandbox' && !serverStatus?.allowPaymentBypass && !serverStatus?.sandboxProofsAllowed) {
+      if (
+        net !== 'localnet' &&
+        net !== 'sandbox' &&
+        !serverStatus?.allowPaymentBypass &&
+        !serverStatus?.sandboxProofsAllowed
+      ) {
         alert(
-          'Devnet(제품) 모드에서는 샌드박스/Mock 증명을 쓸 수 없습니다.\n에이전트 vault로 USDC를 보낸 뒤 트랜잭션 서명을 붙여넣으세요.\n또는 사이드바에서 Sandbox로 전환하세요.'
+          'Devnet 모드에서는 Mock/PAYSH 증명을 쓸 수 없습니다.\npay.sh 게이트웨이로 결제하거나, 사이드바에서 Localnet으로 전환하세요.\n(메인넷은 지원하지 않습니다)'
         );
         return;
       }
-      const prefix =
-        net === 'sandbox' ? 'PAYSH_LOCAL_' : net === 'localnet' ? 'SANDBOX_TX_' : 'MOCK_TX_';
+      const prefix = net === 'devnet' ? 'MOCK_TX_' : 'PAYSH_LOCAL_';
       signature = `${prefix}${Math.random().toString(36).substr(2, 10).toUpperCase()}_${Date.now().toString().slice(-4)}`;
     } else {
       signature = customSignature.trim();

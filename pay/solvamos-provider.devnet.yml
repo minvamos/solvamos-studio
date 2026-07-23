@@ -1,0 +1,60 @@
+# yaml-language-server: $schema=https://pay.sh/docs-assets/provider.schema.json
+# SolVamos — pay.sh DEVNET provider (on-chain Devnet USDC, no mainnet)
+# Use when Studio payment mode = Devnet. Do NOT pass --sandbox.
+#
+# Start:
+#   $env:PAY_INTERNAL_SECRET="dev-pay-internal"
+#   .\tools\pay\pay.exe server start pay\solvamos-provider.devnet.yml --bind 127.0.0.1:1402
+#
+# Call:
+#   .\tools\pay\pay.exe fetch "http://127.0.0.1:1402/v1/agents/{agentId}/invoke?prompt=hello"
+#
+# Requires: `pay setup` / funded Devnet wallet with USDC (faucet). Not mainnet.
+
+name: solvamos-studio
+subdomain: solvamos-studio
+title: 'SolVamos Studio Agents (Devnet)'
+description: 'RAG agents behind pay.sh on Solana Devnet.'
+category: ai_ml
+version: v1
+
+routing:
+  type: proxy
+  url: http://127.0.0.1:3000/
+  auth:
+    method: header
+    key: 'X-Pay-Internal-Secret'
+    value_from_env: PAY_INTERNAL_SECRET
+
+operator:
+  currencies:
+    usd: ['USDC']
+  network: devnet
+  fee_payer: true
+
+endpoints:
+  - method: GET
+    path: 'v1/health'
+    description: 'Gateway → origin health (free).'
+
+  - method: GET
+    path: 'v1/agents/{agentId}/invoke'
+    description: 'Paid agent invoke (RAG) via query prompt (pay fetch compatible).'
+    metering:
+      dimensions:
+        - direction: usage
+          unit: requests
+          scale: 1
+          tiers:
+            - price_usd: 0.001
+
+  - method: POST
+    path: 'v1/agents/{agentId}/invoke'
+    description: 'Paid agent invoke (RAG) POST.'
+    metering:
+      dimensions:
+        - direction: usage
+          unit: requests
+          scale: 1
+          tiers:
+            - price_usd: 0.001

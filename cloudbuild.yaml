@@ -38,7 +38,7 @@ steps:
       - |
         MIN=${_MIN_INSTANCES}
         if [ "${_TIER}" = "professional" ]; then MIN=1; fi
-        if [ "${_TIER}" = "enterprise" ]; then MIN=2; fi
+        if [ "${_TIER}" = "enterprise" ]; then MIN=1; fi
         gcloud run deploy ${_SERVICE} \
           --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/studio:$SHORT_SHA \
           --region=${_REGION} \
@@ -47,7 +47,8 @@ steps:
           --port=8080 \
           --cpu-boost \
           --min-instances=$$MIN \
-          --max-instances=20 \
+          --max=1 \
+          --max-instances=1 \
           --set-env-vars=NODE_ENV=production,CUSTOMER_TIER=${_TIER},ALLOW_LOCAL_VAULT_FALLBACK=false,ALLOW_PAYMENT_BYPASS=false,ALLOW_ADC_DRIVE=false,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,PAYMENT_NETWORK=devnet \
           --project=$PROJECT_ID
 

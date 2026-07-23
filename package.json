@@ -10,6 +10,10 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "smoke": "tsx server/smoke-check.ts",
+    "pay:install": "powershell -ExecutionPolicy Bypass -File scripts/install-pay.ps1",
+    "pay:gateway": "pay --sandbox server start pay/solvamos-provider.yml --bind 127.0.0.1:1402",
+    "pay:gateway:localnet": "pay --sandbox server start pay/solvamos-provider.yml --bind 127.0.0.1:1402",
+    "pay:gateway:devnet": "pay server start pay/solvamos-provider.devnet.yml --bind 127.0.0.1:1402",
     "postinstall": "prisma generate"
   },
   "dependencies": {

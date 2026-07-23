@@ -1,0 +1,58 @@
+# yaml-language-server: $schema=https://pay.sh/docs-assets/provider.schema.json
+# SolVamos Studio — pay.sh LOCALNET / sandbox provider
+# Studio payment mode = Localnet → always start with `--sandbox`.
+#
+# Start:
+#   $env:PAY_INTERNAL_SECRET="dev-pay-internal"
+#   .\tools\pay\pay.exe --sandbox server start pay\solvamos-provider.yml --bind 127.0.0.1:1402
+#
+# Devnet (on-chain): use pay/solvamos-provider.devnet.yml WITHOUT --sandbox
+# Mainnet: not used.
+name: solvamos-studio
+subdomain: solvamos-studio
+title: 'SolVamos Studio Agents'
+description: 'RAG agents behind pay.sh — AI Applications grounded answers, A2A peer hops.'
+category: ai_ml
+version: v1
+
+routing:
+  type: proxy
+  url: http://127.0.0.1:3000/
+  auth:
+    method: header
+    key: 'X-Pay-Internal-Secret'
+    value_from_env: PAY_INTERNAL_SECRET
+
+operator:
+  currencies:
+    usd: ['USDC']
+  network: localnet
+  fee_payer: true
+
+endpoints:
+  - method: GET
+    path: 'v1/health'
+    description: 'Gateway → origin health (free).'
+
+  # GET: Windows-friendly — `pay --sandbox fetch` has no -X/-d; use ?prompt=
+  - method: GET
+    path: 'v1/agents/{agentId}/invoke'
+    description: 'Paid agent invoke (RAG) via query prompt (pay fetch compatible).'
+    metering:
+      dimensions:
+        - direction: usage
+          unit: requests
+          scale: 1
+          tiers:
+            - price_usd: 0.001
+
+  - method: POST
+    path: 'v1/agents/{agentId}/invoke'
+    description: 'Paid agent invoke (RAG). Prefer POST when system curl is available to pay CLI.'
+    metering:
+      dimensions:
+        - direction: usage
+          unit: requests
+          scale: 1
+          tiers:
+            - price_usd: 0.001

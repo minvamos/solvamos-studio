@@ -25,7 +25,7 @@ type Props = {
   children: ReactNode;
   onLogout?: () => void;
   paymentNetwork?: string;
-  onPaymentNetworkChange?: (network: 'sandbox' | 'devnet') => void;
+  onPaymentNetworkChange?: (network: 'localnet' | 'devnet') => void;
   paymentSwitchBusy?: boolean;
   catalogPublishMode?: 'internal' | 'main' | 'both';
   onCatalogPublishModeChange?: (mode: 'internal' | 'main' | 'both') => void;
@@ -80,14 +80,14 @@ export default function AppShell({
                 <button
                   type="button"
                   disabled={paymentSwitchBusy}
-                  onClick={() => onPaymentNetworkChange('sandbox')}
+                  onClick={() => onPaymentNetworkChange('localnet')}
                   className={
-                    paymentNetwork === 'sandbox'
+                    paymentNetwork === 'localnet' || paymentNetwork === 'sandbox'
                       ? 'flex-1 py-1.5 rounded-md text-xs font-semibold bg-solana-green/20 text-solana-green border border-solana-green/40'
                       : 'flex-1 py-1.5 rounded-md text-xs font-medium text-on-surface-variant hover:bg-surface-container-highest'
                   }
                 >
-                  Sandbox
+                  Localnet
                 </button>
                 <button
                   type="button"
@@ -104,8 +104,8 @@ export default function AppShell({
               </div>
               <p className="text-[10px] text-outline mt-2 px-1 leading-relaxed">
                 {paymentNetwork === 'devnet'
-                  ? '제품 경로: Devnet USDC 실서명 필요'
-                  : '테스트: pay.sh 샌드박스 증명'}
+                  ? 'pay.sh → Devnet 온체인 USDC (메인넷 없음). 클릭 시 자동 전환'
+                  : 'pay.sh --sandbox (Surfpool). 실돈 없음. 클릭 시 자동 전환'}
               </p>
             </div>
           )}

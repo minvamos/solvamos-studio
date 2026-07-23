@@ -337,7 +337,7 @@ jobs:
           MIN=0
           case "${TIER}" in
             professional) MIN=1 ;;
-            enterprise) MIN=2 ;;
+            enterprise) MIN=1 ;;
           esac
           echo "min=${MIN}" >> "$GITHUB_OUTPUT"
 
@@ -354,7 +354,8 @@ jobs:
             --allow-unauthenticated \
             --cpu-boost \
             --min-instances="${{ steps.tier.outputs.min }}" \
-            --max-instances=20 \
+            --max=1 \
+            --max-instances=1 \
             --add-cloudsql-instances="${PROJECT_ID}:${REGION}:solvamos-studio-pg" \
             --update-env-vars="NODE_ENV=production,CUSTOMER_TIER=${TIER},ALLOW_LOCAL_VAULT_FALLBACK=false,ALLOW_PAYMENT_BYPASS=false,ALLOW_ADC_DRIVE=false,GOOGLE_CLOUD_PROJECT=${PROJECT_ID},PAYMENT_NETWORK=devnet"
 

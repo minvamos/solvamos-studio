@@ -37,6 +37,8 @@ steps:
       - --platform=managed
       - --allow-unauthenticated
       - --min-instances=0
+      - --max=1
+      - --max-instances=1
       - --cpu-boost
       - --set-env-vars=ALLOW_LOCAL_VAULT_FALLBACK=false,ALLOW_PAYMENT_BYPASS=false,CUSTOMER_TIER=starter
     # Target customer project by overriding $PROJECT_ID in trigger

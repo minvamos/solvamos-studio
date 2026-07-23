@@ -1,8 +1,8 @@
 /**
  * pay.sh / x402 payment verification — USDC SPL with optional 90/10 platform split.
- * Networks: sandbox (pay.sh local) | localnet | devnet
+ * Networks: localnet (pay.sh --sandbox) | devnet (pay.sh on-chain Devnet). No mainnet.
  * Security: fail-closed on RPC errors unless ALLOW_PAYMENT_BYPASS=true.
- * Sandbox network may accept MOCK_/SANDBOX_/PAYSH_LOCAL_ proofs without bypass flag.
+ * Legacy MOCK_/PAYSH_* only when ALLOW_LEGACY_SANDBOX_PROOF=true on localnet.
  */
 
 import { Connection } from '@solana/web3.js';
@@ -116,21 +116,33 @@ export async function verifyPayment(
     return { verified: false, logs, error: replayErr, network };
   }
 
-  // --- Sandbox / mock proofs ---
+  // --- Sandbox / mock proofs (localnet + ALLOW_LEGACY_SANDBOX_PROOF only) ---
   if (isSandboxProof(signature)) {
-    const sandboxOk = network === 'sandbox' || allowBypass;
-    if (!sandboxOk) {
+    if (!config.allowLegacySandboxProof) {
       logs.push(
-        `[Rejected] Sandbox/mock proof not allowed on network=${network} (set PAYMENT_NETWORK=sandbox or ALLOW_PAYMENT_BYPASS=true)`
+        `[Rejected] Legacy sandbox proof disabled — use pay.sh gateway (USE_PAY_GATEWAY) or set ALLOW_LEGACY_SANDBOX_PROOF=true`
       );
       return {
         verified: false,
         logs,
-        error: 'Sandbox payment proofs require PAYMENT_NETWORK=sandbox or ALLOW_PAYMENT_BYPASS',
+        error:
+          'Legacy PAYSH_*/MOCK_ proofs disabled. Call via pay gateway or enable ALLOW_LEGACY_SANDBOX_PROOF',
         network,
       };
     }
-    logs.push(`[Sandbox Proof] Accepted ${signature.slice(0, 24)}… on ${network}`);
+    const sandboxOk = network === 'localnet' || allowBypass;
+    if (!sandboxOk) {
+      logs.push(
+        `[Rejected] Sandbox/mock proof not allowed on network=${network} (set PAYMENT_NETWORK=localnet or ALLOW_PAYMENT_BYPASS=true)`
+      );
+      return {
+        verified: false,
+        logs,
+        error: 'Sandbox payment proofs require PAYMENT_NETWORK=localnet or ALLOW_PAYMENT_BYPASS',
+        network,
+      };
+    }
+    logs.push(`[Legacy Sandbox Proof] Accepted ${signature.slice(0, 24)}… on ${network}`);
     logs.push(
       `[USDC simulation] agent ${expectedAgentAmount.toFixed(6)} → ${recipientWallet}` +
         (treasury

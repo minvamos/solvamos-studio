@@ -193,6 +193,14 @@ export function getCatalogEntry(agentId: string): PayShCatalogEntry | undefined 
 }
 
 export function buildInvokeUrl(agentId: string, baseUrl?: string): string {
+  // Commercial / A2A discovery URL = pay.sh gateway (settlement then proxy to origin).
+  if (config.usePayGateway) {
+    const gw = (process.env.PAY_GATEWAY_URL || config.payGatewayUrl || 'http://127.0.0.1:1402').replace(
+      /\/$/,
+      ''
+    );
+    return `${gw}/v1/agents/${agentId}/invoke`;
+  }
   const base = (baseUrl || config.appUrl || 'http://localhost:3000').replace(/\/$/, '');
   return `${base}/api/agents/${agentId}/invoke`;
 }

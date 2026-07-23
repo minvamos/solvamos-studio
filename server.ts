@@ -19,13 +19,19 @@ import { registerDriveAuthRoutes, isDriveAuthAvailable, isOAuthClientConfigured,
 import { loadTenants, listTenants, getTenant, upsertTenant } from './server/tenants.js';
 import { provisionCustomerProject, plannedProjectId, buildProvisionPlan, resolveTenancyMode } from './server/provision.js';
 import { provisionTenantCloudRun } from './server/cloudrun-provision.js';
-import { config, assertProductionSafety, networkLabel, setPaymentNetwork, paymentNetworkInfo } from './server/config.js';
+import {
+  config,
+  assertProductionSafety,
+  networkLabel,
+  setPaymentNetwork,
+  paymentNetworkInfo,
+  normalizePaymentNetwork,
+} from './server/config.js';
 import {
   loadAgents,
   listAgents,
   getAgent,
   putAgent,
-  bumpInvoke,
   deleteAgent,
   type AgentRecord,
 } from './server/agents-store.js';
@@ -40,11 +46,18 @@ import {
   catalogPublishInfo,
 } from './server/paysh-catalog.js';
 import { loadWallets, listWallets, addWallet, setPrimaryWallet, removeWallet, getPrimaryWallet, ownerKeyFromEmail, updateWalletLabel } from './server/wallets.js';
-import { orchestrateA2ATurn } from './server/a2a.js';
-import { connectDb } from './server/db.js';
+import { connectDb, prisma } from './server/db.js';
 import { registerPlatformAuthRoutes } from './server/auth-routes.js';
 import { getMeFromRequest } from './server/platform-auth.js';
 import { sharedTenantId, ensureSharedCustomerTenant } from './server/tenant-seed.js';
+import { runAgentInvoke, agentFeeUsdc, ensureListed } from './server/invoke-handler.js';
+import { buildAgentCard } from './server/agent-card.js';
+import { gatewayInvokeUrl } from './server/pay-client.js';
+import {
+  payGatewayStatus,
+  restartManagedPayGateway,
+  stopManagedPayGateway,
+} from './server/pay-gateway-manager.js';
 
 dotenv.config();
 assertProductionSafety();
@@ -139,7 +152,11 @@ app.get('/api/status', async (req, res) => {
     platformFeeShare: config.platformFeeShare,
     platformTreasuryConfigured: !!config.platformTreasuryPubkey,
     platformTreasuryPubkey: config.platformTreasuryPubkey,
-    sandboxProofsAllowed: config.paymentNetwork === 'sandbox' || config.allowPaymentBypass,
+    sandboxProofsAllowed:
+      config.allowLegacySandboxProof &&
+      (config.paymentNetwork === 'localnet' || config.allowPaymentBypass),
+    paySh: paymentNetworkInfo().paySh,
+    payGateway: payGatewayStatus(),
     paymentModes: paymentNetworkInfo().modes,
     defaultAgentFeeUsdc: config.defaultAgentFeeUsdc,
     apiEndpoint: `${req.protocol}://${req.get('host')}`,
@@ -965,25 +982,102 @@ app.post('/api/paysh/catalog/mode', (req, res) => {
   });
 });
 
-/** Runtime payment network switch — sandbox (test) ↔ devnet (product path) */
+/** Local Lab payment mode + managed pay.sh gateway status. */
 app.get('/api/payment/network', (_req, res) => {
-  res.json({ status: 'success', ...paymentNetworkInfo() });
+  res.json({
+    status: 'success',
+    ...paymentNetworkInfo(),
+    gateway: payGatewayStatus(),
+  });
 });
 
-app.post('/api/payment/network', (req, res) => {
+app.post('/api/payment/network', async (req, res) => {
+  if (config.isProd) {
+    res.status(403).json({
+      status: 'error',
+      message:
+        'Cloud Run에서는 프로세스 로컬 게이트웨이 전환을 지원하지 않습니다. 배포 설정으로 고정하세요.',
+    });
+    return;
+  }
+
+  let me: Awaited<ReturnType<typeof getMeFromRequest>>;
+  try {
+    me = await getMeFromRequest(req);
+  } catch (err: any) {
+    res.status(503).json({
+      status: 'error',
+      message: `로그인 세션을 확인할 수 없습니다: ${err?.message || err}`,
+    });
+    return;
+  }
+  if (!me.connected) {
+    res.status(401).json({
+      status: 'error',
+      message: '게이트웨이 모드 전환은 로그인한 Studio 운영자만 가능합니다.',
+    });
+    return;
+  }
+  const membership = await prisma.tenantMember.findUnique({
+    where: {
+      tenantId_userId: {
+        tenantId: me.user?.tenantId || sharedTenantId(),
+        userId: me.user!.id,
+      },
+    },
+  });
+  if (!membership || !['owner', 'admin'].includes(membership.role)) {
+    res.status(403).json({
+      status: 'error',
+      message: '게이트웨이 모드 전환은 tenant owner/admin만 가능합니다.',
+    });
+    return;
+  }
+
   const network = String(req.body?.network || '').toLowerCase();
-  const result = setPaymentNetwork(network as any, {
+  const normalized = normalizePaymentNetwork(network);
+  if (!normalized) {
+    res.status(400).json({
+      status: 'error',
+      message: 'network must be localnet | devnet. mainnet is not supported',
+    });
+    return;
+  }
+
+  const previousNetwork = config.paymentNetwork;
+  try {
+    await restartManagedPayGateway(normalized);
+  } catch (err: any) {
+    let rollbackMessage = '';
+    if (normalized !== previousNetwork) {
+      try {
+        await restartManagedPayGateway(previousNetwork);
+        rollbackMessage = ` 이전 ${previousNetwork} 게이트웨이로 복구했습니다.`;
+      } catch (rollbackErr: any) {
+        rollbackMessage = ` 이전 모드 복구도 실패했습니다: ${rollbackErr?.message || rollbackErr}`;
+      }
+    }
+    res.status(503).json({
+      status: 'error',
+      message: `pay.sh gateway 전환 실패: ${err?.message || err}.${rollbackMessage}`,
+      gateway: payGatewayStatus(),
+    });
+    return;
+  }
+
+  const result = setPaymentNetwork(normalized, {
     rpcUrl: req.body?.rpcUrl,
     usdcMint: req.body?.usdcMint,
   });
   if (!result.ok) {
-    res.status(config.isProd ? 403 : 400).json({ status: 'error', message: result.error });
+    res.status(400).json({ status: 'error', message: result.error });
     return;
   }
   res.json({
     status: 'success',
-    message: `Payment network switched to ${config.paymentNetwork}`,
+    message: `Payment network and pay.sh gateway switched to ${config.paymentNetwork}`,
     ...paymentNetworkInfo(),
+    gateway: payGatewayStatus(),
   });
 });
 
@@ -1035,59 +1129,30 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
       return;
     }
 
-    // Must be on pay.sh catalog to participate in A2A commerce
-    let listing = getCatalogEntry(agentId);
-    if (!listing || listing.status !== 'listed') {
-      listing = await registerAgentOnPayShCatalog(agent, {
-        baseUrl: `${req.protocol}://${req.get('host')}`,
-      });
-    }
-
-    const feeAmount =
-      typeof agent.fee === 'number'
-        ? agent.fee
-        : typeof agent.perCallPriceUsdc === 'number'
-          ? agent.perCallPriceUsdc
-          : config.defaultAgentFeeUsdc;
+    const listing = await ensureListed(agent, `${req.protocol}://${req.get('host')}`);
+    const feeAmount = agentFeeUsdc(agent);
 
     // Studio sandbox: logged-in operator tests their agent → Vertex/RAG, no human→agent paywall.
-    // External / catalog callers still hit x402 when fee>0.
     const me = await getMeFromRequest(req);
     const isStudioOwnerTest =
       (studioTest === true || req.headers['x-solvamos-studio'] === '1') && me.connected === true;
 
-    const runOrchestrated = async (paymentLogs: string[]) => {
-      const result = await orchestrateA2ATurn({
-        agent,
-        userPrompt,
-        // Studio chat: answer via own Vertex/RAG first; peers only if explicitly enabled
-        enablePeers: isStudioOwnerTest ? enableA2A === true : enableA2A !== false,
-      });
-      await bumpInvoke(agentId);
-      res.json({
-        status: 'success',
-        answer: result.answer,
-        data: result.answer,
-        confidence: result.confidence,
-        citations: result.citations,
-        ragMode: result.ragMode,
-        paymentLogs,
-        network: networkLabel(),
-        feeUsdc: isStudioOwnerTest ? 0 : feeAmount,
-        paywallSkipped: isStudioOwnerTest,
-        payShCatalogId: listing!.catalogId,
-        generation: 'vertex_gemini_rag',
-        a2a: {
-          catalogUsed: result.catalogUsed,
-          planningNote: result.planningNote,
-          peerHops: result.peerHops,
-          spendTier: result.spendTier,
+    const finish = async (paymentLogs: string[]) => {
+      const out = await runAgentInvoke(
+        {
+          agentId,
+          prompt: userPrompt,
+          enableA2A,
+          studioOwnerTest: isStudioOwnerTest,
+          baseUrl: `${req.protocol}://${req.get('host')}`,
         },
-      });
+        paymentLogs
+      );
+      res.status(out.httpStatus).json(out.body);
     };
 
     if (isStudioOwnerTest) {
-      await runOrchestrated([
+      await finish([
         `[Studio Test] owner session — paywall skipped, Vertex Gemini + RAG (listed fee=${feeAmount} USDC still applies to external callers)`,
       ]);
       return;
@@ -1095,7 +1160,26 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
 
     // Free tier — no paywall
     if (feeAmount === 0) {
-      await runOrchestrated([`[Free Tier] fee=0 USDC — paywall skipped on ${networkLabel()}`]);
+      await finish([`[Free Tier] fee=0 USDC — paywall skipped on ${networkLabel()}`]);
+      return;
+    }
+
+    // Commercial path: prefer official pay.sh gateway (standard 402 / X-PAYMENT)
+    if (config.usePayGateway && !paymentProof) {
+      const gw = listing?.invokeUrl || gatewayInvokeUrl(agentId);
+      res.status(402).json({
+        status: 'payment_required',
+        protocol: 'pay.sh-gateway',
+        amount: feeAmount,
+        token: 'USDC',
+        gatewayUrl: gw,
+        payGatewayUrl: config.payGatewayUrl,
+        recipientWallet: agent.publicKey,
+        network: networkLabel(),
+        payShCatalogId: listing?.catalogId,
+        invokeUrl: gw,
+        message: `HTTP 402: Use pay.sh gateway — pay --sandbox curl -X POST ${gw} -H "Content-Type: application/json" -d '{"prompt":"..."}'. Origin no longer settles payments when USE_PAY_GATEWAY=true.`,
+      });
       return;
     }
 
@@ -1112,9 +1196,9 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
         network: networkLabel(),
         paymentNetwork: config.paymentNetwork,
         usdcMint: config.usdcMint,
-        payShCatalogId: listing.catalogId,
-        invokeUrl: listing.invokeUrl,
-        message: `HTTP 402: Pay ${feeAmount} USDC on ${networkLabel()} (≈${(agentShare * 100).toFixed(0)}% agent / ${(config.platformFeeShare * 100).toFixed(0)}% platform). Attach signature in X-PAYMENT-PROOF. Agent is listed on pay.sh catalog for A2A.`,
+        payShCatalogId: listing?.catalogId,
+        invokeUrl: listing?.invokeUrl,
+        message: `HTTP 402: Pay ${feeAmount} USDC on ${networkLabel()} (≈${(agentShare * 100).toFixed(0)}% agent / ${(config.platformFeeShare * 100).toFixed(0)}% platform). Attach signature in X-PAYMENT-PROOF (legacy). Prefer pay.sh gateway.`,
       });
       return;
     }
@@ -1130,10 +1214,112 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
       return;
     }
 
-    await runOrchestrated(audit.logs);
+    await finish(audit.logs);
   } catch (err: any) {
     res.status(500).json({ status: 'error', message: err.message });
   }
+});
+
+/** pay.sh gateway upstream — no paywall (settlement already done by gateway). */
+function assertPayInternal(req: express.Request, res: express.Response): boolean {
+  const secret = config.payInternalSecret;
+  const provided =
+    (req.headers['x-pay-internal-secret'] as string) ||
+    (typeof req.query.pay_internal === 'string' ? req.query.pay_internal : '');
+
+  if (secret) {
+    if (provided !== secret) {
+      res.status(403).json({
+        status: 'error',
+        message: 'Forbidden — set PAY_INTERNAL_SECRET and configure gateway routing.auth',
+      });
+      return false;
+    }
+    return true;
+  }
+
+  // Dev fallback: loopback only when secret unset
+  const ip = req.ip || req.socket.remoteAddress || '';
+  const loopback =
+    ip === '127.0.0.1' ||
+    ip === '::1' ||
+    ip === '::ffff:127.0.0.1' ||
+    ip.endsWith('127.0.0.1');
+  if (!config.isProd && loopback) return true;
+
+  res.status(403).json({
+    status: 'error',
+    message: 'Forbidden — configure PAY_INTERNAL_SECRET for gateway → origin',
+  });
+  return false;
+}
+
+async function handleInternalInvoke(req: express.Request, res: express.Response) {
+  try {
+    if (!assertPayInternal(req, res)) return;
+    const agentId = req.params.agentId || req.params.id;
+    const body = req.body || {};
+    const userPrompt =
+      body.prompt || body.query || (typeof req.query.prompt === 'string' ? req.query.prompt : '');
+    const enableA2A =
+      body.enableA2A === true ||
+      req.query.enableA2A === 'true' ||
+      req.query.enableA2A === '1';
+    const out = await runAgentInvoke(
+      {
+        agentId,
+        prompt: userPrompt,
+        enableA2A,
+        studioOwnerTest: false,
+        baseUrl: config.payOriginUrl || config.appUrl,
+      },
+      ['[pay.sh gateway] settled — origin internal invoke (paywall skipped)']
+    );
+    res.status(out.httpStatus).json(out.body);
+  } catch (err: any) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+}
+
+// Paths must match pay/solvamos-provider.yml (gateway proxies same path to origin)
+app.get('/v1/health', (_req, res) => {
+  res.json({
+    status: 'ok',
+    product: config.product,
+    version: config.version,
+    payGateway: config.usePayGateway,
+    payGatewayUrl: config.payGatewayUrl,
+  });
+});
+app.get('/v1/agents/:agentId/invoke', handleInternalInvoke);
+app.post('/v1/agents/:agentId/invoke', handleInternalInvoke);
+app.post('/api/internal/agents/:id/invoke', handleInternalInvoke);
+
+/** Google A2A–style Agent Card (discovery). Payments via extensions.solvamos.pay.invokeUrl */
+app.get('/.well-known/agent.json', async (_req, res) => {
+  res.json({
+    name: 'SolVamos Studio',
+    description: 'Multi-agent RAG studio. Per-agent cards at /api/agents/:id/agent-card',
+    url: config.usePayGateway ? config.payGatewayUrl : config.appUrl,
+    version: config.version,
+    provider: { organization: 'SolVamos', url: config.appUrl },
+  });
+});
+app.get('/api/agents/:id/agent-card', async (req, res) => {
+  const agent = await getAgent(req.params.id);
+  if (!agent) {
+    res.status(404).json({ status: 'error', message: 'Agent not found' });
+    return;
+  }
+  res.json(buildAgentCard(agent));
+});
+app.get('/.well-known/agent/:id.json', async (req, res) => {
+  const agent = await getAgent(req.params.id);
+  if (!agent) {
+    res.status(404).json({ status: 'error', message: 'Agent not found' });
+    return;
+  }
+  res.json(buildAgentCard(agent));
 });
 
 async function startServer() {
@@ -1166,6 +1352,15 @@ async function startServer() {
       }
       res.sendFile(path.join(distPath, 'index.html'));
     });
+  }
+
+  if (config.payGatewayManaged) {
+    try {
+      await restartManagedPayGateway(config.paymentNetwork);
+    } catch (err: any) {
+      // Keep Studio usable even when pay CLI/account setup is missing.
+      console.warn('[pay gateway] automatic startup failed:', err?.message || err);
+    }
   }
 
   let dbReady = false;
@@ -1215,3 +1410,9 @@ startServer().catch((err) => {
   console.error('[boot] fatal', err);
   process.exit(1);
 });
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(signal, () => {
+    void stopManagedPayGateway().finally(() => process.exit(0));
+  });
+}

@@ -676,7 +676,7 @@ export default function StudioPage(props: Props) {
                   />
                   A2A 피어 호출
                   <span className="text-[10px] text-outline">
-                    ({serverStatus?.paymentNetwork || 'sandbox'})
+                    ({serverStatus?.paymentNetwork || 'localnet'})
                   </span>
                 </label>
               ) : null}
@@ -724,10 +724,8 @@ export default function StudioPage(props: Props) {
                 모드:{' '}
                 <span className="text-on-surface font-medium">
                   {serverStatus?.paymentNetwork === 'devnet'
-                    ? 'Devnet (제품)'
-                    : serverStatus?.paymentNetwork === 'sandbox'
-                      ? 'Sandbox (테스트)'
-                      : serverStatus?.paymentNetwork || '—'}
+                    ? 'Devnet (pay.sh 온체인)'
+                    : 'Localnet (pay.sh sandbox)'}
                 </span>
                 {' · '}vault{' '}
                 <span className="font-mono text-[10px]">
@@ -751,7 +749,8 @@ export default function StudioPage(props: Props) {
                 className="w-full bg-surface-container-lowest border border-outline-variant/30 rounded-lg px-3 py-1.5 text-xs font-mono input-glow focus:outline-none"
               />
               <div className="flex gap-2">
-                {(serverStatus?.paymentNetwork === 'sandbox' ||
+                {(serverStatus?.paymentNetwork === 'localnet' ||
+                  serverStatus?.paymentNetwork === 'sandbox' ||
                   serverStatus?.sandboxProofsAllowed) && (
                   <button
                     type="button"

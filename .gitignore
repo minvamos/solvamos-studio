@@ -10,3 +10,5 @@ kms_vault_mock.json
 agents_db.json
 tenants_db.json
 .data/
+tools/pay/
+!tools/pay/.gitkeep

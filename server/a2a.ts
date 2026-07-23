@@ -13,6 +13,7 @@ import { generateGroundedAnswer, type RagResult } from './rag.js';
 import { verifyPayment } from './payment.js';
 import { getCatalogEntry, listCatalogForA2A, type PayShCatalogEntry } from './paysh-catalog.js';
 import { compileSystemPrompt } from './prompt.js';
+import { gatewayInvokeUrl, payCurl } from './pay-client.js';
 
 export type A2APeerHop = {
   fromAgentId: string;
@@ -269,7 +270,7 @@ Max ${MAX_PEER_CALLS} calls. Empty calls is OK.`,
   };
 }
 
-/** Invoke peer; fee>0 uses pay.sh-style proof into peer agent vault. */
+/** Invoke peer; fee>0 pays via official pay.sh CLI → gateway (no PAYSH_A2A_ synthesis). */
 export async function paidPeerInvoke(
   caller: AgentRecord,
   targetId: string,
@@ -311,11 +312,44 @@ export async function paidPeerInvoke(
 
   const fee = listing.feeUsdc ?? agentFee(target);
   const tier: 'free' | 'paid' = fee > 0 ? 'paid' : 'free';
-  let paymentProof = '';
-  let paymentVerified = true;
 
-  if (fee > 0) {
-    if (config.paymentNetwork !== 'sandbox' && !config.allowPaymentBypass) {
+  // --- Free peer: in-process RAG (same Studio) ---
+  if (fee <= 0) {
+    const rag = await generateGroundedAnswer({
+      systemPrompt: liveSystemPrompt(target),
+      userPrompt: `[A2A free query from agent ${caller.id}]\n${question}`,
+      dataStoreId: target.vertexDataStoreId,
+      agentId: target.id,
+      geminiApiKey: config.geminiApiKey || undefined,
+    });
+    await bumpInvoke(targetId);
+    return {
+      fromAgentId: caller.id,
+      toAgentId: targetId,
+      toName,
+      question,
+      feeUsdc: 0,
+      paymentProof: 'FREE_TIER',
+      paymentVerified: true,
+      answer: rag.answer,
+      catalogId: listing.catalogId,
+      tier: 'free',
+    };
+  }
+
+  // --- Paid peer: real pay.sh gateway (preferred) ---
+  if (config.usePayGateway) {
+    const url = listing.invokeUrl || gatewayInvokeUrl(targetId);
+    const paid = await payCurl({
+      method: 'POST',
+      url,
+      body: {
+        prompt: `[A2A paid query from agent ${caller.id}]\n${question}`,
+        enableA2A: false,
+      },
+      // localnet → --sandbox; devnet → Devnet on-chain (no --sandbox)
+    });
+    if (!paid.ok) {
       return {
         fromAgentId: caller.id,
         toAgentId: targetId,
@@ -324,31 +358,75 @@ export async function paidPeerInvoke(
         feeUsdc: fee,
         paymentProof: '',
         paymentVerified: false,
-        error:
-          'Devnet/product mode: auto A2A peer USDC payment requires a real signature path. Switch to Sandbox for peer demos, or set ALLOW_PAYMENT_BYPASS for lab only.',
+        error: paid.error || `pay.sh gateway call failed (${paid.status})`,
         catalogId: listing.catalogId,
         tier,
       };
     }
-    paymentProof = `PAYSH_A2A_${caller.id.slice(0, 8)}_${target.id.slice(0, 8)}_${Date.now()}`;
-    const audit = await verifyPayment(paymentProof, target.publicKey, fee);
-    paymentVerified = audit.verified;
-    if (!audit.verified) {
-      return {
-        fromAgentId: caller.id,
-        toAgentId: targetId,
-        toName,
-        question,
-        feeUsdc: fee,
-        paymentProof,
-        paymentVerified: false,
-        error: audit.error || 'A2A payment verification failed',
-        catalogId: listing.catalogId,
-        tier,
-      };
-    }
-  } else {
-    paymentProof = 'FREE_TIER';
+    const answer =
+      paid.json?.answer || paid.json?.data || (typeof paid.body === 'string' ? paid.body : '');
+    return {
+      fromAgentId: caller.id,
+      toAgentId: targetId,
+      toName,
+      question,
+      feeUsdc: fee,
+      paymentProof: 'PAY_SH_GATEWAY',
+      paymentVerified: true,
+      answer: String(answer),
+      catalogId: listing.catalogId,
+      tier,
+    };
+  }
+
+  // --- Legacy Lab path (explicit opt-in) ---
+  if (!config.allowLegacySandboxProof) {
+    return {
+      fromAgentId: caller.id,
+      toAgentId: targetId,
+      toName,
+      question,
+      feeUsdc: fee,
+      paymentProof: '',
+      paymentVerified: false,
+      error:
+        'Paid A2A requires USE_PAY_GATEWAY=true (pay.sh) or ALLOW_LEGACY_SANDBOX_PROOF=true (Lab only)',
+      catalogId: listing.catalogId,
+      tier,
+    };
+  }
+
+  if (config.paymentNetwork !== 'localnet' && !config.allowPaymentBypass) {
+    return {
+      fromAgentId: caller.id,
+      toAgentId: targetId,
+      toName,
+      question,
+      feeUsdc: fee,
+      paymentProof: '',
+      paymentVerified: false,
+      error:
+        'Devnet/product mode: auto A2A peer USDC payment requires pay.sh gateway. Enable USE_PAY_GATEWAY or Sandbox + ALLOW_LEGACY_SANDBOX_PROOF.',
+      catalogId: listing.catalogId,
+      tier,
+    };
+  }
+
+  const paymentProof = `PAYSH_A2A_${caller.id.slice(0, 8)}_${target.id.slice(0, 8)}_${Date.now()}`;
+  const audit = await verifyPayment(paymentProof, target.publicKey, fee);
+  if (!audit.verified) {
+    return {
+      fromAgentId: caller.id,
+      toAgentId: targetId,
+      toName,
+      question,
+      feeUsdc: fee,
+      paymentProof,
+      paymentVerified: false,
+      error: audit.error || 'A2A payment verification failed',
+      catalogId: listing.catalogId,
+      tier,
+    };
   }
 
   const rag = await generateGroundedAnswer({
@@ -367,7 +445,7 @@ export async function paidPeerInvoke(
     question,
     feeUsdc: fee,
     paymentProof,
-    paymentVerified,
+    paymentVerified: true,
     answer: rag.answer,
     catalogId: listing.catalogId,
     tier,
