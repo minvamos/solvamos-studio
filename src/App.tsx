@@ -11,13 +11,14 @@ import StudioPage from './pages/StudioPage';
 import AgentsPage from './pages/AgentsPage';
 import SettlementsPage from './pages/SettlementsPage';
 import MyPage from './pages/MyPage';
+import PublicCatalogPage from './pages/PublicCatalogPage';
 import WalletModal, { type WalletRow } from './components/WalletModal';
 import CreateAgentProgress, { CREATE_STEPS, EDIT_STEPS } from './components/CreateAgentProgress';
 import { formatAgentChatMessage } from './lib/formatAgentMessage';
 import { parseAppRoute, writeAppRoute, writeLandingRoute } from './lib/appRoute';
 
 export default function App() {
-  const [view, setView] = useState<'landing' | 'studio' | 'boot'>('boot');
+  const [view, setView] = useState<'landing' | 'studio' | 'catalog' | 'boot'>('boot');
   const [landingBusy, setLandingBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<AppTab>('studio');
@@ -470,6 +471,10 @@ export default function App() {
 
   useEffect(() => {
     const boot = async () => {
+      if (window.location.pathname === '/catalog') {
+        setView('catalog');
+        return;
+      }
       const entered = localStorage.getItem('solvamos_entered') === '1';
       const initialRoute = parseAppRoute();
       // Keep studio visible across refresh while we revalidate (no login flash)
@@ -536,6 +541,10 @@ export default function App() {
     }
 
     const onPopState = () => {
+      if (window.location.pathname === '/catalog') {
+        setView('catalog');
+        return;
+      }
       const route = parseAppRoute();
       if (!route.tab) {
         setView('landing');
@@ -1098,6 +1107,10 @@ export default function App() {
         세션 확인 중…
       </div>
     );
+  }
+
+  if (view === 'catalog') {
+    return <PublicCatalogPage />;
   }
 
   if (view === 'landing') {

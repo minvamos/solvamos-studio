@@ -157,6 +157,8 @@ export const config = {
    * When usePayGateway=true, catalog invokeUrl points here and paid A2A uses pay CLI.
    */
   payGatewayUrl: (process.env.PAY_GATEWAY_URL || 'http://127.0.0.1:1402').replace(/\/$/, ''),
+  /** Provider YAML meters every paid invoke at one fixed price. */
+  payGatewayPriceUsdc: Number(process.env.PAY_GATEWAY_PRICE_USDC || 0.001),
   /** Studio origin that the gateway proxies to after settlement */
   payOriginUrl: (process.env.PAY_ORIGIN_URL || process.env.APP_URL || 'http://127.0.0.1:3000').replace(
     /\/$/,

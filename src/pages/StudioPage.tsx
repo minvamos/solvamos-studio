@@ -12,6 +12,7 @@ import {
   Check,
   RefreshCw,
   Lock,
+  ExternalLink,
 } from 'lucide-react';
 import { Agent, DriveItem, DrivePathCrumb, Message, PromptOptions, LocalUploadFile } from '../types';
 import DriveBrowser from '../components/DriveBrowser';
@@ -555,17 +556,28 @@ export default function StudioPage(props: Props) {
                   {fee === 0 ? 'Free' : `$${fee.toFixed(3)} USDC / 회`}
                 </span>
               </div>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.001}
-                value={fee}
-                onChange={(e) =>
-                  setOptions((prev) => ({ ...prev, fee: Number(e.target.value) }))
-                }
-                className="w-full mt-2 accent-google-blue"
-              />
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {[
+                  { value: 0, label: '무료' },
+                  { value: 0.001, label: '유료 · 0.001 USDC' },
+                ].map((choice) => (
+                  <button
+                    key={choice.value}
+                    type="button"
+                    onClick={() => setOptions((prev) => ({ ...prev, fee: choice.value }))}
+                    className={
+                      fee === choice.value
+                        ? 'rounded-lg border border-google-blue bg-google-blue/15 px-3 py-2 text-sm font-semibold text-google-blue'
+                        : 'rounded-lg border border-outline-variant/30 bg-surface-container-low px-3 py-2 text-sm text-on-surface-variant hover:border-outline'
+                    }
+                  >
+                    {choice.label}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-2 text-[11px] text-outline">
+                프로덕션 pay.sh 게이트웨이는 유료 호출을 0.001 Devnet USDC로 정산합니다.
+              </p>
             </div>
 
             <div className="flex items-center gap-2 text-on-surface-variant bg-[#1E293B]/50 p-2 rounded-lg border border-outline-variant/10">
@@ -602,7 +614,7 @@ export default function StudioPage(props: Props) {
               <p className="text-solana-green font-semibold mb-2">
                 {creationResult._wasEdit || creationResult.message?.includes('updated')
                   ? '에이전트 저장 완료 (기존 ID 유지)'
-                  : '에이전트 생성 완료'}
+                  : '에이전트 생성 완료 · pay.sh 카탈로그 등록'}
               </p>
               <p className="text-sm text-on-surface-variant font-mono break-all">
                 ID: {creationResult.agent.id}
@@ -615,11 +627,94 @@ export default function StudioPage(props: Props) {
                   Drive RAG: {creationResult.driveIngest.docs}개 문서 주입
                 </p>
               ) : null}
-              {creationResult.payShCatalog?.invokeUrl ? (
-                <p className="text-xs text-on-surface-variant font-mono break-all mt-1">
-                  pay.sh: {creationResult.payShCatalog.invokeUrl}
+
+              <div className="mt-4 space-y-2 rounded-lg border border-outline-variant/20 bg-surface-container-lowest/70 p-3">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-solana-green">
+                  pay.sh 카탈로그 · 공개 주소
                 </p>
-              ) : null}
+                {[
+                  {
+                    id: 'catalog-page',
+                    label: '카탈로그 페이지 (UI)',
+                    value:
+                      creationResult.catalogPageUrl ||
+                      creationResult.payShCatalog?.catalogPageUrl ||
+                      '/catalog',
+                    open: true,
+                  },
+                  {
+                    id: 'catalog-api',
+                    label: '카탈로그 API (JSON)',
+                    value:
+                      creationResult.catalogApiUrl ||
+                      creationResult.payShCatalog?.catalogApiUrl ||
+                      '/api/paysh/catalog',
+                    open: true,
+                  },
+                  {
+                    id: 'invoke',
+                    label: 'Invoke API',
+                    value:
+                      creationResult.payShCatalog?.publicInvokeUrl ||
+                      creationResult.payShCatalog?.invokeUrl ||
+                      '',
+                    open: false,
+                  },
+                  {
+                    id: 'agent-card',
+                    label: 'Agent Card',
+                    value: creationResult.payShCatalog?.agentCardUrl || '',
+                    open: true,
+                  },
+                ]
+                  .filter((row) => row.value)
+                  .map((row) => (
+                    <div key={row.id} className="flex items-start gap-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[10px] uppercase tracking-wider text-outline">{row.label}</p>
+                        <code className="mt-0.5 block break-all font-mono text-xs text-on-surface">
+                          {row.value}
+                        </code>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => onCopy(String(row.value), `create-${row.id}`)}
+                        className="shrink-0 rounded-md bg-google-blue/15 p-2 text-google-blue hover:bg-google-blue/25"
+                        title="복사"
+                      >
+                        {copiedId === `create-${row.id}` ? (
+                          <Check className="h-3.5 w-3.5" />
+                        ) : (
+                          <Copy className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                      {row.open ? (
+                        <a
+                          href={String(row.value)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="shrink-0 rounded-md bg-surface-container-high p-2 text-on-surface-variant hover:text-on-surface"
+                          title="열기"
+                        >
+                          <ExternalLink className="h-3.5 w-3.5" />
+                        </a>
+                      ) : null}
+                    </div>
+                  ))}
+                <a
+                  href={
+                    creationResult.catalogPageUrl ||
+                    creationResult.payShCatalog?.catalogPageUrl ||
+                    '/catalog'
+                  }
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-1 inline-flex items-center gap-2 rounded-lg bg-solana-green/15 px-3 py-2 text-sm font-semibold text-solana-green hover:bg-solana-green/25"
+                >
+                  공개 카탈로그에서 보기 <ExternalLink className="h-4 w-4" />
+                </a>
+              </div>
+
               {Array.isArray(creationResult.pipeline) ? (
                 <ul className="mt-3 space-y-1 text-xs text-on-surface-variant">
                   {creationResult.pipeline.map((p: any, i: number) => (

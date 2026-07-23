@@ -20,6 +20,7 @@ env:
   REGION: asia-northeast3
   AR_REPO: solvamos-img
   SERVICE: solvamos-studio
+  PAY_GATEWAY_SERVICE: solvamos-pay-gateway
   TIER: starter
   NODE_VERSION: "24"
 
@@ -320,6 +321,7 @@ jobs:
       - name: Build and push image
         env:
           IMAGE: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/studio
+          PAY_IMAGE: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/pay-gateway
           SHA: ${{ steps.meta.outputs.sha }}
         run: |
           set -euo pipefail
@@ -329,7 +331,15 @@ jobs:
             .
           docker push "${IMAGE}:${SHA}"
           docker push "${IMAGE}:latest"
+          docker build \
+            -f Dockerfile.pay-gateway \
+            -t "${PAY_IMAGE}:${SHA}" \
+            -t "${PAY_IMAGE}:latest" \
+            .
+          docker push "${PAY_IMAGE}:${SHA}"
+          docker push "${PAY_IMAGE}:latest"
           echo "IMAGE_URI=${IMAGE}:${SHA}" >> "$GITHUB_ENV"
+          echo "PAY_GATEWAY_IMAGE_URI=${PAY_IMAGE}:${SHA}" >> "$GITHUB_ENV"
 
       - name: Resolve min instances
         id: tier
@@ -395,6 +405,12 @@ jobs:
             echo "::error::Secret Manager missing database-url — create Cloud SQL URL secret or Cloud Run will crash on boot"
             missing_required=1
           fi
+          if gcloud secrets describe pay-internal-secret --project="${PROJECT_ID}" >/dev/null 2>&1; then
+            SECRET_FLAGS+=("PAY_INTERNAL_SECRET=pay-internal-secret:latest")
+          else
+            echo "::error::Secret Manager missing pay-internal-secret — gateway cannot authenticate to Studio"
+            missing_required=1
+          fi
           if [ "${missing_required}" = "1" ]; then
             exit 1
           fi
@@ -412,13 +428,56 @@ jobs:
           fi
           gcloud "${ARGS[@]}"
 
+          GATEWAY_URL="https://${PAY_GATEWAY_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
+          gcloud run deploy "${PAY_GATEWAY_SERVICE}" \
+            --project="${PROJECT_ID}" \
+            --region="${REGION}" \
+            --platform=managed \
+            --image="${PAY_GATEWAY_IMAGE_URI}" \
+            --port=8080 \
+            --allow-unauthenticated \
+            --cpu=1 \
+            --memory=512Mi \
+            --min-instances=0 \
+            --max=1 \
+            --max-instances=1 \
+            --update-env-vars="PAY_ORIGIN_URL=${URL},PAY_GATEWAY_URL=${GATEWAY_URL},PAY_RECIPIENT=AoUNKE8uQ8y1FEtU6YSFCsopK9veP6jZ6EGNoULjdwva,SOLANA_RPC_URL=https://api.devnet.solana.com" \
+            --update-secrets="PAY_INTERNAL_SECRET=pay-internal-secret:latest"
+
+          gcloud run services update "${SERVICE}" \
+            --project="${PROJECT_ID}" \
+            --region="${REGION}" \
+            --update-env-vars="PAY_GATEWAY_URL=${GATEWAY_URL},PAY_ORIGIN_URL=${URL},USE_PAY_GATEWAY=true" \
+            --update-secrets="PAY_INTERNAL_SECRET=pay-internal-secret:latest"
+
           echo "URL=${URL}" >> "$GITHUB_ENV"
+          echo "PAY_GATEWAY_URL=${GATEWAY_URL}" >> "$GITHUB_ENV"
+
+          for attempt in 1 2 3 4 5; do
+            if curl -fsS "${GATEWAY_URL}/v1/health" >/dev/null; then
+              break
+            fi
+            if [ "${attempt}" = "5" ]; then
+              echo "::error::pay.sh gateway health check failed"
+              exit 1
+            fi
+            sleep 5
+          done
+          HTTP_CODE=$(curl -sS -o /tmp/pay-402.json -w "%{http_code}" \
+            "${GATEWAY_URL}/v1/agents/health-check/invoke?prompt=hello")
+          if [ "${HTTP_CODE}" != "402" ]; then
+            echo "::error::Expected gateway HTTP 402, got ${HTTP_CODE}"
+            cat /tmp/pay-402.json
+            exit 1
+          fi
+
           {
             echo "### Deployed"
             echo "- **URL:** ${URL}"
+            echo "- **pay.sh Gateway:** ${GATEWAY_URL}"
             echo "- **Health:** ${URL}/healthz"
             echo "- **Image:** \`${IMAGE_URI}\`"
-            echo "- **Secrets:** JWT_SECRET + DATABASE_URL + OAuth/Gemini (if present)"
+            echo "- **Secrets:** JWT_SECRET + DATABASE_URL + PAY_INTERNAL_SECRET + OAuth/Gemini (if present)"
             if [ -z "${GOOGLE_CLIENT_ID_VAR}" ]; then
               echo "- **Note:** set repo Variable \`GOOGLE_CLIENT_ID\` so CI re-applies Client ID every deploy"
             fi

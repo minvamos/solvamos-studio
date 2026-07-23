@@ -1,0 +1,52 @@
+# yaml-language-server: $schema=https://pay.sh/docs-assets/provider.schema.json
+# Production template. start-pay-gateway.sh replaces __PAY_ORIGIN_URL__ at boot.
+name: solvamos-studio
+subdomain: solvamos-studio
+title: 'SolVamos Studio Agents (Devnet)'
+description: 'Public SolVamos RAG agents paid with on-chain Solana Devnet USDC.'
+category: ai_ml
+version: v1
+
+routing:
+  type: proxy
+  url: __PAY_ORIGIN_URL__
+  auth:
+    method: header
+    key: 'X-Pay-Internal-Secret'
+    value_from_env: PAY_INTERNAL_SECRET
+
+operator:
+  currencies:
+    usd: ['USDC']
+  network: devnet
+  # Stateless Cloud Run gateway: the caller pays network fees.
+  # This avoids storing a hot private key in the container.
+  fee_payer: false
+
+endpoints:
+  - method: GET
+    path: 'v1/health'
+    description: 'Gateway to SolVamos origin health.'
+
+  - method: GET
+    path: 'v1/agents/{agentId}/invoke'
+    description: 'Paid SolVamos agent invoke through query parameter prompt.'
+    metering:
+      dimensions:
+        - direction: usage
+          unit: requests
+          scale: 1
+          tiers:
+            - price_usd: 0.001
+
+  - method: POST
+    path: 'v1/agents/{agentId}/invoke'
+    description: 'Paid SolVamos agent invoke with a JSON body.'
+    metering:
+      dimensions:
+        - direction: usage
+          unit: requests
+          scale: 1
+          tiers:
+            - price_usd: 0.001
+

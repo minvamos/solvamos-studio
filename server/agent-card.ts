@@ -10,11 +10,12 @@ import { gatewayInvokeUrl } from './pay-client.js';
 export function buildAgentCard(agent: AgentRecord) {
   const listing = getCatalogEntry(agent.id);
   const fee =
-    typeof agent.fee === 'number'
+    listing?.feeUsdc ??
+    (typeof agent.fee === 'number'
       ? agent.fee
       : typeof agent.perCallPriceUsdc === 'number'
         ? agent.perCallPriceUsdc
-        : config.defaultAgentFeeUsdc;
+        : config.defaultAgentFeeUsdc);
   const name = agent.agentName || agent.customRole || `${agent.role} / ${agent.tone}`;
   const invokeUrl =
     listing?.invokeUrl ||

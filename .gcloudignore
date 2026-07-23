@@ -1,4 +1,4 @@
-.node_modules
+node_modules
 .git
 .github
 .data
@@ -10,4 +10,5 @@ agents_db.json
 tenants_db.json
 kms_vault_mock.json
 dist
+tools/pay
 bun.lock

@@ -53,9 +53,13 @@ export async function ensureListed(
 }
 
 export function agentFeeUsdc(agent: AgentRecord): number {
-  if (typeof agent.fee === 'number') return agent.fee;
-  if (typeof agent.perCallPriceUsdc === 'number') return agent.perCallPriceUsdc;
-  return config.defaultAgentFeeUsdc;
+  const configured =
+    typeof agent.fee === 'number'
+      ? agent.fee
+      : typeof agent.perCallPriceUsdc === 'number'
+        ? agent.perCallPriceUsdc
+        : config.defaultAgentFeeUsdc;
+  return config.usePayGateway && configured > 0 ? config.payGatewayPriceUsdc : configured;
 }
 
 export async function runAgentInvoke(

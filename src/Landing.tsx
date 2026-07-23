@@ -84,6 +84,14 @@ export default function Landing({
             계정 생성 시 워크스페이스(테넌트)가 준비됩니다. Google Drive는 나중에 연동할 수 있습니다.
           </p>
 
+          <a
+            href="/catalog"
+            className="mb-8 inline-flex w-fit items-center gap-2 rounded-lg border border-primary/40 bg-primary/10 px-4 py-2.5 text-sm font-semibold text-primary hover:bg-primary/20"
+          >
+            <Boxes className="h-4 w-4" />
+            공개 에이전트 API 카탈로그 보기
+          </a>
+
           <div className="flex flex-col gap-4">
             <FeatureCard
               icon={<Boxes className="w-6 h-6 text-primary" />}

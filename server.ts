@@ -38,6 +38,7 @@ import {
 import {
   loadPayShCatalog,
   listCatalog,
+  enrichCatalogListing,
   listCatalogForA2A,
   registerAgentOnPayShCatalog,
   getCatalogEntry,
@@ -294,8 +295,40 @@ app.post('/api/tenants/:id/cloud-run', async (req, res) => {
   }
 });
 
-app.get('/api/agents', async (_req, res) => {
-  res.json({ status: 'success', data: await listAgents() });
+function publicBaseFromReq(req: express.Request): string {
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || req.protocol)
+    .split(',')[0]
+    .trim();
+  const forwardedHost = String(req.headers['x-forwarded-host'] || req.get('host') || '')
+    .split(',')[0]
+    .trim();
+  if (forwardedHost) return `${forwardedProto}://${forwardedHost}`;
+  return (config.appUrl || 'http://localhost:3000').replace(/\/$/, '');
+}
+
+app.get('/api/agents', async (req, res) => {
+  const publicBase = publicBaseFromReq(req);
+  const agents = await listAgents();
+  res.json({
+    status: 'success',
+    catalogPageUrl: `${publicBase}/catalog`,
+    catalogApiUrl: `${publicBase}/api/paysh/catalog`,
+    data: agents.map((agent) => {
+      const fee = agentFeeUsdc(agent);
+      const listing = getCatalogEntry(agent.id);
+      const catalog = listing ? enrichCatalogListing(listing, publicBase) : null;
+      return {
+        ...agent,
+        fee,
+        perCallPriceUsdc: fee,
+        payShCatalog: catalog,
+        catalogPageUrl: catalog?.catalogPageUrl || `${publicBase}/catalog`,
+        catalogApiUrl: catalog?.catalogApiUrl || `${publicBase}/api/paysh/catalog`,
+        invokeUrl: catalog?.publicInvokeUrl || `${publicBase}/api/agents/${agent.id}/invoke`,
+        agentCardUrl: catalog?.agentCardUrl || `${publicBase}/api/agents/${agent.id}/agent-card`,
+      };
+    }),
+  });
 });
 
 app.get('/api/ai-applications/catalog', (_req, res) => {
@@ -471,12 +504,14 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
 
     const systemPrompt = compileSystemPrompt(role, tone, securityLevel, customRole);
 
-    const parsedFeeEarly =
+    const requestedFee =
       typeof fee === 'number'
         ? fee
         : typeof perCallPriceUsdc === 'number'
           ? perCallPriceUsdc
           : 0;
+    const parsedFeeEarly =
+      config.usePayGateway && requestedFee > 0 ? config.payGatewayPriceUsdc : requestedFee;
 
     const pipeline: { step: string; status: 'ok' | 'skip' | 'warn'; detail: string }[] = [];
     pipeline.push({
@@ -704,10 +739,12 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       baseUrl: runtimeBase,
       description: req.body.description,
     });
+    const publicBase = publicBaseFromReq(req);
+    const payShCatalog = enrichCatalogListing(listing, publicBase);
     pipeline.push({
       step: 'paysh_catalog',
       status: 'ok',
-      detail: listing.catalogId || listing.agentId,
+      detail: `${payShCatalog.catalogId} · ${payShCatalog.catalogPageUrl}`,
     });
 
     res.status(201).json({
@@ -731,7 +768,9 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       driveIngest,
       pipeline,
       agent: newAgent,
-      payShCatalog: listing,
+      payShCatalog,
+      catalogPageUrl: payShCatalog.catalogPageUrl,
+      catalogApiUrl: payShCatalog.catalogApiUrl,
       runtimeBase,
       cloudRunUri: tenant?.cloudRunUri || null,
       message: `Agent vault created ${publicKey.slice(0, 4)}…${publicKey.slice(-4)} (keys in Secret Manager${
@@ -778,12 +817,16 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
     const nextCustom =
       customRole !== undefined ? customRole || undefined : existing.customRole;
     const nextName = agentName !== undefined ? agentName : existing.agentName;
-    const nextFee =
+    const requestedNextFee =
       typeof fee === 'number'
         ? fee
         : typeof perCallPriceUsdc === 'number'
           ? perCallPriceUsdc
           : existing.fee ?? existing.perCallPriceUsdc ?? 0;
+    const nextFee =
+      config.usePayGateway && requestedNextFee > 0
+        ? config.payGatewayPriceUsdc
+        : requestedNextFee;
     const nextStatus =
       status === 'PAUSED' || status === 'inactive' || status === 'paused'
         ? 'PAUSED'
@@ -921,12 +964,15 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
       baseUrl: runtimeBase,
       description,
     });
+    const payShCatalog = enrichCatalogListing(listing, publicBaseFromReq(req));
 
     res.json({
       status: 'success',
       agent: updated,
       driveIngest,
-      payShCatalog: listing,
+      payShCatalog,
+      catalogPageUrl: payShCatalog.catalogPageUrl,
+      catalogApiUrl: payShCatalog.catalogApiUrl,
       updated: true,
       message: 'Agent updated (same id/vault; catalog metadata synced)',
     });
@@ -969,15 +1015,21 @@ app.get('/api/paysh/catalog', (req, res) => {
   const scopeRaw = String(req.query.scope || 'all').toLowerCase();
   const scope =
     scopeRaw === 'internal' || scopeRaw === 'main' || scopeRaw === 'all' ? scopeRaw : 'all';
+  const publicBaseUrl = publicBaseFromReq(req);
+  const data = listCatalog({ listedOnly: true, scope }).map((entry) =>
+    enrichCatalogListing(entry, publicBaseUrl)
+  );
   res.json({
     status: 'success',
     protocol: 'pay.sh / x402',
+    catalogUrl: `${publicBaseUrl}/api/paysh/catalog`,
+    publicPageUrl: `${publicBaseUrl}/catalog`,
     network: networkLabel(),
     paymentNetwork: config.paymentNetwork,
     publishMode: getCatalogPublishMode(),
     scope,
     ...catalogPublishInfo(),
-    data: listCatalog({ listedOnly: true, scope }),
+    data,
   });
 });
 
@@ -1224,7 +1276,10 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
         network: networkLabel(),
         payShCatalogId: listing?.catalogId,
         invokeUrl: gw,
-        message: `HTTP 402: Use pay.sh gateway — pay --sandbox curl -X POST ${gw} -H "Content-Type: application/json" -d '{"prompt":"..."}'. Origin no longer settles payments when USE_PAY_GATEWAY=true.`,
+        message:
+          config.paymentNetwork === 'devnet'
+            ? `HTTP 402: Use pay.sh Devnet gateway — pay fetch "${gw}?prompt=hello" (no --sandbox).`
+            : `HTTP 402: Use pay.sh sandbox gateway — pay --sandbox fetch "${gw}?prompt=hello".`,
       });
       return;
     }

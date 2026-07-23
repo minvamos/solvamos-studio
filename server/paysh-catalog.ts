@@ -192,6 +192,36 @@ export function getCatalogEntry(agentId: string): PayShCatalogEntry | undefined 
   return internalCatalog[agentId] || mainCatalog[agentId];
 }
 
+/** Public discovery URLs people can open after an agent is listed. */
+export function enrichCatalogListing(
+  entry: PayShCatalogEntry,
+  publicBaseUrl: string
+): PayShCatalogEntry & {
+  catalogPageUrl: string;
+  catalogApiUrl: string;
+  agentCardUrl: string;
+  publicInvokeUrl: string;
+  originInvokeUrl: string;
+  officialPayShCatalogUrl: string;
+} {
+  const base = publicBaseUrl.replace(/\/$/, '');
+  const originInvokeUrl = `${base}/api/agents/${encodeURIComponent(entry.agentId)}/invoke`;
+  const hasPublicGateway =
+    entry.feeUsdc > 0 &&
+    /^https:\/\//i.test(entry.invokeUrl) &&
+    !/localhost|127\.0\.0\.1/i.test(entry.invokeUrl);
+  const remote = process.env.PAYSH_CATALOG_URL?.trim().replace(/\/$/, '') || null;
+  return {
+    ...entry,
+    catalogPageUrl: `${base}/catalog`,
+    catalogApiUrl: `${base}/api/paysh/catalog`,
+    agentCardUrl: `${base}/api/agents/${encodeURIComponent(entry.agentId)}/agent-card`,
+    publicInvokeUrl: hasPublicGateway ? entry.invokeUrl : originInvokeUrl,
+    originInvokeUrl,
+    officialPayShCatalogUrl: remote || 'https://pay.sh/api/catalog',
+  };
+}
+
 export function buildInvokeUrl(agentId: string, baseUrl?: string): string {
   // Commercial / A2A discovery URL = pay.sh gateway (settlement then proxy to origin).
   if (config.usePayGateway) {
@@ -267,12 +297,15 @@ export async function registerAgentOnPayShCatalog(
 
   const name =
     agent.agentName || agent.customRole || `${agent.role} / ${agent.tone}`;
-  const fee =
+  const configuredFee =
     typeof agent.fee === 'number'
       ? agent.fee
       : typeof agent.perCallPriceUsdc === 'number'
         ? agent.perCallPriceUsdc
         : config.defaultAgentFeeUsdc;
+  const fee =
+    config.usePayGateway && configuredFee > 0 ? config.payGatewayPriceUsdc : configuredFee;
+  const originBase = (opts?.baseUrl || config.appUrl || 'http://localhost:3000').replace(/\/$/, '');
 
   const existing = internalCatalog[agent.id] || mainCatalog[agent.id];
   let entry: PayShCatalogEntry = {
@@ -284,7 +317,8 @@ export async function registerAgentOnPayShCatalog(
       `SolVamos A2A agent (${agent.role}). Grounded RAG + x402 USDC paywall.`,
     role: agent.role,
     tone: agent.tone,
-    invokeUrl: buildInvokeUrl(agent.id, opts?.baseUrl),
+    invokeUrl:
+      fee === 0 ? `${originBase}/api/agents/${agent.id}/invoke` : buildInvokeUrl(agent.id, opts?.baseUrl),
     recipientWallet: agent.publicKey,
     feeUsdc: fee,
     token: 'USDC',

@@ -2,7 +2,19 @@
  * Stitch: solvamos_studio_my_agent_list
  */
 import { useMemo, useState } from 'react';
-import { Bot, BarChart3, Pencil, Pause, Play, Briefcase, Smile, Coins } from 'lucide-react';
+import {
+  Bot,
+  BarChart3,
+  Pencil,
+  Pause,
+  Play,
+  Briefcase,
+  Smile,
+  Coins,
+  Copy,
+  Check,
+  ExternalLink,
+} from 'lucide-react';
 import { Agent } from '../types';
 
 type Props = {
@@ -18,6 +30,10 @@ type SortKey = 'revenue' | 'calls' | 'name';
 export default function AgentsPage({ agents, onSelect, onEdit, onToggleStatus }: Props) {
   const [filter, setFilter] = useState<Filter>('all');
   const [sort, setSort] = useState<SortKey>('calls');
+  const [copied, setCopied] = useState<string | null>(null);
+
+  const catalogPageUrl = agents[0]?.catalogPageUrl || '/catalog';
+  const catalogApiUrl = agents[0]?.catalogApiUrl || '/api/paysh/catalog';
 
   const activeCount = agents.filter((a) => {
     const s = a.status || 'ACTIVE';
@@ -51,15 +67,57 @@ export default function AgentsPage({ agents, onSelect, onEdit, onToggleStatus }:
     return list;
   }, [agents, filter, sort]);
 
+  const copy = async (value: string, key: string) => {
+    await navigator.clipboard.writeText(value);
+    setCopied(key);
+    window.setTimeout(() => setCopied(null), 1500);
+  };
+
   return (
     <div className="flex flex-col gap-gutter">
-      <div className="flex justify-between items-end">
+      <div className="flex justify-between items-end gap-4 flex-wrap">
         <div>
           <h2 className="text-3xl font-semibold text-on-surface mb-2">내 에이전트 목록</h2>
           <p className="text-base text-on-surface-variant">
-            관리 중인 AI 에이전트들의 가동 상태와 실시간 성능 지표를 확인하세요.
+            관리 중인 AI 에이전트들의 가동 상태와 공개 카탈로그 주소를 확인하세요.
           </p>
         </div>
+        <a
+          href={catalogPageUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-2 rounded-lg border border-solana-green/40 bg-solana-green/10 px-4 py-2 text-sm font-semibold text-solana-green hover:bg-solana-green/20"
+        >
+          공개 카탈로그 열기 <ExternalLink className="h-4 w-4" />
+        </a>
+      </div>
+
+      <div className="glass-panel rounded-xl p-4 border border-outline-variant/20">
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-outline mb-2">
+          pay.sh 카탈로그 주소
+        </p>
+        <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+          <code className="font-mono text-xs break-all text-on-surface">{catalogPageUrl}</code>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => copy(catalogPageUrl, 'page')}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-google-blue/15 px-3 py-1.5 text-xs text-google-blue"
+            >
+              {copied === 'page' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+              페이지 복사
+            </button>
+            <button
+              type="button"
+              onClick={() => copy(catalogApiUrl, 'api')}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-surface-container-high px-3 py-1.5 text-xs text-on-surface-variant"
+            >
+              {copied === 'api' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+              API 복사
+            </button>
+          </div>
+        </div>
+        <p className="mt-2 font-mono text-[11px] break-all text-outline">{catalogApiUrl}</p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-gutter">
@@ -131,6 +189,7 @@ export default function AgentsPage({ agents, onSelect, onEdit, onToggleStatus }:
           const title = agent.agentName || agent.customRole || roleLabel(agent.role);
           const fee = agent.fee ?? agent.perCallPriceUsdc ?? 0;
           const rev = (agent.invokeCount || 0) * fee;
+          const invokeUrl = agent.invokeUrl || agent.payShCatalog?.publicInvokeUrl || '';
           return (
             <div
               key={agent.id}
@@ -228,6 +287,29 @@ export default function AgentsPage({ agents, onSelect, onEdit, onToggleStatus }:
                   </div>
                 </div>
               </div>
+
+              {invokeUrl ? (
+                <div className="mt-4 rounded-lg border border-outline-variant/15 bg-surface-container-lowest/60 p-3">
+                  <p className="text-[10px] uppercase tracking-wider text-outline mb-1">Invoke API</p>
+                  <div className="flex items-start gap-2">
+                    <code className="min-w-0 flex-1 break-all font-mono text-xs text-on-surface-variant">
+                      {invokeUrl}
+                    </code>
+                    <button
+                      type="button"
+                      onClick={() => copy(invokeUrl, `invoke-${agent.id}`)}
+                      className="shrink-0 rounded-md bg-google-blue/15 p-2 text-google-blue"
+                      title="복사"
+                    >
+                      {copied === `invoke-${agent.id}` ? (
+                        <Check className="h-3.5 w-3.5" />
+                      ) : (
+                        <Copy className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
             </div>
           );
         })}

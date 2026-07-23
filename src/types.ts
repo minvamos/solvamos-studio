@@ -26,6 +26,20 @@ export interface Agent {
   status?: string;
   fee?: number;
   perCallPriceUsdc?: number;
+  catalogPageUrl?: string;
+  catalogApiUrl?: string;
+  invokeUrl?: string;
+  agentCardUrl?: string;
+  payShCatalog?: {
+    catalogId?: string;
+    invokeUrl?: string;
+    publicInvokeUrl?: string;
+    catalogPageUrl?: string;
+    catalogApiUrl?: string;
+    agentCardUrl?: string;
+    feeUsdc?: number;
+    officialPayShCatalogUrl?: string;
+  } | null;
 }
 
 export interface PromptOptions {
