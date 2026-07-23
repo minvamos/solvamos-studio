@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { Agent, DriveItem, DrivePathCrumb, Message, PromptOptions, LocalUploadFile } from '../types';
 import DriveBrowser from '../components/DriveBrowser';
+import ChatMessageBody from '../components/ChatMessageBody';
 
 const AI_APP_TYPES: {
   id: NonNullable<PromptOptions['aiAppType']>;
@@ -127,7 +128,7 @@ type Props = {
   customSignature: string;
   setCustomSignature: (v: string) => void;
   onAcknowledgeAndSign: (useRandomSig?: boolean) => void;
-  bottomRef: RefObject<HTMLDivElement | null>;
+  chatScrollRef: RefObject<HTMLDivElement | null>;
   copiedId: string | null;
   onCopy: (text: string, id: string) => void;
   serverStatus: any;
@@ -177,7 +178,7 @@ export default function StudioPage(props: Props) {
     customSignature,
     setCustomSignature,
     onAcknowledgeAndSign,
-    bottomRef,
+    chatScrollRef,
     copiedId,
     onCopy,
     serverStatus,
@@ -687,7 +688,10 @@ export default function StudioPage(props: Props) {
             </div>
           </div>
 
-          <div className="flex-1 p-4 flex flex-col gap-3 overflow-y-auto min-h-[320px] max-h-[420px]">
+          <div
+            ref={chatScrollRef}
+            className="flex-1 p-4 flex flex-col gap-3 overflow-y-auto min-h-[320px] max-h-[420px]"
+          >
             {!activeAgent && (
               <p className="text-sm text-on-surface-variant text-center py-8">
                 에이전트를 생성하면 여기서 바로 테스트할 수 있습니다.
@@ -701,17 +705,16 @@ export default function StudioPage(props: Props) {
                 <div
                   className={
                     m.sender === 'user'
-                      ? 'bg-google-blue text-white px-4 py-2 rounded-2xl rounded-tr-sm max-w-[85%] text-sm shadow-lg shadow-google-blue/20 whitespace-pre-wrap'
+                      ? 'bg-google-blue text-white px-4 py-2 rounded-2xl rounded-tr-sm max-w-[85%] text-sm shadow-lg shadow-google-blue/20'
                       : m.sender === 'system'
-                        ? 'bg-surface-container-highest/60 text-on-surface-variant px-4 py-2 rounded-2xl max-w-[90%] text-sm border border-outline-variant/20 whitespace-pre-wrap'
-                        : 'bg-surface-container-high text-on-surface px-4 py-2 rounded-2xl rounded-tl-sm max-w-[90%] text-sm border border-outline-variant/20 whitespace-pre-wrap'
+                        ? 'bg-surface-container-highest/60 text-on-surface-variant px-4 py-2 rounded-2xl max-w-[90%] text-sm border border-outline-variant/20'
+                        : 'bg-surface-container-high text-on-surface px-4 py-2 rounded-2xl rounded-tl-sm max-w-[90%] text-sm border border-outline-variant/20'
                   }
                 >
-                  {m.text}
+                  <ChatMessageBody text={m.text} sender={m.sender} />
                 </div>
               </div>
             ))}
-            <div ref={bottomRef} />
           </div>
 
           {pendingPayment && (

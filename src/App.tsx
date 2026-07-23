@@ -14,6 +14,7 @@ import MyPage from './pages/MyPage';
 import WalletModal, { type WalletRow } from './components/WalletModal';
 import CreateAgentProgress, { CREATE_STEPS, EDIT_STEPS } from './components/CreateAgentProgress';
 import { formatAgentChatMessage } from './lib/formatAgentMessage';
+import { parseAppRoute, writeAppRoute, writeLandingRoute } from './lib/appRoute';
 
 export default function App() {
   const [view, setView] = useState<'landing' | 'studio' | 'boot'>('boot');
@@ -119,7 +120,16 @@ export default function App() {
   const [walletBusy, setWalletBusy] = useState(false);
   const [walletError, setWalletError] = useState<string | null>(null);
 
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+
+  const navigateTab = (
+    tab: AppTab,
+    options?: { replace?: boolean; agentId?: string | null }
+  ) => {
+    setView('studio');
+    setActiveTab(tab);
+    writeAppRoute(tab, options);
+  };
 
   const authFetch = (url: string, init?: RequestInit) => {
     return fetch(url, {
@@ -354,7 +364,7 @@ export default function App() {
 
       if (data.mode === 'adc' || !data.authUrl) {
         applyAuthUser({ ...data, connected: true, user: data.user || data }, data.sessionId);
-        setView('studio');
+        navigateTab('studio');
         if (intent !== 'link') await loadDriveFolders(undefined);
         return;
       }
@@ -405,7 +415,7 @@ export default function App() {
         return;
       }
       applyAuthUser({ connected: true, ...data }, data.sessionId);
-      setView('studio');
+      navigateTab('studio');
       await fetchWallets();
       await fetchStatusAndAgents();
     } catch (err: any) {
@@ -417,7 +427,7 @@ export default function App() {
 
   const enterDevSkip = () => {
     localStorage.setItem('solvamos_entered', '1');
-    setView('studio');
+    navigateTab('studio');
   };
 
   const refreshDriveFolders = async () => {
@@ -443,6 +453,7 @@ export default function App() {
     localStorage.removeItem('solvamos_entered');
     localStorage.removeItem('solvamos_drive_session');
     setView('landing');
+    writeLandingRoute({ replace: true });
     setDriveSessionId('');
     setDriveEmail(null);
     setUserName(null);
@@ -460,6 +471,7 @@ export default function App() {
   useEffect(() => {
     const boot = async () => {
       const entered = localStorage.getItem('solvamos_entered') === '1';
+      const initialRoute = parseAppRoute();
       // Keep studio visible across refresh while we revalidate (no login flash)
       if (entered) {
         setView('studio');
@@ -476,7 +488,7 @@ export default function App() {
 
       if (authErr) {
         setAuthError(authErr);
-        window.history.replaceState({}, '', '/');
+        writeLandingRoute({ replace: true });
         setView('landing');
         return;
       }
@@ -485,23 +497,63 @@ export default function App() {
         if (emailFromUrl) setDriveEmail(emailFromUrl);
         const linked = params.get('google_linked') === '1';
         localStorage.setItem('solvamos_entered', '1');
-        window.history.replaceState({}, '', '/');
+        writeLandingRoute({ replace: true });
         const ok = await refreshAuthSession();
         if (ok) {
-          if (linked) setActiveTab('account');
+          navigateTab(linked ? 'account' : 'studio');
           return;
         }
       }
 
       const ok = await refreshAuthSession();
-      if (ok) return;
+      if (ok) {
+        if (initialRoute.tab) {
+          setActiveTab(initialRoute.tab);
+          setView('studio');
+        } else {
+          writeLandingRoute({ replace: true });
+          navigateTab('studio');
+        }
+        return;
+      }
 
       // Only kick to landing if session truly dead
       localStorage.removeItem('solvamos_entered');
       setView('landing');
+      writeLandingRoute({ replace: true });
     };
     void boot();
   }, []);
+
+  useEffect(() => {
+    const initial = parseAppRoute();
+    if (initial.agentId) {
+      const routedAgent = agents.find((candidate) => candidate.id === initial.agentId);
+      if (routedAgent) {
+        setActiveAgent(routedAgent);
+        setEditingAgentId(routedAgent.id);
+      }
+    }
+
+    const onPopState = () => {
+      const route = parseAppRoute();
+      if (!route.tab) {
+        setView('landing');
+        return;
+      }
+      setView('studio');
+      setActiveTab(route.tab);
+      if (route.agentId) {
+        const agent = agents.find((candidate) => candidate.id === route.agentId);
+        if (agent) {
+          setActiveAgent(agent);
+          setEditingAgentId(agent.id);
+        }
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [agents]);
 
   useEffect(() => {
     const fetchPreview = async () => {
@@ -521,7 +573,9 @@ export default function App() {
   }, [options]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const panel = chatScrollRef.current;
+    if (!panel) return;
+    panel.scrollTo({ top: panel.scrollHeight, behavior: 'smooth' });
   }, [chatHistory, activeAgent, pendingPayment]);
 
   const beginEditAgent = (agent: Agent) => {
@@ -544,7 +598,7 @@ export default function App() {
     setAgentName(agent.agentName || agent.customRole || '');
     setSelectedFolderId(agent.googleDriveFolderId || '');
     setLocalFiles([]);
-    setActiveTab('studio');
+    navigateTab('studio', { agentId: agent.id });
   };
 
   const startNewAgent = () => {
@@ -567,7 +621,7 @@ export default function App() {
     setSelectedFolderId('');
     setSelectedDriveName(null);
     setLocalFiles([]);
-    setActiveTab('studio');
+    navigateTab('studio');
   };
 
   const handleCreateAgent = async () => {
@@ -672,7 +726,7 @@ export default function App() {
         setEditBaselineFolderId(saved.googleDriveFolderId || '');
         setLocalFiles([]);
         setBuilderStep(3);
-        setActiveTab('studio');
+        navigateTab('studio', { replace: true, agentId: saved.id });
         await new Promise((r) => setTimeout(r, 450));
       } else {
         alert(`Error ${isEdit ? 'updating' : 'creating'} agent: ${data.message}`);
@@ -718,6 +772,25 @@ export default function App() {
     promptText: string,
     signature: string | null
   ) => {
+    const auth = await ensureAuth();
+    if (!auth) {
+      setChatHistory((prev) => ({
+        ...prev,
+        [agentId]: [
+          ...(prev[agentId] || []).filter((m) => m.id !== 'loading-placeholder'),
+          {
+            id: `auth-${Date.now()}`,
+            sender: 'system',
+            text: '로그인 세션이 만료되었습니다. 다시 로그인한 뒤 메시지를 보내주세요.',
+            timestamp: new Date().toLocaleTimeString(),
+            paymentStatus: 'none',
+          },
+        ],
+      }));
+      setAuthError('로그인 세션이 만료되었습니다.');
+      return;
+    }
+
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
 
     if (signature) {
@@ -760,7 +833,22 @@ export default function App() {
       const withoutLoading = (msgs: Message[]) =>
         msgs.filter((m) => m.id !== 'loading-placeholder');
 
-      if (res.status === 402) {
+      if (res.status === 401 || res.status === 403) {
+        const authMessage: Message = {
+          id: `auth-${Date.now()}`,
+          sender: 'system',
+          text:
+            res.status === 401
+              ? '로그인 세션이 만료되었습니다. 다시 로그인해주세요.'
+              : data.message || '이 에이전트를 테스트할 권한이 없습니다.',
+          timestamp: new Date().toLocaleTimeString(),
+          paymentStatus: 'none',
+        };
+        setChatHistory((prev) => ({
+          ...prev,
+          [agentId]: [...withoutLoading(prev[agentId] || []), authMessage],
+        }));
+      } else if (res.status === 402) {
         setPendingPayment({
           agentId,
           amount: data.amount,
@@ -1036,7 +1124,7 @@ export default function App() {
     />
     <AppShell
       activeTab={activeTab}
-      onNavigate={setActiveTab}
+      onNavigate={navigateTab}
       userEmail={driveEmail}
       userName={userName}
       userPicture={userPicture}
@@ -1099,7 +1187,7 @@ export default function App() {
           customSignature={customSignature}
           setCustomSignature={setCustomSignature}
           onAcknowledgeAndSign={handleAcknowledgeAndSign}
-          bottomRef={bottomRef}
+          chatScrollRef={chatScrollRef}
           copiedId={copiedId}
           onCopy={handleCopyText}
           serverStatus={serverStatus}

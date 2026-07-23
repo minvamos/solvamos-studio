@@ -45,7 +45,14 @@ import {
   setCatalogPublishMode,
   catalogPublishInfo,
 } from './server/paysh-catalog.js';
-import { loadWallets, listWallets, addWallet, setPrimaryWallet, removeWallet, getPrimaryWallet, ownerKeyFromEmail, updateWalletLabel } from './server/wallets.js';
+import {
+  listWallets,
+  addWallet,
+  setPrimaryWallet,
+  removeWallet,
+  getPrimaryWallet,
+  updateWalletLabel,
+} from './server/wallets.js';
 import { connectDb, prisma } from './server/db.js';
 import { registerPlatformAuthRoutes } from './server/auth-routes.js';
 import { getMeFromRequest } from './server/platform-auth.js';
@@ -98,7 +105,6 @@ app.use((req, res, next) => {
 });
 
 loadPayShCatalog();
-loadWallets();
 registerPlatformAuthRoutes(app);
 registerDriveAuthRoutes(app);
 
@@ -296,32 +302,43 @@ app.get('/api/ai-applications/catalog', (_req, res) => {
   res.json({ status: 'success', ...aiApplicationsCatalog() });
 });
 
-async function walletOwnerFromReq(req: import('express').Request): Promise<string> {
-  const sid = await resolveSessionId(req);
-  const session = sid ? getSession(sid) : undefined;
-  return ownerKeyFromEmail(session?.email);
+async function walletUserIdFromReq(
+  req: express.Request,
+  res: express.Response
+): Promise<string | null> {
+  const me = await getMeFromRequest(req);
+  if (!me.connected || !me.user) {
+    res.status(401).json({ status: 'error', message: 'Login required' });
+    return null;
+  }
+  return me.user.id;
 }
 
 app.get('/api/wallets', async (req, res) => {
-  const owner = await walletOwnerFromReq(req);
-  const wallets = listWallets(owner);
-  res.json({
-    status: 'success',
-    owner,
-    primary: getPrimaryWallet(owner) || null,
-    data: wallets,
-  });
+  try {
+    const userId = await walletUserIdFromReq(req, res);
+    if (!userId) return;
+    const wallets = await listWallets(userId);
+    res.json({
+      status: 'success',
+      primary: (await getPrimaryWallet(userId)) || null,
+      data: wallets,
+    });
+  } catch (err: any) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
 });
 
 app.post('/api/wallets', async (req, res) => {
   try {
-    const owner = await walletOwnerFromReq(req);
+    const userId = await walletUserIdFromReq(req, res);
+    if (!userId) return;
     const { address, label, source, makePrimary } = req.body || {};
     if (!address) {
       res.status(400).json({ status: 'error', message: 'address required' });
       return;
     }
-    const wallet = addWallet(owner, {
+    const wallet = await addWallet(userId, {
       address: String(address),
       label: label ? String(label) : undefined,
       source: source ? String(source) : 'manual',
@@ -330,8 +347,8 @@ app.post('/api/wallets', async (req, res) => {
     res.status(201).json({
       status: 'success',
       wallet,
-      primary: getPrimaryWallet(owner) || null,
-      data: listWallets(owner),
+      primary: (await getPrimaryWallet(userId)) || null,
+      data: await listWallets(userId),
     });
   } catch (err: any) {
     res.status(400).json({ status: 'error', message: err.message });
@@ -340,13 +357,14 @@ app.post('/api/wallets', async (req, res) => {
 
 app.post('/api/wallets/:id/primary', async (req, res) => {
   try {
-    const owner = await walletOwnerFromReq(req);
-    const wallet = setPrimaryWallet(owner, req.params.id);
+    const userId = await walletUserIdFromReq(req, res);
+    if (!userId) return;
+    const wallet = await setPrimaryWallet(userId, req.params.id);
     res.json({
       status: 'success',
       wallet,
       primary: wallet,
-      data: listWallets(owner),
+      data: await listWallets(userId),
     });
   } catch (err: any) {
     res.status(404).json({ status: 'error', message: err.message });
@@ -355,9 +373,10 @@ app.post('/api/wallets/:id/primary', async (req, res) => {
 
 app.patch('/api/wallets/:id', async (req, res) => {
   try {
-    const owner = await walletOwnerFromReq(req);
-    const wallet = updateWalletLabel(owner, req.params.id, String(req.body?.label || ''));
-    res.json({ status: 'success', wallet, data: listWallets(owner) });
+    const userId = await walletUserIdFromReq(req, res);
+    if (!userId) return;
+    const wallet = await updateWalletLabel(userId, req.params.id, String(req.body?.label || ''));
+    res.json({ status: 'success', wallet, data: await listWallets(userId) });
   } catch (err: any) {
     res.status(404).json({ status: 'error', message: err.message });
   }
@@ -365,11 +384,12 @@ app.patch('/api/wallets/:id', async (req, res) => {
 
 app.delete('/api/wallets/:id', async (req, res) => {
   try {
-    const owner = await walletOwnerFromReq(req);
-    const data = removeWallet(owner, req.params.id);
+    const userId = await walletUserIdFromReq(req, res);
+    if (!userId) return;
+    const data = await removeWallet(userId, req.params.id);
     res.json({
       status: 'success',
-      primary: getPrimaryWallet(owner) || null,
+      primary: (await getPrimaryWallet(userId)) || null,
       data,
     });
   } catch (err: any) {
@@ -418,10 +438,8 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       config.tenantId ||
       undefined;
 
-    const ownerEmail = me.user?.email || authSession?.email;
-    const owner = ownerKeyFromEmail(ownerEmail);
     // User wallet = operator only (funding / display). Never agent vault.
-    const userPrimary = getPrimaryWallet(owner);
+    const userPrimary = me.user?.id ? await getPrimaryWallet(me.user.id) : undefined;
 
     const sourceMeta = getDataSourceType(dataSourceType);
     const localFileList = Array.isArray(localFiles) ? localFiles : [];
@@ -1132,10 +1150,38 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
     const listing = await ensureListed(agent, `${req.protocol}://${req.get('host')}`);
     const feeAmount = agentFeeUsdc(agent);
 
-    // Studio sandbox: logged-in operator tests their agent → Vertex/RAG, no human→agent paywall.
+    // Studio owner test: authenticated member of the agent tenant → no human→agent paywall.
     const me = await getMeFromRequest(req);
-    const isStudioOwnerTest =
-      (studioTest === true || req.headers['x-solvamos-studio'] === '1') && me.connected === true;
+    const requestedStudioTest =
+      studioTest === true || req.headers['x-solvamos-studio'] === '1';
+    let isStudioOwnerTest = false;
+    if (requestedStudioTest) {
+      if (!me.connected || !me.user) {
+        res.status(401).json({
+          status: 'auth_required',
+          message: 'Studio session expired. Refresh the session and retry.',
+        });
+        return;
+      }
+      const membership = agent.tenantId
+        ? await prisma.tenantMember.findUnique({
+            where: {
+              tenantId_userId: {
+                tenantId: agent.tenantId,
+                userId: me.user.id,
+              },
+            },
+          })
+        : null;
+      if (!membership) {
+        res.status(403).json({
+          status: 'forbidden',
+          message: 'This agent does not belong to your tenant.',
+        });
+        return;
+      }
+      isStudioOwnerTest = true;
+    }
 
     const finish = async (paymentLogs: string[]) => {
       const out = await runAgentInvoke(
