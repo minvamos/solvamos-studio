@@ -1,6 +1,6 @@
 {
   "name": "SolVamos Studio",
-  "description": "SolVamos Studio — Sovereign Drive RAG + Cloud Run x402 paywall + per-customer GCP isolation.",
+  "description": "SolVamos Studio — Discovery Engine Datastore agents, Catalog discovery, multimodal chat, A2A, and gateway-only x402/MPP invocation.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

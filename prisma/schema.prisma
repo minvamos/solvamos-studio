@@ -235,3 +235,23 @@ model RagDocument {
   @@unique([agentId, driveFileId])
   @@index([agentId])
 }
+
+/// Verified pay.sh / Solana payment receipts shown in Studio settlements UI.
+model PaymentSettlement {
+  id              String   @id @default(cuid())
+  signature       String   @unique
+  agentId         String
+  recipientWallet String
+  amountUsdc      Float
+  status          String   @default("success")
+  blockHeight     Int?
+  network         String?
+  /// onchain | sandbox | legacy_mock
+  proofKind       String?
+  ownerUserId     String?
+  createdAt       DateTime @default(now())
+
+  @@index([agentId])
+  @@index([ownerUserId])
+  @@index([createdAt])
+}

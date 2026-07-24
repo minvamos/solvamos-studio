@@ -85,7 +85,7 @@ export default function Landing({
           </p>
 
           <a
-            href="/catalog"
+            href="https://solvamos-catalog-74094114833.asia-northeast3.run.app/marketplace"
             className="mb-8 inline-flex w-fit items-center gap-2 rounded-lg border border-primary/40 bg-primary/10 px-4 py-2.5 text-sm font-semibold text-primary hover:bg-primary/20"
           >
             <Boxes className="h-4 w-4" />

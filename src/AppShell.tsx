@@ -10,9 +10,10 @@ import {
   Bell,
   HelpCircle,
   LogOut,
+  FlaskConical,
 } from 'lucide-react';
 
-export type AppTab = 'studio' | 'list' | 'settlements' | 'account';
+export type AppTab = 'studio' | 'list' | 'settlements' | 'account' | 'lab';
 
 type Props = {
   activeTab: AppTab;
@@ -32,6 +33,7 @@ type Props = {
 const NAV: { id: AppTab; label: string; icon: typeof Bot }[] = [
   { id: 'studio', label: '에이전트 스튜디오', icon: Factory },
   { id: 'list', label: '내 에이전트 목록', icon: Bot },
+  { id: 'lab', label: '개발자 테스트', icon: FlaskConical },
   { id: 'settlements', label: '온체인 정산 내역', icon: Wallet },
   { id: 'account', label: '마이페이지', icon: Settings },
 ];
@@ -141,7 +143,7 @@ export default function AppShell({
             <span className="text-sm font-medium">고객 지원</span>
           </button>
           <a
-            href="/catalog"
+            href="https://solvamos-catalog-74094114833.asia-northeast3.run.app/marketplace"
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-4 px-4 py-2 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest/50 transition-all rounded-lg text-left"

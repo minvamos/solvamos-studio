@@ -13,8 +13,12 @@ import {
   RefreshCw,
   Lock,
   ExternalLink,
+  Paperclip,
+  Globe,
+  X,
+  Image as ImageIcon,
 } from 'lucide-react';
-import { Agent, DriveItem, DrivePathCrumb, Message, PromptOptions, LocalUploadFile } from '../types';
+import { Agent, ChatAttachment, DriveItem, DrivePathCrumb, Message, PromptOptions, LocalUploadFile } from '../types';
 import DriveBrowser from '../components/DriveBrowser';
 import ChatMessageBody from '../components/ChatMessageBody';
 
@@ -84,6 +88,9 @@ type PendingPayment = {
   prompt: string;
   network?: string;
   paymentNetwork?: string;
+  invokeUrl?: string;
+  gatewayUrl?: string;
+  message?: string;
 } | null;
 
 type Props = {
@@ -135,6 +142,10 @@ type Props = {
   serverStatus: any;
   enableA2A?: boolean;
   setEnableA2A?: (v: boolean) => void;
+  chatAttachments?: ChatAttachment[];
+  onChatAttachmentsChange?: (files: ChatAttachment[]) => void;
+  enableWebSearch?: boolean;
+  setEnableWebSearch?: (v: boolean) => void;
 };
 
 export default function StudioPage(props: Props) {
@@ -185,9 +196,15 @@ export default function StudioPage(props: Props) {
     serverStatus,
     enableA2A,
     setEnableA2A,
+    chatAttachments = [],
+    onChatAttachmentsChange,
+    enableWebSearch = false,
+    setEnableWebSearch,
   } = props;
 
-  const messages = activeAgent ? chatHistory[activeAgent.id] || [] : [];
+  /** Live test only after create / when editing an existing agent. */
+  const chatReady = Boolean(editingAgentId && activeAgent);
+  const messages = chatReady && activeAgent ? chatHistory[activeAgent.id] || [] : [];
   const fee = options.fee ?? 0;
   const appType = options.aiAppType || 'search_docs';
   const sourceType = options.dataSourceType || 'local_upload';
@@ -556,10 +573,12 @@ export default function StudioPage(props: Props) {
                   {fee === 0 ? 'Free' : `$${fee.toFixed(3)} USDC / 회`}
                 </span>
               </div>
-              <div className="mt-3 grid grid-cols-2 gap-2">
+              <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {[
                   { value: 0, label: '무료' },
-                  { value: 0.001, label: '유료 · 0.001 USDC' },
+                  { value: 0.001, label: '0.001' },
+                  { value: 0.01, label: '0.01' },
+                  { value: 0.1, label: '0.1' },
                 ].map((choice) => (
                   <button
                     key={choice.value}
@@ -575,8 +594,27 @@ export default function StudioPage(props: Props) {
                   </button>
                 ))}
               </div>
+              <div className="mt-3 flex items-center gap-2">
+                <label className="text-xs text-on-surface-variant shrink-0">직접 입력</label>
+                <input
+                  type="number"
+                  min={0}
+                  step={0.001}
+                  value={Number.isFinite(fee) ? fee : 0}
+                  onChange={(e) => {
+                    const next = Number(e.target.value);
+                    setOptions((prev) => ({
+                      ...prev,
+                      fee: Number.isFinite(next) && next >= 0 ? next : 0,
+                    }));
+                  }}
+                  className="w-full bg-surface-container-low border border-outline-variant/30 rounded-lg px-3 py-2 text-sm text-on-surface input-glow focus:outline-none"
+                />
+                <span className="text-xs text-outline shrink-0">USDC</span>
+              </div>
               <p className="mt-2 text-[11px] text-outline">
-                유료 호출은 pay.sh 호환 게이트웨이에서 x402/MPP로 0.001 Devnet USDC 정산합니다.
+                유료 호출은 pay.sh 호환 게이트웨이/원본 invoke에서 x402/MPP로 정산합니다. 에이전트별 단가가
+                카탈로그·페이월에 반영됩니다.
               </p>
             </div>
 
@@ -639,7 +677,9 @@ export default function StudioPage(props: Props) {
                     value:
                       creationResult.catalogPageUrl ||
                       creationResult.payShCatalog?.catalogPageUrl ||
-                      '/catalog',
+                      (serverStatus?.catalogSiteUrl
+                        ? `${serverStatus.catalogSiteUrl}/marketplace`
+                        : 'https://solvamos-catalog-74094114833.asia-northeast3.run.app/marketplace'),
                     open: true,
                   },
                   {
@@ -648,7 +688,9 @@ export default function StudioPage(props: Props) {
                     value:
                       creationResult.catalogApiUrl ||
                       creationResult.payShCatalog?.catalogApiUrl ||
-                      '/api/catalog',
+                      (serverStatus?.catalogSiteUrl
+                        ? `${serverStatus.catalogSiteUrl}/api/catalog`
+                        : 'https://solvamos-catalog-74094114833.asia-northeast3.run.app/api/catalog'),
                     open: true,
                   },
                   {
@@ -705,7 +747,9 @@ export default function StudioPage(props: Props) {
                   href={
                     creationResult.catalogPageUrl ||
                     creationResult.payShCatalog?.catalogPageUrl ||
-                    '/catalog'
+                    (serverStatus?.catalogSiteUrl
+                      ? `${serverStatus.catalogSiteUrl}/marketplace`
+                      : 'https://solvamos-catalog-74094114833.asia-northeast3.run.app/marketplace')
                   }
                   target="_blank"
                   rel="noopener noreferrer"
@@ -762,7 +806,7 @@ export default function StudioPage(props: Props) {
               <h3 className="font-semibold text-on-surface text-lg">에이전트 실시간 테스트</h3>
             </div>
             <div className="flex items-center gap-3">
-              {setEnableA2A ? (
+              {chatReady && setEnableA2A ? (
                 <label className="flex items-center gap-2 text-xs text-on-surface-variant cursor-pointer select-none">
                   <input
                     type="checkbox"
@@ -776,10 +820,14 @@ export default function StudioPage(props: Props) {
                   </span>
                 </label>
               ) : null}
-              <span className="relative flex h-3 w-3">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-secondary opacity-75" />
-                <span className="relative inline-flex rounded-full h-3 w-3 bg-secondary" />
-              </span>
+              {chatReady ? (
+                <span className="relative flex h-3 w-3">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-secondary opacity-75" />
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-secondary" />
+                </span>
+              ) : (
+                <span className="text-[10px] uppercase tracking-wider text-outline">Locked</span>
+              )}
             </div>
           </div>
 
@@ -788,10 +836,14 @@ export default function StudioPage(props: Props) {
             className="flex-1 p-4 flex flex-col gap-3 overflow-y-auto min-h-[280px] max-h-[360px] overflow-anchor-none"
             style={{ overflowAnchor: 'none' }}
           >
-            {!activeAgent && (
-              <p className="text-sm text-on-surface-variant text-center py-8">
-                에이전트를 생성하면 여기서 바로 테스트할 수 있습니다.
-              </p>
+            {!chatReady && (
+              <div className="text-sm text-on-surface-variant text-center py-8 px-4 space-y-2">
+                <p className="font-medium text-on-surface">생성 중에는 실시간 테스트를 사용할 수 없습니다.</p>
+                <p>
+                  에이전트를 게시하거나 목록에서 편집으로 들어오면 여기서 호출·첨부·웹검색을
+                  시험할 수 있습니다.
+                </p>
+              </div>
             )}
             {messages.map((m) => (
               <div
@@ -807,74 +859,73 @@ export default function StudioPage(props: Props) {
                         : 'bg-surface-container-high text-on-surface px-4 py-2 rounded-2xl rounded-tl-sm max-w-[90%] text-sm border border-outline-variant/20'
                   }
                 >
+                  {m.attachments && m.attachments.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mb-1.5">
+                      {m.attachments.map((a, i) =>
+                        a.previewUrl ? (
+                          <img
+                            key={`${a.name}-${i}`}
+                            src={a.previewUrl}
+                            alt={a.name}
+                            className="h-14 w-14 rounded object-cover border border-white/20"
+                          />
+                        ) : (
+                          <span
+                            key={`${a.name}-${i}`}
+                            className="text-[10px] opacity-80 inline-flex items-center gap-1"
+                          >
+                            <Paperclip className="w-3 h-3" />
+                            {a.name}
+                          </span>
+                        )
+                      )}
+                    </div>
+                  )}
                   <ChatMessageBody text={m.text} sender={m.sender} />
+                  {m.relatedQuestions && m.relatedQuestions.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {m.relatedQuestions.map((q) => (
+                        <button
+                          key={q}
+                          type="button"
+                          onClick={() => setInputText(q)}
+                          className="text-[10px] px-2 py-1 rounded-md bg-google-blue/10 text-google-blue border border-google-blue/20 hover:bg-google-blue/20"
+                        >
+                          {q}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             ))}
           </div>
 
-          {pendingPayment && (
+          {chatReady && pendingPayment && (
             <div className="mx-4 mb-2 p-3 rounded-lg bg-google-blue/10 border border-google-blue/30 text-sm space-y-2">
               <div className="flex items-center gap-2 text-google-blue font-medium">
                 <Lock className="w-4 h-4" />
-                x402/MPP 결제 필요 · {pendingPayment.amount} {pendingPayment.token}
+                pay-gateway 결제 필요 · {pendingPayment.amount} {pendingPayment.token}
               </div>
-              <p className="text-[11px] text-on-surface-variant">
-                모드:{' '}
-                <span className="text-on-surface font-medium">
-                  {serverStatus?.paymentNetwork === 'devnet'
-                    ? 'Devnet (x402/MPP 온체인)'
-                    : 'Localnet (pay sandbox)'}
-                </span>
-                {' · '}vault{' '}
-                <span className="font-mono text-[10px]">
-                  {pendingPayment.recipientWallet.slice(0, 8)}…
-                </span>
+              <p className="text-[11px] text-on-surface-variant leading-relaxed">
+                유료 호출은 Catalog <code className="text-[10px]">invoke_url</code> → pay-gateway →
+                HTTP 402 → USDC 결제 → Studio proxy 경로만 지원합니다. Studio origin 서명 첨부는
+                비활성입니다.
               </p>
-              {serverStatus?.paymentNetwork === 'devnet' && (
-                <p className="text-[11px] text-amber-300/90 leading-relaxed">
-                  Devnet: 에이전트 vault(+ 플랫폼 10% treasury)로 USDC를 보낸 뒤 트랜잭션
-                  서명을 붙여넣으세요. Sandbox 버튼은 이 모드에서 거부됩니다.
-                </p>
-              )}
-              <input
-                value={customSignature}
-                onChange={(e) => setCustomSignature(e.target.value)}
-                placeholder={
-                  serverStatus?.paymentNetwork === 'devnet'
-                    ? 'Devnet USDC tx signature 붙여넣기'
-                    : '온체인 서명 붙여넣기 (선택)'
-                }
-                className="w-full bg-surface-container-lowest border border-outline-variant/30 rounded-lg px-3 py-1.5 text-xs font-mono input-glow focus:outline-none"
-              />
-              <div className="flex gap-2">
-                {(serverStatus?.paymentNetwork === 'localnet' ||
-                  serverStatus?.paymentNetwork === 'sandbox' ||
-                  serverStatus?.sandboxProofsAllowed) && (
+              {pendingPayment.invokeUrl && (
+                <div className="flex gap-2 items-start">
+                  <code className="flex-1 text-[10px] break-all bg-surface-container-lowest rounded px-2 py-1.5 border border-outline-variant/20">
+                    {pendingPayment.invokeUrl}
+                  </code>
                   <button
                     type="button"
-                    disabled={isVerifyingPayment}
-                    onClick={() => onAcknowledgeAndSign(true)}
-                    className="flex-1 btn-primary rounded-lg py-2 text-xs font-medium disabled:opacity-50"
+                    onClick={() => onAcknowledgeAndSign(false)}
+                    className="shrink-0 border border-google-blue text-google-blue rounded-lg px-2 py-1.5 text-xs hover:bg-google-blue/10"
                   >
-                    Sandbox 증명 전송
+                    URL 복사
                   </button>
-                )}
-                <button
-                  type="button"
-                  disabled={isVerifyingPayment || !customSignature.trim()}
-                  onClick={() => onAcknowledgeAndSign(false)}
-                  className={
-                    serverStatus?.paymentNetwork === 'devnet'
-                      ? 'flex-1 btn-primary rounded-lg py-2 text-xs font-medium disabled:opacity-50'
-                      : 'flex-1 border border-google-blue text-google-blue rounded-lg py-2 text-xs font-medium hover:bg-google-blue/10 disabled:opacity-50'
-                  }
-                >
-                  {serverStatus?.paymentNetwork === 'devnet'
-                    ? 'Devnet 서명으로 결제'
-                    : '서명으로 전송'}
-                </button>
-              </div>
+                </div>
+              )}
               {paymentLogs.length > 0 && (
                 <pre className="text-[10px] text-on-surface-variant overflow-x-auto whitespace-pre-wrap">
                   {paymentLogs.join('\n')}
@@ -885,26 +936,110 @@ export default function StudioPage(props: Props) {
 
           <form
             onSubmit={onSendMessage}
-            className="p-4 border-t border-outline-variant/20 bg-surface-container/50"
+            className="p-4 border-t border-outline-variant/20 bg-surface-container/50 space-y-2"
           >
+            {!chatReady && (
+              <p className="text-[11px] text-center text-outline">
+                새 에이전트 작성 화면 — 테스트 입력은 비활성입니다.
+              </p>
+            )}
+            {chatReady && chatAttachments.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {chatAttachments.map((f, idx) => (
+                  <div
+                    key={`${f.name}-${idx}`}
+                    className="flex items-center gap-1.5 text-[11px] bg-surface-container-highest rounded-lg px-2 py-1 border border-outline-variant/20"
+                  >
+                    {f.previewUrl ? (
+                      <img src={f.previewUrl} alt="" className="w-6 h-6 rounded object-cover" />
+                    ) : (
+                      <Paperclip className="w-3.5 h-3.5 text-on-surface-variant" />
+                    )}
+                    <span className="max-w-[120px] truncate">{f.name}</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onChatAttachmentsChange?.(chatAttachments.filter((_, i) => i !== idx))
+                      }
+                      className="text-on-surface-variant hover:text-on-surface"
+                      aria-label="remove attachment"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {chatReady ? (
+              <div className="flex items-center gap-3 text-[11px] text-on-surface-variant">
+                <label className="inline-flex items-center gap-1.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={!!enableWebSearch}
+                    onChange={(e) => setEnableWebSearch?.(e.target.checked)}
+                    className="accent-google-blue"
+                  />
+                  <Globe className="w-3.5 h-3.5" />
+                  웹 검색
+                </label>
+                <label className="inline-flex items-center gap-1.5 cursor-pointer select-none">
+                  <input
+                    type="file"
+                    accept="image/*,application/pdf,text/*,.md,.json,.csv"
+                    multiple
+                    className="hidden"
+                    onChange={async (e) => {
+                      const list = e.target.files;
+                      if (!list?.length || !onChatAttachmentsChange) return;
+                      const next: ChatAttachment[] = [...chatAttachments];
+                      for (const file of Array.from(list).slice(0, 6)) {
+                        if (file.size > 8_000_000) continue;
+                        const buf = await file.arrayBuffer();
+                        const bytes = new Uint8Array(buf);
+                        let binary = '';
+                        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+                        const dataBase64 = btoa(binary);
+                        next.push({
+                          name: file.name,
+                          mimeType: file.type || 'application/octet-stream',
+                          dataBase64,
+                          previewUrl: file.type.startsWith('image/')
+                            ? URL.createObjectURL(file)
+                            : undefined,
+                        });
+                      }
+                      onChatAttachmentsChange(next.slice(0, 8));
+                      e.target.value = '';
+                    }}
+                  />
+                  <span className="inline-flex items-center gap-1 hover:text-google-blue">
+                    <ImageIcon className="w-3.5 h-3.5" />
+                    사진/파일
+                  </span>
+                </label>
+              </div>
+            ) : null}
             <div className="relative">
               <input
                 type="text"
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
                 onFocus={() => {
-                  // Prevent browser from scrolling the whole page to the input.
                   const y = window.scrollY;
                   const x = window.scrollX;
                   requestAnimationFrame(() => window.scrollTo(x, y));
                 }}
-                disabled={!activeAgent}
-                placeholder={activeAgent ? '메시지 입력...' : '에이전트 생성 후 입력'}
+                disabled={!chatReady}
+                placeholder={
+                  chatReady
+                    ? '메시지 입력… (사진·파일·웹검색 가능)'
+                    : '생성·게시 후 편집 화면에서 테스트'
+                }
                 className="w-full bg-surface-container-lowest border border-outline-variant/30 rounded-full pl-4 pr-12 py-2.5 text-on-surface text-sm focus:outline-none input-glow disabled:text-on-surface-variant disabled:cursor-not-allowed"
               />
               <button
                 type="submit"
-                disabled={!activeAgent || !inputText.trim()}
+                disabled={!chatReady || (!inputText.trim() && chatAttachments.length === 0)}
                 className="absolute right-2 top-1/2 -translate-y-1/2 h-8 w-8 rounded-full bg-google-blue text-white flex items-center justify-center disabled:bg-surface-container-highest disabled:text-on-surface-variant"
               >
                 <Send className="w-4 h-4" />

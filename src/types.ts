@@ -72,6 +72,14 @@ export type LocalUploadFile = {
   contentBase64?: string;
 };
 
+/** Per-turn chat attachments (images / PDFs / text) for Engine multimodal. */
+export type ChatAttachment = {
+  name: string;
+  mimeType: string;
+  dataBase64: string;
+  previewUrl?: string;
+};
+
 export interface DriveItem {
   id: string;
   name: string;
@@ -100,6 +108,9 @@ export interface Message {
   paymentStatus?: 'none' | 'pending_proof' | 'verified' | 'failed';
   paymentTx?: string;
   details?: string;
+  attachments?: ChatAttachment[];
+  relatedQuestions?: string[];
+  toolsUsed?: string[];
   a2aHops?: {
     toName: string;
     toAgentId: string;
@@ -118,5 +129,8 @@ export interface Settlement {
   status: 'success' | 'failed';
   timestamp: string;
   blockHeight: number;
+  network?: string;
+  proofKind?: string;
+  explorerUrl?: string;
 }
 

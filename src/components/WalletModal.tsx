@@ -24,11 +24,20 @@ type Props = {
   onRemove: (id: string) => Promise<void>;
 };
 
+type PhantomProvider = {
+  isPhantom?: boolean;
+  isConnected?: boolean;
+  publicKey?: { toString: () => string } | null;
+  connect: (opts?: { onlyIfTrusted?: boolean }) => Promise<{
+    publicKey: { toString: () => string };
+  }>;
+};
+
 declare global {
   interface Window {
-    solana?: {
-      isPhantom?: boolean;
-      connect: () => Promise<{ publicKey: { toString: () => string } }>;
+    solana?: PhantomProvider;
+    phantom?: {
+      solana?: PhantomProvider;
     };
     solflare?: {
       connect: () => Promise<void>;
@@ -39,6 +48,45 @@ declare global {
 
 function short(addr: string) {
   return `${addr.slice(0, 4)}…${addr.slice(-4)}`;
+}
+
+function getPhantomProvider(): PhantomProvider | null {
+  const fromNamespace = window.phantom?.solana;
+  if (fromNamespace?.isPhantom) return fromNamespace;
+  if (window.solana?.isPhantom) return window.solana;
+  return null;
+}
+
+/** Phantom injects async after page load — wait briefly before giving up. */
+function waitForPhantom(timeoutMs = 2500): Promise<PhantomProvider | null> {
+  const existing = getPhantomProvider();
+  if (existing) return Promise.resolve(existing);
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const onReady = () => {
+      const p = getPhantomProvider();
+      if (p) {
+        cleanup();
+        resolve(p);
+      }
+    };
+    const tick = window.setInterval(() => {
+      if (getPhantomProvider()) {
+        cleanup();
+        resolve(getPhantomProvider());
+        return;
+      }
+      if (Date.now() - started >= timeoutMs) {
+        cleanup();
+        resolve(null);
+      }
+    }, 120);
+    const cleanup = () => {
+      window.clearInterval(tick);
+      window.removeEventListener('phantom#initialized', onReady);
+    };
+    window.addEventListener('phantom#initialized', onReady);
+  });
 }
 
 export default function WalletModal({
@@ -73,16 +121,37 @@ export default function WalletModal({
     setLocalError(null);
     setPhantomBusy(true);
     try {
-      const provider = window.solana;
+      const provider = await waitForPhantom();
       if (!provider?.isPhantom) {
-        setLocalError('Phantom이 없습니다. https://phantom.app 설치 후 다시 시도하거나 주소를 직접 입력하세요.');
+        setLocalError(
+          'Phantom을 찾지 못했습니다. 확장 프로그램을 설치·잠금 해제한 뒤 이 탭을 새로고침하거나, 아래 칸에 주소를 직접 입력하세요.'
+        );
         return;
       }
-      const res = await provider.connect();
-      const addr = res.publicKey.toString();
+      let addr = provider.publicKey?.toString?.() || '';
+      if (!addr) {
+        const res = await provider.connect({ onlyIfTrusted: false });
+        addr = res?.publicKey?.toString?.() || provider.publicKey?.toString?.() || '';
+      }
+      if (!addr) {
+        setLocalError('Phantom에서 공개키를 받지 못했습니다. 지갑 잠금을 해제한 뒤 다시 시도하세요.');
+        return;
+      }
       await onAdd(addr, 'Phantom', 'phantom');
     } catch (err: any) {
-      setLocalError(err?.message || 'Phantom 연결 실패');
+      const code = err?.code;
+      const msg = String(err?.message || err?.error || '');
+      if (code === 4001 || /reject|denied|cancel/i.test(msg)) {
+        setLocalError('Phantom 연결이 취소되었습니다.');
+      } else if (/login required|unauthorized|401/i.test(msg)) {
+        setLocalError('지갑 등록에는 Google 로그인이 필요합니다. 먼저 로그인한 뒤 다시 시도하세요.');
+      } else if (/invalid solana address/i.test(msg)) {
+        setLocalError(
+          '받은 주소가 유효하지 않습니다. Phantom 네트워크(Solana)를 확인한 뒤 다시 시도하세요.'
+        );
+      } else {
+        setLocalError(msg || 'Phantom 연결 실패');
+      }
     } finally {
       setPhantomBusy(false);
     }

@@ -18,8 +18,9 @@ export function buildAgentCard(agent: AgentRecord) {
         : config.defaultAgentFeeUsdc);
   const name = agent.agentName || agent.customRole || `${agent.role} / ${agent.tone}`;
   const invokeUrl =
-    listing?.invokeUrl ||
-    (config.usePayGateway ? gatewayInvokeUrl(agent.id) : `${config.appUrl}/api/agents/${agent.id}/invoke`);
+    fee > 0 || config.usePayGateway
+      ? listing?.invokeUrl || gatewayInvokeUrl(agent.id)
+      : listing?.invokeUrl || `${config.appUrl}/api/agents/${agent.id}/invoke`;
 
   return {
     name: `SolVamos — ${name}`,

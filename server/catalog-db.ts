@@ -47,13 +47,19 @@ export async function upsertCatalogAgentFromRecord(
   const protocol = fee > 0 ? 'x402 / MPP' : 'free';
   const catalogId = `solvamos_${agent.id}`;
   const originInvokeUrl = base ? `${base}/api/agents/${encodeURIComponent(agent.id)}/invoke` : '';
-  // Paid agents publish the pay.sh gateway URL; free agents hit Studio origin directly.
+  // Paid agents MUST publish the pay-gateway URL (path A). Studio origin is not a paywall.
   const gatewayBase = (config.payGatewayUrl || '').replace(/\/$/, '');
-  const invokeUrl =
-    fee > 0 &&
+  const gatewayOk =
     config.usePayGateway &&
-    gatewayBase &&
-    !/127\.0\.0\.1|localhost/i.test(gatewayBase)
+    !!gatewayBase &&
+    !/127\.0\.0\.1|localhost/i.test(gatewayBase);
+  if (fee > 0 && config.isProd && !gatewayOk) {
+    throw new Error(
+      'Paid agents require a public PAY_GATEWAY_URL (USE_PAY_GATEWAY=true). Catalog will not list Studio-origin paywalls.'
+    );
+  }
+  const invokeUrl =
+    fee > 0 && gatewayOk
       ? `${gatewayBase}/v1/agents/${encodeURIComponent(agent.id)}/invoke`
       : originInvokeUrl;
   const agentCardUrl = base ? `${base}/api/agents/${encodeURIComponent(agent.id)}/agent-card` : null;

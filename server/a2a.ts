@@ -39,6 +39,9 @@ export type A2AOrchestrationResult = {
   planningNote?: string;
   /** free_self | free_peers | paid_peers | self_best_effort_after_pay_fail | ... */
   spendTier?: string;
+  session?: string;
+  relatedQuestions?: string[];
+  toolsUsed?: string[];
 };
 
 type PeerPlan = { agentId: string; question: string; reason?: string };
@@ -319,6 +322,7 @@ export async function paidPeerInvoke(
       systemPrompt: liveSystemPrompt(target),
       userPrompt: `[A2A free query from agent ${caller.id}]\n${question}`,
       dataStoreId: target.vertexDataStoreId,
+      engineId: target.vertexEngineId,
       agentId: target.id,
       geminiApiKey: config.geminiApiKey || undefined,
     });
@@ -452,6 +456,7 @@ export async function paidPeerInvoke(
     systemPrompt: liveSystemPrompt(target),
     userPrompt: `[A2A ${tier} query from agent ${caller.id}]\n${question}`,
     dataStoreId: target.vertexDataStoreId,
+    engineId: target.vertexEngineId,
     agentId: target.id,
     geminiApiKey: config.geminiApiKey || undefined,
   });
@@ -476,6 +481,10 @@ export async function orchestrateA2ATurn(opts: {
   agent: AgentRecord;
   userPrompt: string;
   enablePeers?: boolean;
+  history?: { role: 'user' | 'model'; text: string }[];
+  attachments?: { name: string; mimeType: string; dataBase64: string }[];
+  webSearch?: boolean;
+  answerSession?: string;
 }): Promise<A2AOrchestrationResult> {
   const enablePeers = opts.enablePeers === true; // default OFF unless explicitly enabled
   const peers = enablePeers ? catalogForPeers(opts.agent.id) : [];
@@ -486,19 +495,26 @@ export async function orchestrateA2ATurn(opts: {
 
   // Studio / direct chat: one Vertex+RAG pass only (no peer escalation, no double generate)
   if (!enablePeers) {
-    const skipRetrieval = isChitchat(opts.userPrompt);
+    const hasAttachments = (opts.attachments?.length || 0) > 0;
+    const skipRetrieval = !hasAttachments && !opts.webSearch && isChitchat(opts.userPrompt);
     const rag = await generateGroundedAnswer({
       systemPrompt: `${liveSystemPrompt(opts.agent)}
 
 [RUNTIME]
 - Answer the human directly. Use Drive/Vertex grounded context when useful.
+- Keep continuity with prior turns in this conversation when provided.
 - Network: ${networkLabel()}
 `,
       userPrompt: opts.userPrompt,
       dataStoreId: skipRetrieval ? undefined : opts.agent.vertexDataStoreId,
+      engineId: skipRetrieval ? undefined : opts.agent.vertexEngineId,
       agentId: skipRetrieval ? undefined : opts.agent.id,
       geminiApiKey: config.geminiApiKey || undefined,
       skipRetrieval,
+      history: opts.history,
+      attachments: opts.attachments,
+      webSearch: opts.webSearch === true,
+      answerSession: opts.answerSession,
     });
     let answer = rag.answer;
     return {
@@ -510,8 +526,11 @@ export async function orchestrateA2ATurn(opts: {
       catalogUsed: false,
       planningNote: skipRetrieval
         ? 'direct Vertex chat (retrieval skipped for chitchat)'
-        : 'direct Vertex/RAG (peers disabled)',
+        : `AI App answer path mode=${rag.mode} backend=${rag.generationBackend || 'n/a'} engine=${rag.engineId || opts.agent.vertexEngineId || 'none'} tools=${(rag.toolsUsed || []).join(',') || 'none'}`,
       spendTier: 'free_self',
+      session: rag.session,
+      relatedQuestions: rag.relatedQuestions,
+      toolsUsed: rag.toolsUsed,
     };
   }
 
@@ -526,6 +545,7 @@ export async function orchestrateA2ATurn(opts: {
 `,
     userPrompt: opts.userPrompt,
     dataStoreId: opts.agent.vertexDataStoreId,
+    engineId: opts.agent.vertexEngineId,
     agentId: opts.agent.id,
     geminiApiKey: config.geminiApiKey || undefined,
   });
@@ -641,6 +661,7 @@ export async function orchestrateA2ATurn(opts: {
     systemPrompt: a2aSystem,
     userPrompt: `${peerContext}\n[YOUR FREE DRAFT]\n${selfRag.answer}\n[/YOUR FREE DRAFT]\n\nHuman: ${opts.userPrompt}`,
     dataStoreId: opts.agent.vertexDataStoreId,
+    engineId: opts.agent.vertexEngineId,
     agentId: opts.agent.id,
     geminiApiKey: config.geminiApiKey || undefined,
   });
@@ -673,6 +694,7 @@ export async function orchestrateA2ATurn(opts: {
 `,
       userPrompt: opts.userPrompt,
       dataStoreId: opts.agent.vertexDataStoreId,
+      engineId: opts.agent.vertexEngineId,
       agentId: opts.agent.id,
       geminiApiKey: config.geminiApiKey || undefined,
     });

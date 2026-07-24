@@ -15,6 +15,10 @@ export type PaymentVerifyResult = {
   logs: string[];
   error?: string;
   network: string;
+  /** Solana slot when on-chain tx was confirmed */
+  slot?: number | null;
+  blockTime?: number | null;
+  proofKind?: 'onchain' | 'sandbox' | 'legacy_mock' | 'bypass';
 };
 
 /** Prevent replay of the same on-chain / sandbox signature. */
@@ -150,7 +154,14 @@ export async function verifyPayment(
           : ' (no PLATFORM_TREASURY_PUBKEY — agent-only check in live mode)')
     );
     markProofUsed(signature);
-    return { verified: true, logs, network };
+    return {
+      verified: true,
+      logs,
+      network,
+      proofKind: signature.startsWith('MOCK_') ? 'legacy_mock' : 'sandbox',
+      slot: null,
+      blockTime: null,
+    };
   }
 
   // --- On-chain USDC (localnet or devnet) ---
@@ -196,7 +207,14 @@ export async function verifyPayment(
       if (recipientChange >= expectedUsdcAmount * 0.98) {
         logs.push(`[SUCCESS] USDC payment verified (agent-only, no treasury)`);
         markProofUsed(signature);
-        return { verified: true, logs, network };
+        return {
+          verified: true,
+          logs,
+          network,
+          proofKind: 'onchain',
+          slot: tx.slot,
+          blockTime: tx.blockTime ?? null,
+        };
       }
       return {
         verified: false,
@@ -209,7 +227,14 @@ export async function verifyPayment(
     if (recipientChange >= expectedAgentAmount * 0.98 && creatorOk) {
       logs.push(`[SUCCESS] USDC payment + split verified on ${network}`);
       markProofUsed(signature);
-      return { verified: true, logs, network };
+      return {
+        verified: true,
+        logs,
+        network,
+        proofKind: 'onchain',
+        slot: tx.slot,
+        blockTime: tx.blockTime ?? null,
+      };
     }
 
     return {
@@ -223,7 +248,7 @@ export async function verifyPayment(
     if (allowBypass) {
       logs.push(`[Bypass] ALLOW_PAYMENT_BYPASS=true — accepting after RPC failure`);
       markProofUsed(signature);
-      return { verified: true, logs, network };
+      return { verified: true, logs, network, proofKind: 'bypass', slot: null, blockTime: null };
     }
     return {
       verified: false,

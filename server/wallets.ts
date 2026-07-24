@@ -18,8 +18,10 @@ export type UserWallet = {
 
 export function isValidSolanaAddress(address: string): boolean {
   try {
+    // Accept any well-formed base58 pubkey. isOnCurve rejects some valid
+    // program-derived / hardware-export edge cases and broke Phantom connect.
     const pk = new PublicKey(address.trim());
-    return PublicKey.isOnCurve(pk.toBytes());
+    return pk.toBytes().length === 32;
   } catch {
     return false;
   }

@@ -18,6 +18,10 @@ export type InvokeInput = {
   /** When true, peers default off unless enableA2A */
   studioOwnerTest?: boolean;
   baseUrl?: string;
+  history?: { role: 'user' | 'model'; text: string }[];
+  attachments?: { name: string; mimeType: string; dataBase64: string }[];
+  webSearch?: boolean;
+  answerSession?: string;
 };
 
 export type InvokeSuccess = {
@@ -33,6 +37,11 @@ export type InvokeSuccess = {
   paywallSkipped: boolean;
   payShCatalogId?: string;
   generation: string;
+  engineId?: string | null;
+  dataStoreId?: string | null;
+  session?: string | null;
+  relatedQuestions?: string[];
+  toolsUsed?: string[];
   a2a: {
     catalogUsed: boolean;
     planningNote?: string;
@@ -59,7 +68,9 @@ export function agentFeeUsdc(agent: AgentRecord): number {
       : typeof agent.perCallPriceUsdc === 'number'
         ? agent.perCallPriceUsdc
         : config.defaultAgentFeeUsdc;
-  return config.usePayGateway && configured > 0 ? config.payGatewayPriceUsdc : configured;
+  // Honor the agent's listed fee. Gateway YAML may still meter a fixed price for
+  // public pay.sh invokes — Studio paywall / catalog metadata use this value.
+  return configured;
 }
 
 export async function runAgentInvoke(
@@ -88,6 +99,10 @@ export async function runAgentInvoke(
     agent,
     userPrompt: input.prompt,
     enablePeers: studio ? input.enableA2A === true : input.enableA2A !== false,
+    history: input.history,
+    attachments: input.attachments,
+    webSearch: input.webSearch === true,
+    answerSession: input.answerSession,
   });
   await bumpInvoke(input.agentId);
 
@@ -103,7 +118,13 @@ export async function runAgentInvoke(
     feeUsdc: studio ? 0 : feeAmount,
     paywallSkipped: studio || paymentLogs.some((l) => /paywall skipped|gateway settled/i.test(l)),
     payShCatalogId: listing?.catalogId,
-    generation: 'vertex_gemini_rag',
+    generation:
+      result.ragMode === 'ai_application' ? 'ai_application_answer' : 'vertex_gemini_rag',
+    engineId: agent.vertexEngineId || null,
+    dataStoreId: agent.vertexDataStoreId || null,
+    session: result.session || null,
+    relatedQuestions: result.relatedQuestions || [],
+    toolsUsed: result.toolsUsed || [],
     a2a: {
       catalogUsed: result.catalogUsed,
       planningNote: result.planningNote,

@@ -10,7 +10,7 @@ import dotenv from 'dotenv';
 
 import { compileSystemPrompt } from './server/prompt.js';
 import { savePrivateKeyToGCP, createAgentVaultKeypair } from './server/vault.js';
-import { verifyPayment } from './server/payment.js';
+import { listSettlementsForUser } from './server/settlements.js';
 import { ensureAiApplication, syncLocalCorpusToVertex } from './server/rag.js';
 import { aiApplicationsCatalog, getDataSourceType } from './server/ai-applications.js';
 import { ingestDriveSourceForAgent } from './server/drive-ingest.js';
@@ -219,10 +219,15 @@ app.get('/api/status', async (req, res) => {
     catalogPlatformOnly: true,
     catalogRemoteConfigured: false,
     catalogSiteUrl: config.catalogSiteUrl || null,
-    catalogPageUrl: config.catalogSiteUrl || `${req.protocol}://${req.get('host')}/catalog`,
+    catalogPageUrl: config.catalogSiteUrl
+      ? `${config.catalogSiteUrl}/marketplace`
+      : 'https://solvamos-catalog-74094114833.asia-northeast3.run.app/marketplace',
     catalogApiUrl: config.catalogSiteUrl
       ? `${config.catalogSiteUrl}/api/catalog`
       : `${req.protocol}://${req.get('host')}/api/catalog`,
+    catalogMarketplaceUrl: config.catalogSiteUrl
+      ? `${config.catalogSiteUrl}/marketplace`
+      : 'https://solvamos-catalog-74094114833.asia-northeast3.run.app/marketplace',
     a2aEnabled: true,
     totalTenants: tenants.length,
   });
@@ -367,7 +372,7 @@ app.get('/api/agents', async (req, res) => {
     status: 'success',
     catalogPageUrl: config.catalogSiteUrl
       ? `${config.catalogSiteUrl}/marketplace`
-      : `${publicBase}/catalog`,
+      : 'https://solvamos-catalog-74094114833.asia-northeast3.run.app/marketplace',
     catalogApiUrl: config.catalogSiteUrl
       ? `${config.catalogSiteUrl}/api/catalog`
       : `${publicBase}/api/catalog`,
@@ -382,7 +387,7 @@ app.get('/api/agents', async (req, res) => {
         payShCatalog: catalog,
         catalogPageUrl: catalog?.catalogPageUrl || (config.catalogSiteUrl
           ? `${config.catalogSiteUrl}/a/${encodeURIComponent(agent.id)}`
-          : `${publicBase}/catalog`),
+          : 'https://solvamos-catalog-74094114833.asia-northeast3.run.app/marketplace'),
         catalogApiUrl: catalog?.catalogApiUrl || (config.catalogSiteUrl
           ? `${config.catalogSiteUrl}/api/catalog`
           : `${publicBase}/api/catalog`),
@@ -492,6 +497,31 @@ app.delete('/api/wallets/:id', async (req, res) => {
   }
 });
 
+app.get('/api/settlements', async (req, res) => {
+  try {
+    const userId = await walletUserIdFromReq(req, res);
+    if (!userId) return;
+    const data = await listSettlementsForUser(userId);
+    res.json({ status: 'success', data });
+  } catch (err: any) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+/** Public marketplace lives on solvamos-catalog — never serve a Studio duplicate UI. */
+app.get('/catalog', (_req, res) => {
+  const dest = config.catalogSiteUrl
+    ? `${config.catalogSiteUrl}/marketplace`
+    : 'https://solvamos-catalog-74094114833.asia-northeast3.run.app/marketplace';
+  res.redirect(302, dest);
+});
+app.get('/catalog/*', (_req, res) => {
+  const dest = config.catalogSiteUrl
+    ? `${config.catalogSiteUrl}/marketplace`
+    : 'https://solvamos-catalog-74094114833.asia-northeast3.run.app/marketplace';
+  res.redirect(302, dest);
+});
+
 app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
   let createdAgentId: string | null = null;
   try {
@@ -566,14 +596,12 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
 
     const systemPrompt = compileSystemPrompt(role, tone, securityLevel, customRole);
 
-    const requestedFee =
+    const parsedFeeEarly =
       typeof fee === 'number'
         ? fee
         : typeof perCallPriceUsdc === 'number'
           ? perCallPriceUsdc
           : 0;
-    const parsedFeeEarly =
-      config.usePayGateway && requestedFee > 0 ? config.payGatewayPriceUsdc : requestedFee;
 
     const pipeline: { step: string; status: 'ok' | 'skip' | 'warn'; detail: string }[] = [];
     pipeline.push({
@@ -630,10 +658,13 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
     let driveIngest: { docs: number; message?: string } | null = null;
 
     // Always provision AI Applications (data store + app/engine) — Drive is optional source
+    // Website URL forces PUBLIC_WEBSITE app type so site/* indexing can attach.
+    const provisionAppType =
+      resolvedSource === 'website_url' || websiteUri ? 'website' : aiAppType || 'search_docs';
     const aiApp = await ensureAiApplication({
       displayName: agentName || agentId,
-      appType: aiAppType || 'search_docs',
-      dataSourceType: resolvedSource,
+      appType: provisionAppType,
+      dataSourceType: resolvedSource === 'website_url' || websiteUri ? 'website_url' : resolvedSource,
       driveFolderId: googleDriveFolderId ? String(googleDriveFolderId) : undefined,
       websiteUri: websiteUri ? String(websiteUri) : undefined,
       gcsUri: gcsUri ? String(gcsUri) : undefined,
@@ -641,12 +672,14 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
     vertexDataStoreId = aiApp.dataStoreId;
     vertexEngineId = aiApp.engineId;
     indexingStatus =
-      aiApp.status === 'pending' || aiApp.status === 'error' ? 'INDEXING' : 'ACTIVE';
+      aiApp.status === 'pending' || aiApp.status === 'error' || !aiApp.engineId
+        ? 'INDEXING'
+        : 'ACTIVE';
     pipeline.push({
       step: 'ai_applications',
       status: aiApp.status === 'created' || aiApp.status === 'existing' ? 'ok' : 'warn',
       detail: `${aiApp.message || aiApp.dataStoreId}${
-        aiApp.engineId ? ` engine=${aiApp.engineId}` : ''
+        aiApp.engineId ? ` engine=${aiApp.engineId}` : ' (NO ENGINE — Gemini-only fallback)'
       }${aiApp.sourceNote ? ` · ${aiApp.sourceNote}` : ''}`,
     });
 
@@ -882,16 +915,12 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
     const nextCustom =
       customRole !== undefined ? customRole || undefined : existing.customRole;
     const nextName = agentName !== undefined ? agentName : existing.agentName;
-    const requestedNextFee =
+    const nextFee =
       typeof fee === 'number'
         ? fee
         : typeof perCallPriceUsdc === 'number'
           ? perCallPriceUsdc
           : existing.fee ?? existing.perCallPriceUsdc ?? 0;
-    const nextFee =
-      config.usePayGateway && requestedNextFee > 0
-        ? config.payGatewayPriceUsdc
-        : requestedNextFee;
     const nextStatus =
       status === 'PAUSED' || status === 'inactive' || status === 'paused'
         ? 'PAUSED'
@@ -1129,7 +1158,7 @@ async function sendCatalogJson(req: express.Request, res: express.Response) {
       : `${publicBaseUrl}/api/catalog`,
     publicPageUrl: config.catalogSiteUrl
       ? `${config.catalogSiteUrl}/marketplace`
-      : `${publicBaseUrl}/catalog`,
+      : 'https://solvamos-catalog-74094114833.asia-northeast3.run.app/marketplace',
     catalogSiteUrl: config.catalogSiteUrl || null,
     network: networkLabel(),
     paymentNetwork: config.paymentNetwork,
@@ -1308,18 +1337,46 @@ app.post('/api/paysh/catalog/:agentId/register', async (req, res) => {
 app.post('/api/agents/:id/invoke', async (req, res) => {
   try {
     const agentId = req.params.id;
-    const { prompt, query, enableA2A, studioTest } = req.body || {};
+    const { prompt, query, enableA2A, studioTest, history, attachments, webSearch, answerSession } =
+      req.body || {};
     const userPrompt = prompt || query;
-    const paymentProof =
-      (req.headers['x-payment-proof'] as string) ||
-      (req.headers['x-pay-sh-proof'] as string);
+
+    const chatHistory = Array.isArray(history)
+      ? history
+          .filter(
+            (h: any) =>
+              h &&
+              (h.role === 'user' || h.role === 'model') &&
+              typeof h.text === 'string' &&
+              h.text.trim()
+          )
+          .slice(-12)
+          .map((h: any) => ({ role: h.role as 'user' | 'model', text: String(h.text) }))
+      : [];
+
+    const chatAttachments = Array.isArray(attachments)
+      ? attachments
+          .filter(
+            (a: any) =>
+              a &&
+              typeof a.dataBase64 === 'string' &&
+              a.dataBase64.length > 0 &&
+              typeof a.mimeType === 'string'
+          )
+          .slice(0, 8)
+          .map((a: any) => ({
+            name: String(a.name || 'file').slice(0, 200),
+            mimeType: String(a.mimeType).slice(0, 120),
+            dataBase64: String(a.dataBase64).replace(/^data:[^;]+;base64,/, ''),
+          }))
+      : [];
 
     const agent = await getAgent(agentId);
     if (!agent) {
       res.status(404).json({ status: 'error', message: `Agent with ID ${agentId} not found.` });
       return;
     }
-    if (!userPrompt) {
+    if (!userPrompt && chatAttachments.length === 0) {
       res.status(400).json({ status: 'error', message: 'Missing input parameter: prompt' });
       return;
     }
@@ -1350,10 +1407,18 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
             },
           })
         : null;
-      if (!membership) {
+      const ownership = await prisma.agentOwnership.findUnique({
+        where: {
+          userId_agentId: {
+            userId: me.user.id,
+            agentId: agent.id,
+          },
+        },
+      });
+      if (!membership && !ownership) {
         res.status(403).json({
           status: 'forbidden',
-          message: 'This agent does not belong to your tenant.',
+          message: 'This agent does not belong to your account.',
         });
         return;
       }
@@ -1364,10 +1429,14 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
       const out = await runAgentInvoke(
         {
           agentId,
-          prompt: userPrompt,
+          prompt: userPrompt || (chatAttachments.length ? '첨부한 파일을 분석해 주세요.' : ''),
           enableA2A,
           studioOwnerTest: isStudioOwnerTest,
           baseUrl: `${req.protocol}://${req.get('host')}`,
+          history: chatHistory,
+          attachments: chatAttachments,
+          webSearch: webSearch === true,
+          answerSession: typeof answerSession === 'string' ? answerSession : undefined,
         },
         paymentLogs
       );
@@ -1376,7 +1445,7 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
 
     if (isStudioOwnerTest) {
       await finish([
-        `[Studio Test] owner session — paywall skipped, Vertex Gemini + RAG (listed fee=${feeAmount} USDC still applies to external callers)`,
+        `[Studio Test] owner session — paywall skipped, Vertex Gemini + RAG (listed fee=${feeAmount} USDC still applies to external callers via pay-gateway)`,
       ]);
       return;
     }
@@ -1387,64 +1456,40 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
       return;
     }
 
-    // Commercial path: pay.sh-compatible gateway (HTTP 402 + x402/MPP)
-    if (config.usePayGateway && !paymentProof) {
-      const gw = listing?.invokeUrl || gatewayInvokeUrl(agentId);
-      res.status(402).json({
-        status: 'payment_required',
-        protocol: 'x402 / MPP',
-        gateway: 'pay.sh-compatible',
-        amount: feeAmount,
-        token: 'USDC',
-        gatewayUrl: gw,
-        payGatewayUrl: config.payGatewayUrl,
-        recipientWallet: agent.publicKey,
-        network: networkLabel(),
-        catalogId: listing?.catalogId,
-        payShCatalogId: listing?.catalogId,
-        invokeUrl: gw,
+    // Paid commercial path: gateway ONLY (A). Studio origin never settles X-PAYMENT-PROOF.
+    const gw =
+      (listing?.invokeUrl && !/\/api\/agents\//.test(listing.invokeUrl)
+        ? listing.invokeUrl
+        : null) || gatewayInvokeUrl(agentId);
+    if (!config.usePayGateway || !config.payGatewayUrl) {
+      res.status(503).json({
+        status: 'payment_gateway_required',
         message:
-          config.paymentNetwork === 'devnet'
-            ? `HTTP 402 (x402/MPP): pay fetch "${gw}?prompt=hello" (Devnet USDC, no --sandbox).`
-            : `HTTP 402 (x402/MPP): pay --sandbox fetch "${gw}?prompt=hello" (localnet).`,
+          'Paid agents must be invoked via pay-gateway (USE_PAY_GATEWAY + PAY_GATEWAY_URL). Legacy origin proofs are disabled.',
+        invokeUrl: gw,
+        payGatewayUrl: config.payGatewayUrl || null,
       });
       return;
     }
-
-    if (!paymentProof) {
-      const agentShare = 1 - config.platformFeeShare;
-      res.status(402).json({
-        status: 'payment_required',
-        protocol: 'legacy-proof',
-        amount: feeAmount,
-        token: 'USDC',
-        recipientWallet: agent.publicKey,
-        platformTreasury: config.platformTreasuryPubkey || null,
-        agentShareUsdc: feeAmount * agentShare,
-        platformShareUsdc: feeAmount * config.platformFeeShare,
-        network: networkLabel(),
-        paymentNetwork: config.paymentNetwork,
-        usdcMint: config.usdcMint,
-        catalogId: listing?.catalogId,
-        payShCatalogId: listing?.catalogId,
-        invokeUrl: listing?.invokeUrl,
-        message: `HTTP 402: Pay ${feeAmount} USDC on ${networkLabel()} (≈${(agentShare * 100).toFixed(0)}% agent / ${(config.platformFeeShare * 100).toFixed(0)}% platform). Prefer x402/MPP via payment gateway; legacy X-PAYMENT-PROOF still accepted.`,
-      });
-      return;
-    }
-
-    const audit = await verifyPayment(paymentProof, agent.publicKey, feeAmount);
-    if (!audit.verified) {
-      res.status(402).json({
-        status: 'payment_verification_failed',
-        message: `On-chain validation failed: ${audit.error || 'Transaction verification error'}`,
-        logs: audit.logs,
-        network: audit.network,
-      });
-      return;
-    }
-
-    await finish(audit.logs);
+    res.status(402).json({
+      status: 'payment_required',
+      protocol: 'x402 / MPP',
+      gateway: 'pay.sh-compatible',
+      amount: feeAmount,
+      token: 'USDC',
+      gatewayUrl: gw,
+      payGatewayUrl: config.payGatewayUrl,
+      recipientWallet: agent.publicKey,
+      network: networkLabel(),
+      catalogId: listing?.catalogId,
+      payShCatalogId: listing?.catalogId,
+      invokeUrl: gw,
+      message:
+        config.paymentNetwork === 'devnet'
+          ? `HTTP 402 (x402/MPP): pay fetch "${gw}?prompt=hello" (Devnet USDC, no --sandbox). Do not call Studio /api/agents/.../invoke with X-PAYMENT-PROOF.`
+          : `HTTP 402 (x402/MPP): pay --sandbox fetch "${gw}?prompt=hello" (localnet). Gateway proxies to Studio after settlement.`,
+    });
+    return;
   } catch (err: any) {
     res.status(500).json({ status: 'error', message: err.message });
   }
@@ -1495,6 +1540,31 @@ async function handleInternalInvoke(req: express.Request, res: express.Response)
       body.enableA2A === true ||
       req.query.enableA2A === 'true' ||
       req.query.enableA2A === '1';
+    const history = Array.isArray(body.history)
+      ? body.history
+          .filter(
+            (h: any) =>
+              h &&
+              (h.role === 'user' || h.role === 'model') &&
+              typeof h.text === 'string' &&
+              h.text.trim()
+          )
+          .slice(-12)
+          .map((h: any) => ({ role: h.role as 'user' | 'model', text: String(h.text) }))
+      : [];
+    const attachments = Array.isArray(body.attachments)
+      ? body.attachments
+          .filter(
+            (a: any) =>
+              a && typeof a.dataBase64 === 'string' && a.dataBase64 && typeof a.mimeType === 'string'
+          )
+          .slice(0, 8)
+          .map((a: any) => ({
+            name: String(a.name || 'file').slice(0, 200),
+            mimeType: String(a.mimeType).slice(0, 120),
+            dataBase64: String(a.dataBase64).replace(/^data:[^;]+;base64,/, ''),
+          }))
+      : [];
     const out = await runAgentInvoke(
       {
         agentId,
@@ -1502,6 +1572,10 @@ async function handleInternalInvoke(req: express.Request, res: express.Response)
         enableA2A,
         studioOwnerTest: false,
         baseUrl: config.payOriginUrl || config.appUrl,
+        history,
+        attachments,
+        webSearch: body.webSearch === true || req.query.webSearch === 'true',
+        answerSession: typeof body.answerSession === 'string' ? body.answerSession : undefined,
       },
       ['[pay.sh gateway] settled — origin internal invoke (paywall skipped)']
     );

@@ -53,7 +53,7 @@ export default function SettlementsPage({ settlements, agents }: Props) {
         <div>
           <h2 className="text-3xl font-semibold text-on-surface mb-2">온체인 정산 내역</h2>
           <p className="text-base text-on-surface-variant">
-            pay.sh / Solana 정산 트랜잭션을 모니터링하고 내보낼 수 있습니다.
+            실제 결제 검증이 성공한 트랜잭션만 표시됩니다. MOCK 시드 데이터는 제거되었습니다.
           </p>
         </div>
         <button
@@ -123,16 +123,18 @@ export default function SettlementsPage({ settlements, agents }: Props) {
               {filtered.length === 0 && (
                 <tr>
                   <td colSpan={6} className="px-4 py-8 text-center text-on-surface-variant">
-                    정산 내역이 없습니다.
+                    아직 검증된 결제가 없습니다. 유료 에이전트 호출이 온체인/게이트웨이로 성공하면 여기에
+                    signature·slot이 기록됩니다.
                   </td>
                 </tr>
               )}
               {filtered.map((s) => {
                 const ag = agents.find((a) => a.id === s.agentId);
                 const explorer =
-                  s.id.startsWith('PAYSH_') || s.id.startsWith('SANDBOX_') || s.id.startsWith('MOCK_')
+                  s.explorerUrl ||
+                  (s.id.startsWith('PAYSH_') || s.id.startsWith('SANDBOX_') || s.id.startsWith('MOCK_')
                     ? null
-                    : `https://explorer.solana.com/tx/${s.id}?cluster=devnet`;
+                    : `https://explorer.solana.com/tx/${s.id}?cluster=devnet`);
                 return (
                   <tr
                     key={s.id + s.timestamp}
@@ -140,9 +142,12 @@ export default function SettlementsPage({ settlements, agents }: Props) {
                   >
                     <td className="px-4 py-3 text-on-surface-variant whitespace-nowrap">
                       {s.timestamp}
+                      {s.proofKind ? (
+                        <span className="ml-2 text-[10px] uppercase text-outline">{s.proofKind}</span>
+                      ) : null}
                     </td>
                     <td className="px-4 py-3 text-on-surface">
-                      {ag?.customRole || ag?.role || s.agentId.slice(0, 12)}
+                      {ag?.agentName || ag?.customRole || ag?.role || s.agentId.slice(0, 12)}
                     </td>
                     <td className="px-4 py-3 font-mono text-google-blue">
                       ${s.amount.toFixed(3)} USDC
@@ -173,7 +178,9 @@ export default function SettlementsPage({ settlements, agents }: Props) {
                         <span title={s.id}>{s.id.slice(0, 18)}…</span>
                       )}
                     </td>
-                    <td className="px-4 py-3 font-mono text-on-surface-variant">{s.blockHeight}</td>
+                    <td className="px-4 py-3 font-mono text-on-surface-variant">
+                      {s.blockHeight || '—'}
+                    </td>
                   </tr>
                 );
               })}

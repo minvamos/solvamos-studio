@@ -1,6 +1,6 @@
 /**
  * Gemini generation via Vertex AI (ADC) with optional Gemini API key fallback.
- * Lab: no GEMINI_API_KEY required if ADC + aiplatform is enabled.
+ * Supports multimodal parts (images/files) and Google Search grounding tool.
  */
 import { GoogleGenAI } from '@google/genai';
 import { getGcpAccessToken } from './vertex-search.js';
@@ -34,12 +34,52 @@ export type GenerateResult = {
   text: string;
   backend: 'vertex_ai' | 'gemini_api' | 'extractive';
   error?: string;
+  toolsUsed?: string[];
 };
+
+export type ChatTurn = { role: 'user' | 'model'; text: string };
+
+export type ChatAttachmentPart = {
+  name: string;
+  mimeType: string;
+  dataBase64: string;
+};
+
+type ContentPart =
+  | { text: string }
+  | { inlineData: { mimeType: string; data: string } };
+
+function attachmentParts(attachments: ChatAttachmentPart[] = []): ContentPart[] {
+  const parts: ContentPart[] = [];
+  for (const a of attachments.slice(0, 8)) {
+    const mime = (a.mimeType || '').toLowerCase();
+    const data = String(a.dataBase64 || '').replace(/^data:[^;]+;base64,/, '');
+    if (!data) continue;
+    // Gemini inline: images + pdf + plain text as files
+    if (
+      mime.startsWith('image/') ||
+      mime === 'application/pdf' ||
+      mime.startsWith('text/') ||
+      mime === 'application/json'
+    ) {
+      parts.push({
+        inlineData: {
+          mimeType: a.mimeType || 'application/octet-stream',
+          data,
+        },
+      });
+      parts.push({ text: `[첨부 파일: ${a.name || 'file'} (${a.mimeType})]` });
+    }
+  }
+  return parts;
+}
 
 /** REST generateContent on Vertex AI (most reliable with ADC). */
 async function generateViaVertexRest(
   systemPrompt: string,
-  userPrompt: string
+  userPrompt: string,
+  history: ChatTurn[] = [],
+  opts: { attachments?: ChatAttachmentPart[]; webSearch?: boolean } = {}
 ): Promise<GenerateResult | null> {
   const project = projectId();
   const token = await getGcpAccessToken();
@@ -47,9 +87,38 @@ async function generateViaVertexRest(
 
   const location = vertexLocation();
   let lastError = '';
+  const toolsUsed: string[] = [];
+  if (opts.webSearch) toolsUsed.push('google_search');
+  if (opts.attachments?.length) toolsUsed.push('multimodal_attachments');
+
+  const userParts: ContentPart[] = [
+    ...attachmentParts(opts.attachments),
+    { text: userPrompt },
+  ];
+
+  const contents = [
+    ...history
+      .filter((t) => t.text?.trim())
+      .slice(-12)
+      .map((t) => ({
+        role: t.role === 'model' ? 'model' : 'user',
+        parts: [{ text: t.text }] as ContentPart[],
+      })),
+    { role: 'user', parts: userParts },
+  ];
 
   for (const model of modelCandidates()) {
     const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${project}/locations/${location}/publishers/google/models/${model}:generateContent`;
+
+    const body: Record<string, unknown> = {
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      contents,
+      generationConfig: { temperature: 0.5, maxOutputTokens: 2048 },
+    };
+    if (opts.webSearch) {
+      // Vertex Gemini Google Search grounding tool
+      body.tools = [{ googleSearch: {} }];
+    }
 
     const res = await fetch(url, {
       method: 'POST',
@@ -57,17 +126,17 @@ async function generateViaVertexRest(
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-        contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-        generationConfig: { temperature: 0.5, maxOutputTokens: 1024 },
-      }),
+      body: JSON.stringify(body),
     });
 
     const json: any = await res.json().catch(() => ({}));
     if (!res.ok) {
       lastError = `Vertex ${model} ${res.status}: ${JSON.stringify(json).slice(0, 220)}`;
       console.warn('[vertex-generate]', lastError);
+      // If googleSearch tool rejected, retry once without tool
+      if (opts.webSearch && /tool|googleSearch|INVALID/i.test(lastError)) {
+        continue;
+      }
       continue;
     }
 
@@ -77,14 +146,36 @@ async function generateViaVertexRest(
       lastError = `Empty Vertex response for ${model}`;
       continue;
     }
-    console.log('[vertex-generate] ok model=', model);
-    return { text, backend: 'vertex_ai' };
+    console.log(
+      '[vertex-generate] ok model=',
+      model,
+      'turns=',
+      contents.length,
+      'tools=',
+      toolsUsed.join(',') || 'none'
+    );
+    return { text, backend: 'vertex_ai', toolsUsed };
+  }
+
+  // Retry without web search if tool blocked all models
+  if (opts.webSearch) {
+    const fallback = await generateViaVertexRest(systemPrompt, userPrompt, history, {
+      attachments: opts.attachments,
+      webSearch: false,
+    });
+    if (fallback?.text) {
+      return {
+        ...fallback,
+        toolsUsed: [...(fallback.toolsUsed || []), 'google_search_unavailable'],
+      };
+    }
   }
 
   return {
     text: '',
     backend: 'vertex_ai',
     error: lastError || 'No Vertex model succeeded',
+    toolsUsed,
   };
 }
 
@@ -155,14 +246,21 @@ export async function generateAnswer(opts: {
   userPrompt: string;
   contextBlock?: string;
   geminiApiKey?: string;
+  history?: ChatTurn[];
+  attachments?: ChatAttachmentPart[];
+  webSearch?: boolean;
 }): Promise<GenerateResult> {
   const fullUser = `${opts.contextBlock || ''}\n\nUser query: ${opts.userPrompt}`.trim();
+  const history = opts.history || [];
 
-  // 1) Vertex REST (ADC)
-  const rest = await generateViaVertexRest(opts.systemPrompt, fullUser);
+  // 1) Vertex REST (ADC) — multimodal + optional Google Search
+  const rest = await generateViaVertexRest(opts.systemPrompt, fullUser, history, {
+    attachments: opts.attachments,
+    webSearch: opts.webSearch === true,
+  });
   if (rest?.text) return rest;
 
-  // 2) GenAI SDK enterprise
+  // 2) GenAI SDK enterprise (text-only fallback)
   const sdk = await generateViaSdkEnterprise(opts.systemPrompt, fullUser);
   if (sdk?.text) return sdk;
 
@@ -183,26 +281,15 @@ export async function generateAnswer(opts: {
   if (chitchat) {
     const greeting = /안녕|hello|hi|hey|하이|헬로/i.test(prompt)
       ? '안녕하세요! 무엇을 도와드릴까요?'
-      : /고마워|감사/i.test(prompt)
-        ? '천만에요. 다른 궁금한 점이 있으면 말씀해 주세요.'
-        : '네, 듣고 있어요. 궁금한 점을 편하게 물어보세요.';
-    return {
-      text: greeting,
-      backend: 'extractive',
-      error: rest?.error || 'No LLM backend available',
-    };
+      : '네, 듣고 있어요. 구체적으로 질문해 주세요.';
+    return { text: greeting, backend: 'extractive' };
   }
 
-  const hasSnippets =
-    !!opts.contextBlock &&
-    opts.contextBlock.includes('[GROUNDED CONTEXT') &&
-    !opts.contextBlock.includes('None retrieved');
-
   return {
-    text: hasSnippets
-      ? '관련 문서는 찾았지만 지금은 답변 생성 엔진에 연결하지 못했어요. 잠시 후 다시 시도해 주세요.'
-      : '지금은 답변을 생성하지 못했어요. 잠시 후 다시 시도해 주시거나, 질문을 조금 더 구체적으로 적어 주세요.',
+    text:
+      rest?.error ||
+      '모델 응답을 생성하지 못했습니다. Vertex AI / ADC 설정을 확인해 주세요.',
     backend: 'extractive',
-    error: rest?.error || 'No generation backend',
+    error: rest?.error,
   };
 }

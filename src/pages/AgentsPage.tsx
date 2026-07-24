@@ -1,7 +1,7 @@
 /**
  * Stitch: solvamos_studio_my_agent_list
  */
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import {
   Bot,
   BarChart3,
@@ -14,33 +14,44 @@ import {
   Copy,
   Check,
   ExternalLink,
+  Activity,
 } from 'lucide-react';
 import { Agent } from '../types';
 
 type Props = {
   agents: Agent[];
+  marketplaceUrl?: string | null;
   onSelect: (agent: Agent) => void;
   onEdit: (agent: Agent) => void;
   onToggleStatus?: (agent: Agent) => void;
 };
 
 type Filter = 'all' | 'active' | 'inactive';
-type SortKey = 'revenue' | 'calls' | 'name';
+type SortKey = 'revenue' | 'calls' | 'name' | 'fee';
 
-export default function AgentsPage({ agents, onSelect, onEdit, onToggleStatus }: Props) {
+export default function AgentsPage({
+  agents,
+  marketplaceUrl,
+  onSelect,
+  onEdit,
+  onToggleStatus,
+}: Props) {
   const [filter, setFilter] = useState<Filter>('all');
   const [sort, setSort] = useState<SortKey>('calls');
   const [copied, setCopied] = useState<string | null>(null);
 
-  const catalogPageUrl = agents[0]?.catalogPageUrl || '/catalog';
-  const catalogApiUrl = agents[0]?.catalogApiUrl || '/api/catalog';
+  const catalogHome =
+    marketplaceUrl ||
+    'https://solvamos-catalog-74094114833.asia-northeast3.run.app/marketplace';
 
   const activeCount = agents.filter((a) => {
     const s = a.status || 'ACTIVE';
     return s !== 'inactive' && s !== 'PAUSED';
   }).length;
-  const revenue24h = agents.reduce(
-    (sum, a) => sum + (a.invokeCount || 0) * (a.fee ?? a.perCallPriceUsdc ?? 0.001),
+  const totalCalls = agents.reduce((sum, a) => sum + (a.invokeCount || 0), 0);
+  const paidCount = agents.filter((a) => (a.fee ?? a.perCallPriceUsdc ?? 0) > 0).length;
+  const estRevenue = agents.reduce(
+    (sum, a) => sum + (a.invokeCount || 0) * (a.fee ?? a.perCallPriceUsdc ?? 0),
     0
   );
 
@@ -57,9 +68,12 @@ export default function AgentsPage({ agents, onSelect, onEdit, onToggleStatus }:
       if (sort === 'name') {
         return (a.customRole || a.role).localeCompare(b.customRole || b.role);
       }
+      if (sort === 'fee') {
+        return (b.fee ?? b.perCallPriceUsdc ?? 0) - (a.fee ?? a.perCallPriceUsdc ?? 0);
+      }
       if (sort === 'revenue') {
-        const ra = (a.invokeCount || 0) * (a.fee ?? 0.001);
-        const rb = (b.invokeCount || 0) * (b.fee ?? 0.001);
+        const ra = (a.invokeCount || 0) * (a.fee ?? a.perCallPriceUsdc ?? 0);
+        const rb = (b.invokeCount || 0) * (b.fee ?? b.perCallPriceUsdc ?? 0);
         return rb - ra;
       }
       return (b.invokeCount || 0) - (a.invokeCount || 0);
@@ -79,69 +93,44 @@ export default function AgentsPage({ agents, onSelect, onEdit, onToggleStatus }:
         <div>
           <h2 className="text-3xl font-semibold text-on-surface mb-2">내 에이전트 목록</h2>
           <p className="text-base text-on-surface-variant">
-            관리 중인 AI 에이전트들의 가동 상태와 공개 카탈로그 주소를 확인하세요.
+            호출 수·요금·상태 등 에이전트별 지표를 확인하고 카탈로그 페이지로 이동하세요.
           </p>
         </div>
         <a
-          href={catalogPageUrl}
+          href={catalogHome}
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center gap-2 rounded-lg border border-solana-green/40 bg-solana-green/10 px-4 py-2 text-sm font-semibold text-solana-green hover:bg-solana-green/20"
         >
-          공개 카탈로그 열기 <ExternalLink className="h-4 w-4" />
+          마켓플레이스 열기 <ExternalLink className="h-4 w-4" />
         </a>
       </div>
 
-      <div className="glass-panel rounded-xl p-4 border border-outline-variant/20">
-        <p className="text-[11px] font-semibold uppercase tracking-wider text-outline mb-2">
-          SolVamos 카탈로그 주소
-        </p>
-        <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-          <code className="font-mono text-xs break-all text-on-surface">{catalogPageUrl}</code>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => copy(catalogPageUrl, 'page')}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-google-blue/15 px-3 py-1.5 text-xs text-google-blue"
-            >
-              {copied === 'page' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-              페이지 복사
-            </button>
-            <button
-              type="button"
-              onClick={() => copy(catalogApiUrl, 'api')}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-surface-container-high px-3 py-1.5 text-xs text-on-surface-variant"
-            >
-              {copied === 'api' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-              API 복사
-            </button>
-          </div>
-        </div>
-        <p className="mt-2 font-mono text-[11px] break-all text-outline">{catalogApiUrl}</p>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-gutter">
-        <div className="glass-panel rounded-xl p-6 flex items-center gap-6 border-l-4 border-l-solana-green">
-          <div className="w-12 h-12 rounded-full bg-solana-green/10 flex items-center justify-center">
-            <Bot className="w-7 h-7 text-solana-green" />
-          </div>
-          <div>
-            <p className="text-sm font-medium text-on-surface-variant mb-1">Total Active Agents</p>
-            <p className="text-2xl font-semibold text-on-surface">{activeCount}</p>
-          </div>
-        </div>
-        <div className="glass-panel rounded-xl p-6 flex items-center gap-6 border-l-4 border-l-google-blue">
-          <div className="w-12 h-12 rounded-full bg-google-blue/10 flex items-center justify-center">
-            <Coins className="w-7 h-7 text-google-blue" />
-          </div>
-          <div>
-            <p className="text-sm font-medium text-on-surface-variant mb-1">Est. Revenue (lifetime)</p>
-            <p className="text-2xl font-semibold text-google-blue flex items-baseline gap-1">
-              ${revenue24h.toFixed(2)}{' '}
-              <span className="text-xs font-semibold text-on-surface-variant">USDC</span>
-            </p>
-          </div>
-        </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-gutter">
+        <MetricCard
+          icon={<Bot className="w-6 h-6 text-solana-green" />}
+          label="Active"
+          value={String(activeCount)}
+          accent="border-l-solana-green"
+        />
+        <MetricCard
+          icon={<Activity className="w-6 h-6 text-google-blue" />}
+          label="Total Calls"
+          value={totalCalls.toLocaleString()}
+          accent="border-l-google-blue"
+        />
+        <MetricCard
+          icon={<Coins className="w-6 h-6 text-secondary" />}
+          label="Paid Agents"
+          value={String(paidCount)}
+          accent="border-l-secondary"
+        />
+        <MetricCard
+          icon={<BarChart3 className="w-6 h-6 text-google-blue" />}
+          label="Est. Revenue"
+          value={`$${estRevenue.toFixed(3)}`}
+          accent="border-l-google-blue"
+        />
       </div>
 
       <div className="flex justify-between items-center bg-surface-container p-2 rounded-lg border border-outline-variant/10 flex-wrap gap-2">
@@ -172,8 +161,9 @@ export default function AgentsPage({ agents, onSelect, onEdit, onToggleStatus }:
           onChange={(e) => setSort(e.target.value as SortKey)}
           className="bg-surface-container-high border border-outline-variant/30 rounded-md py-1.5 px-3 text-sm text-on-surface"
         >
-          <option value="revenue">Sort by: Revenue</option>
           <option value="calls">Sort by: API Calls</option>
+          <option value="revenue">Sort by: Revenue</option>
+          <option value="fee">Sort by: Fee</option>
           <option value="name">Sort by: Name</option>
         </select>
       </div>
@@ -190,6 +180,11 @@ export default function AgentsPage({ agents, onSelect, onEdit, onToggleStatus }:
           const fee = agent.fee ?? agent.perCallPriceUsdc ?? 0;
           const rev = (agent.invokeCount || 0) * fee;
           const invokeUrl = agent.invokeUrl || agent.payShCatalog?.publicInvokeUrl || '';
+          const pageUrl =
+            agent.catalogPageUrl ||
+            agent.payShCatalog?.catalogPageUrl ||
+            '';
+          const cardUrl = agent.agentCardUrl || agent.payShCatalog?.agentCardUrl || '';
           return (
             <div
               key={agent.id}
@@ -235,6 +230,9 @@ export default function AgentsPage({ agents, onSelect, onEdit, onToggleStatus }:
                           {inactive ? 'Inactive' : 'Active'}
                         </span>
                       </div>
+                      <span className="text-xs font-medium text-secondary">
+                        {fee <= 0 ? 'Free' : `$${fee.toFixed(3)} USDC`}
+                      </span>
                     </div>
                     <div className="flex gap-4 text-on-surface-variant text-sm flex-wrap">
                       <span className="flex items-center gap-1">
@@ -254,7 +252,7 @@ export default function AgentsPage({ agents, onSelect, onEdit, onToggleStatus }:
                     <p className="text-lg font-semibold text-on-surface">{agent.invokeCount || 0}</p>
                   </div>
                   <div className="text-right">
-                    <p className="text-xs text-on-surface-variant">Revenue</p>
+                    <p className="text-xs text-on-surface-variant">Est. Revenue</p>
                     <p className="text-lg font-semibold text-google-blue">${rev.toFixed(3)}</p>
                   </div>
                   <div className="flex gap-2">
@@ -288,31 +286,112 @@ export default function AgentsPage({ agents, onSelect, onEdit, onToggleStatus }:
                 </div>
               </div>
 
-              {invokeUrl ? (
-                <div className="mt-4 rounded-lg border border-outline-variant/15 bg-surface-container-lowest/60 p-3">
-                  <p className="text-[10px] uppercase tracking-wider text-outline mb-1">Invoke API</p>
-                  <div className="flex items-start gap-2">
-                    <code className="min-w-0 flex-1 break-all font-mono text-xs text-on-surface-variant">
-                      {invokeUrl}
-                    </code>
-                    <button
-                      type="button"
-                      onClick={() => copy(invokeUrl, `invoke-${agent.id}`)}
-                      className="shrink-0 rounded-md bg-google-blue/15 p-2 text-google-blue"
-                      title="복사"
-                    >
-                      {copied === `invoke-${agent.id}` ? (
-                        <Check className="h-3.5 w-3.5" />
-                      ) : (
-                        <Copy className="h-3.5 w-3.5" />
-                      )}
-                    </button>
+              <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                {pageUrl ? (
+                  <div className="rounded-lg border border-outline-variant/15 bg-surface-container-lowest/60 p-3">
+                    <p className="text-[10px] uppercase tracking-wider text-outline mb-1">
+                      Catalog page
+                    </p>
+                    <div className="flex items-start gap-2">
+                      <a
+                        href={pageUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="min-w-0 flex-1 break-all font-mono text-xs text-google-blue hover:underline"
+                      >
+                        {pageUrl}
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => copy(pageUrl, `page-${agent.id}`)}
+                        className="shrink-0 rounded-md bg-google-blue/15 p-2 text-google-blue"
+                        title="복사"
+                      >
+                        {copied === `page-${agent.id}` ? (
+                          <Check className="h-3.5 w-3.5" />
+                        ) : (
+                          <Copy className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                    </div>
                   </div>
-                </div>
-              ) : null}
+                ) : null}
+                {invokeUrl ? (
+                  <div className="rounded-lg border border-outline-variant/15 bg-surface-container-lowest/60 p-3">
+                    <p className="text-[10px] uppercase tracking-wider text-outline mb-1">
+                      Invoke API
+                    </p>
+                    <div className="flex items-start gap-2">
+                      <code className="min-w-0 flex-1 break-all font-mono text-xs text-on-surface-variant">
+                        {invokeUrl}
+                      </code>
+                      <button
+                        type="button"
+                        onClick={() => copy(invokeUrl, `invoke-${agent.id}`)}
+                        className="shrink-0 rounded-md bg-google-blue/15 p-2 text-google-blue"
+                        title="복사"
+                      >
+                        {copied === `invoke-${agent.id}` ? (
+                          <Check className="h-3.5 w-3.5" />
+                        ) : (
+                          <Copy className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+                {cardUrl ? (
+                  <div className="rounded-lg border border-outline-variant/15 bg-surface-container-lowest/60 p-3 sm:col-span-2">
+                    <p className="text-[10px] uppercase tracking-wider text-outline mb-1">
+                      Agent Card
+                    </p>
+                    <div className="flex items-start gap-2">
+                      <code className="min-w-0 flex-1 break-all font-mono text-xs text-on-surface-variant">
+                        {cardUrl}
+                      </code>
+                      <button
+                        type="button"
+                        onClick={() => copy(cardUrl, `card-${agent.id}`)}
+                        className="shrink-0 rounded-md bg-google-blue/15 p-2 text-google-blue"
+                        title="복사"
+                      >
+                        {copied === `card-${agent.id}` ? (
+                          <Check className="h-3.5 w-3.5" />
+                        ) : (
+                          <Copy className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+function MetricCard({
+  icon,
+  label,
+  value,
+  accent,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+  accent: string;
+}) {
+  return (
+    <div className={`glass-panel rounded-xl p-5 flex items-center gap-4 border-l-4 ${accent}`}>
+      <div className="w-10 h-10 rounded-full bg-surface-container-high flex items-center justify-center shrink-0">
+        {icon}
+      </div>
+      <div className="min-w-0">
+        <p className="text-xs font-medium text-on-surface-variant mb-0.5">{label}</p>
+        <p className="text-xl font-semibold text-on-surface truncate">{value}</p>
       </div>
     </div>
   );

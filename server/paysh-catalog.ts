@@ -246,14 +246,12 @@ function buildLocalEntry(
   opts?: { baseUrl?: string; description?: string }
 ): PayShCatalogEntry {
   const name = agent.agentName || agent.customRole || `${agent.role} / ${agent.tone}`;
-  const configuredFee =
+  const fee =
     typeof agent.fee === 'number'
       ? agent.fee
       : typeof agent.perCallPriceUsdc === 'number'
         ? agent.perCallPriceUsdc
         : config.defaultAgentFeeUsdc;
-  const fee =
-    config.usePayGateway && configuredFee > 0 ? config.payGatewayPriceUsdc : configuredFee;
   const originBase = (opts?.baseUrl || config.appUrl || 'http://localhost:3000').replace(/\/$/, '');
   const existing = catalog[agent.id];
   return {

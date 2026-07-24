@@ -120,51 +120,78 @@ async function ensureEngine(opts: {
   const get = await gcpFetch(`${parent}/engines/${engineId}`);
   if (get.ok) return engineId;
 
-  const body: Record<string, unknown> = {
-    displayName: `${opts.displayName} (${meta.label})`.slice(0, 128),
-    solutionType: meta.solutionType,
-    dataStoreIds: [opts.dataStoreId],
+  const tryCreate = async (searchTier: string): Promise<string | null> => {
+    const body: Record<string, unknown> = {
+      displayName: `${opts.displayName} (${meta.label})`.slice(0, 128),
+      solutionType: meta.solutionType,
+      industryVertical: meta.industryVertical,
+      dataStoreIds: [opts.dataStoreId],
+    };
+
+    if (meta.solutionType === 'SOLUTION_TYPE_SEARCH') {
+      // LLM add-on required for engines/.../servingConfigs/*:answer grounded generation
+      body.searchEngineConfig = {
+        searchTier,
+        searchAddOns: ['SEARCH_ADD_ON_LLM'],
+      };
+    } else {
+      body.chatEngineConfig = {
+        agentCreationConfig: {
+          business: opts.displayName.slice(0, 60) || 'SolVamos Agent',
+          defaultLanguageCode: 'ko',
+          timeZone: 'Asia/Seoul',
+        },
+      };
+    }
+
+    const res = await gcpFetch(`${parent}/engines?engineId=${encodeURIComponent(engineId)}`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    const json: any = await res.json().catch(() => ({}));
+    if (res.ok) {
+      if (json.name && String(json.name).includes('/operations/')) {
+        await waitOperation(json.name).catch((err) =>
+          console.warn('[vertex-search] engine op wait', err?.message || err)
+        );
+      }
+      return engineId;
+    }
+    if (res.status === 409) return engineId;
+    console.warn(
+      '[vertex-search] engine create',
+      searchTier,
+      res.status,
+      JSON.stringify(json).slice(0, 400)
+    );
+    return null;
   };
 
-  if (meta.solutionType === 'SOLUTION_TYPE_SEARCH') {
-    body.searchEngineConfig = { searchTier: 'SEARCH_TIER_STANDARD' };
-  } else {
-    body.chatEngineConfig = {
-      agentCreationConfig: {
-        business: opts.displayName.slice(0, 60) || 'SolVamos Agent',
-        defaultLanguageCode: 'ko',
-        timeZone: 'Asia/Seoul',
-      },
-    };
-  }
-
-  const res = await gcpFetch(`${parent}/engines?engineId=${encodeURIComponent(engineId)}`, {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
-  const json: any = await res.json().catch(() => ({}));
-  if (res.ok) {
-    if (json.name && String(json.name).includes('/operations/')) {
-      await waitOperation(json.name).catch((err) =>
-        console.warn('[vertex-search] engine op wait', err?.message || err)
-      );
-    }
-    return engineId;
-  }
-  if (res.status === 409) return engineId;
-  console.warn('[vertex-search] engine create', res.status, JSON.stringify(json).slice(0, 400));
-  return null;
+  // Prefer Enterprise + LLM (Answer API); fall back to Standard + LLM.
+  return (
+    (await tryCreate(process.env.VERTEX_SEARCH_TIER || 'SEARCH_TIER_ENTERPRISE')) ||
+    (await tryCreate('SEARCH_TIER_STANDARD'))
+  );
 }
 
 async function registerWebsiteTarget(dataStoreId: string, websiteUri: string): Promise<string> {
   const parent = parentCollection();
   if (!parent) return 'no parent';
-  const uri = websiteUri.startsWith('http') ? websiteUri : `https://${websiteUri}`;
+  let raw = websiteUri.trim();
+  if (!/^https?:\/\//i.test(raw)) raw = `https://${raw}`;
+  let host: string;
+  try {
+    host = new URL(raw).hostname;
+  } catch {
+    return `Invalid website URI: ${websiteUri}`;
+  }
+  // Always index the whole site: hostname/*
+  const providedUriPattern = `${host}/*`;
   const url = `${parent}/dataStores/${dataStoreId}/siteSearchEngine/targetSites`;
   const res = await gcpFetch(url, {
     method: 'POST',
     body: JSON.stringify({
-      providedUriPattern: uri.replace(/^https?:\/\//, '').replace(/\/$/, '') + '*',
+      providedUriPattern,
       type: 'INCLUDE',
     }),
   });
@@ -173,9 +200,25 @@ async function registerWebsiteTarget(dataStoreId: string, websiteUri: string): P
     if (json.name?.includes('/operations/')) {
       await waitOperation(json.name).catch(() => null);
     }
-    return `Registered site pattern for ${uri}`;
+    // Kick a recrawl so empty stores start indexing (best-effort).
+    try {
+      const recrawl = await gcpFetch(
+        `${parent}/dataStores/${dataStoreId}/siteSearchEngine:recrawlUris`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ uris: [`https://${host}/`] }),
+        }
+      );
+      const rj: any = await recrawl.json().catch(() => ({}));
+      if (rj.name?.includes('/operations/')) {
+        await waitOperation(rj.name, 60_000).catch(() => null);
+      }
+    } catch (err: any) {
+      console.warn('[vertex-search] recrawl', err?.message || err);
+    }
+    return `Registered whole-site pattern ${providedUriPattern} (indexing may take minutes–hours)`;
   }
-  return `Site register ${res.status}: ${JSON.stringify(json).slice(0, 200)}`;
+  return `Site register ${res.status}: ${JSON.stringify(json).slice(0, 300)}`;
 }
 
 export type AiApplicationCreateResult = {
@@ -198,8 +241,14 @@ export async function createAiApplicationBundle(opts: {
   websiteUri?: string;
   gcsUri?: string;
 }): Promise<AiApplicationCreateResult> {
-  const appMeta = getAiAppType(opts.appType);
-  const sourceMeta = getDataSourceType(opts.dataSourceType);
+  // Website URL sources MUST use PUBLIC_WEBSITE — otherwise targetSites never attach
+  // and answers fall back to bare Gemini against an empty CONTENT_REQUIRED store.
+  const wantsWebsite =
+    opts.dataSourceType === 'website_url' ||
+    (!!opts.websiteUri && opts.appType === 'website');
+  const resolvedAppType = wantsWebsite ? 'website' : opts.appType;
+  const appMeta = getAiAppType(resolvedAppType);
+  const sourceMeta = getDataSourceType(wantsWebsite ? 'website_url' : opts.dataSourceType);
   const project = projectId();
   const hint =
     opts.driveFolderId || opts.websiteUri || opts.gcsUri || appMeta.id || 'app';
@@ -246,6 +295,29 @@ export async function createAiApplicationBundle(opts: {
   const dataStoreId = sanitizeId(opts.displayName, hint);
   const parent = parentCollection()!;
 
+  const attachWebsite = async (): Promise<string | undefined> => {
+    if (!opts.websiteUri || appMeta.contentConfig !== 'PUBLIC_WEBSITE') return undefined;
+    return registerWebsiteTarget(dataStoreId, opts.websiteUri);
+  };
+
+  const sourceNotesFor = async (base?: string): Promise<string | undefined> => {
+    const site = await attachWebsite();
+    if (site) return base ? `${base} · ${site}` : site;
+    if (sourceMeta.id === 'cloud_storage' && opts.gcsUri) {
+      return `GCS URI saved for connector/console: ${opts.gcsUri}`;
+    }
+    if (sourceMeta.id === 'local_upload') {
+      return 'Local uploads ingest after store create (customer files → corpus → Vertex)';
+    }
+    if (sourceMeta.emptyThenConfigure) {
+      return `${sourceMeta.label}: empty store ready — platform ingest (not customer console)`;
+    }
+    if (sourceMeta.id === 'google_drive') {
+      return 'Google Drive ingest runs after store create (if folder selected)';
+    }
+    return base;
+  };
+
   if (await getDataStore(dataStoreId).catch(() => false)) {
     const engineId =
       (await ensureEngine({
@@ -253,13 +325,17 @@ export async function createAiApplicationBundle(opts: {
         displayName: opts.displayName,
         appType: appMeta.id,
       })) || undefined;
+    const sourceNote = await sourceNotesFor();
     return {
       dataStoreId,
       engineId,
       appType: appMeta.id,
       dataSourceType: sourceMeta.id,
-      status: 'existing',
-      message: 'Data store already exists; ensured engine/app',
+      status: engineId ? 'existing' : 'error',
+      message: engineId
+        ? 'Data store already exists; ensured engine/app'
+        : 'Data store exists but AI Applications engine/app create failed — check Discovery Engine API + IAM',
+      sourceNote,
     };
   }
 
@@ -285,13 +361,17 @@ export async function createAiApplicationBundle(opts: {
           displayName: opts.displayName,
           appType: appMeta.id,
         })) || undefined;
+      const sourceNote = await sourceNotesFor();
       return {
         dataStoreId,
         engineId,
         appType: appMeta.id,
         dataSourceType: sourceMeta.id,
-        status: 'existing',
-        message: 'Data store already exists',
+        status: engineId ? 'existing' : 'error',
+        message: engineId
+          ? 'Data store already exists'
+          : 'Data store exists but engine/app create failed',
+        sourceNote,
       };
     }
     return {
@@ -325,26 +405,17 @@ export async function createAiApplicationBundle(opts: {
       appType: appMeta.id,
     })) || undefined;
 
-  let sourceNote: string | undefined;
-  if (sourceMeta.id === 'website_url' && opts.websiteUri && appMeta.contentConfig === 'PUBLIC_WEBSITE') {
-    sourceNote = await registerWebsiteTarget(dataStoreId, opts.websiteUri);
-  } else if (sourceMeta.id === 'cloud_storage' && opts.gcsUri) {
-    sourceNote = `GCS URI saved for connector/console: ${opts.gcsUri}`;
-  } else if (sourceMeta.id === 'local_upload') {
-    sourceNote = 'Local uploads ingest after store create (customer files → corpus → Vertex)';
-  } else if (sourceMeta.emptyThenConfigure) {
-    sourceNote = `${sourceMeta.label}: empty store ready — platform ingest (not customer console)`;
-  } else if (sourceMeta.id === 'google_drive') {
-    sourceNote = 'Google Drive ingest runs after store create (if folder selected)';
-  }
+  const sourceNote = await sourceNotesFor();
 
   return {
     dataStoreId,
     engineId,
     appType: appMeta.id,
     dataSourceType: sourceMeta.id,
-    status: 'created',
-    message: `Created AI Applications data store ${dataStoreId} + app/engine ${engineId || '(pending)'} (${appMeta.label}) in ${location()}`,
+    status: engineId ? 'created' : 'error',
+    message: engineId
+      ? `Created AI Applications data store ${dataStoreId} + app/engine ${engineId} (${appMeta.label}) in ${location()}`
+      : `Created data store ${dataStoreId} but AI Applications engine/app was NOT created — answers fall back to bare Gemini until engine exists`,
     operation: json.name,
     sourceNote,
   };

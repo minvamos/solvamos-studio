@@ -11,14 +11,17 @@ import StudioPage from './pages/StudioPage';
 import AgentsPage from './pages/AgentsPage';
 import SettlementsPage from './pages/SettlementsPage';
 import MyPage from './pages/MyPage';
-import PublicCatalogPage from './pages/PublicCatalogPage';
+import DevAgentLabPage from './pages/DevAgentLabPage';
 import WalletModal, { type WalletRow } from './components/WalletModal';
 import CreateAgentProgress, { CREATE_STEPS, EDIT_STEPS } from './components/CreateAgentProgress';
 import { formatAgentChatMessage } from './lib/formatAgentMessage';
 import { parseAppRoute, writeAppRoute, writeLandingRoute } from './lib/appRoute';
 
+const CATALOG_MARKETPLACE =
+  'https://solvamos-catalog-74094114833.asia-northeast3.run.app/marketplace';
+
 export default function App() {
-  const [view, setView] = useState<'landing' | 'studio' | 'catalog' | 'boot'>('boot');
+  const [view, setView] = useState<'landing' | 'studio' | 'boot'>('boot');
   const [landingBusy, setLandingBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<AppTab>('studio');
@@ -33,35 +36,7 @@ export default function App() {
   const [createDetail, setCreateDetail] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  const [settlements, setSettlements] = useState<Settlement[]>([
-    {
-      id: '5kXfD91vU8A2bN9oM9pU8vS7nN9tU8vS7nN9tU8vS7nN9',
-      agentId: 'support-copilot-001',
-      recipientWallet: '6xP7XpU6ZqUvS9uN8tV7nN8dM9pU8vS7nN9tU8vS7nN9',
-      amount: 0.01,
-      status: 'success',
-      timestamp: '2026-07-21 04:22:06',
-      blockHeight: 28491024,
-    },
-    {
-      id: '3zPfS71vA2bN9oM9pU8vS7nN9tU8vS7nN9tU8vS7nN8',
-      agentId: 'support-copilot-001',
-      recipientWallet: '6xP7XpU6ZqUvS9uN8tV7nN8dM9pU8vS7nN9tU8vS7nN9',
-      amount: 0.01,
-      status: 'success',
-      timestamp: '2026-07-21 03:15:42',
-      blockHeight: 28490611,
-    },
-    {
-      id: '8yQfV92wR3cN0oM8pU9vS8nO0tV8vT8nO0tV8vT8nO0t',
-      agentId: 'support-copilot-001',
-      recipientWallet: '6xP7XpU6ZqUvS9uN8tV7nN8dM9pU8vS7nN9tU8vS7nN9',
-      amount: 0.01,
-      status: 'failed',
-      timestamp: '2026-07-21 02:08:12',
-      blockHeight: 28489950,
-    },
-  ]);
+  const [settlements, setSettlements] = useState<Settlement[]>([]);
 
   const [builderStep, setBuilderStep] = useState<1 | 2 | 3>(1);
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
@@ -82,6 +57,11 @@ export default function App() {
 
   const [inputText, setInputText] = useState('');
   const [chatHistory, setChatHistory] = useState<Record<string, Message[]>>({});
+  const [chatAttachments, setChatAttachments] = useState<
+    import('./types').ChatAttachment[]
+  >([]);
+  const [enableWebSearch, setEnableWebSearch] = useState(false);
+  const [answerSessions, setAnswerSessions] = useState<Record<string, string>>({});
   const [pendingPayment, setPendingPayment] = useState<{
     agentId: string;
     amount: number;
@@ -90,6 +70,9 @@ export default function App() {
     prompt: string;
     network?: string;
     paymentNetwork?: string;
+    invokeUrl?: string;
+    gatewayUrl?: string;
+    message?: string;
   } | null>(null);
   const [paymentLogs, setPaymentLogs] = useState<string[]>([]);
   const [isVerifyingPayment, setIsVerifyingPayment] = useState(false);
@@ -165,9 +148,7 @@ export default function App() {
       const agentsData = await agentsRes.json();
       if (agentsData.status === 'success') {
         setAgents(agentsData.data);
-        if (agentsData.data.length > 0 && !activeAgent) {
-          setActiveAgent(agentsData.data[0]);
-        }
+        // Do not auto-select first agent — that unlocked chat on the create page.
       }
       return statusData;
     } catch (err) {
@@ -286,12 +267,30 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ address, label, source, makePrimary: true }),
       });
-      const data = await res.json();
-      if (data.status !== 'success') throw new Error(data.message || '등록 실패');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.status !== 'success') {
+        if (res.status === 401) {
+          throw new Error('Login required — Google 로그인 후 지갑을 등록하세요.');
+        }
+        throw new Error(data.message || `등록 실패 (HTTP ${res.status})`);
+      }
       setWallets(data.data || []);
       setPrimaryWallet(data.primary || null);
+    } catch (err: any) {
+      setWalletError(err?.message || '지갑 등록 실패');
+      throw err;
     } finally {
       setWalletBusy(false);
+    }
+  };
+
+  const fetchSettlements = async () => {
+    try {
+      const res = await authFetch('/api/settlements');
+      const data = await res.json();
+      if (data.status === 'success') setSettlements(data.data || []);
+    } catch (err) {
+      console.error('settlements fetch failed', err);
     }
   };
 
@@ -334,6 +333,7 @@ export default function App() {
         setView('studio');
         await loadDriveFolders(undefined);
         await fetchWallets();
+        await fetchSettlements();
         return true;
       }
       return false;
@@ -470,8 +470,12 @@ export default function App() {
 
   useEffect(() => {
     const boot = async () => {
-      if (window.location.pathname === '/catalog') {
-        setView('catalog');
+      if (window.location.pathname === '/catalog' || window.location.pathname.startsWith('/catalog/')) {
+        window.location.replace(
+          serverStatus?.catalogMarketplaceUrl ||
+            serverStatus?.catalogPageUrl ||
+            CATALOG_MARKETPLACE
+        );
         return;
       }
       const entered = localStorage.getItem('solvamos_entered') === '1';
@@ -482,6 +486,16 @@ export default function App() {
       }
 
       await fetchStatusAndAgents();
+      // After status load, redirect /catalog if still on that path
+      if (window.location.pathname === '/catalog' || window.location.pathname.startsWith('/catalog/')) {
+        try {
+          const st = await fetch('/api/status').then((r) => r.json());
+          window.location.replace(st.catalogMarketplaceUrl || st.catalogPageUrl || CATALOG_MARKETPLACE);
+        } catch {
+          window.location.replace(CATALOG_MARKETPLACE);
+        }
+        return;
+      }
       const params = new URLSearchParams(window.location.search);
       const loggedIn =
         params.get('logged_in') === '1' ||
@@ -540,8 +554,12 @@ export default function App() {
     }
 
     const onPopState = () => {
-      if (window.location.pathname === '/catalog') {
-        setView('catalog');
+      if (window.location.pathname === '/catalog' || window.location.pathname.startsWith('/catalog/')) {
+        window.location.replace(
+          serverStatus?.catalogMarketplaceUrl ||
+            serverStatus?.catalogPageUrl ||
+            CATALOG_MARKETPLACE
+        );
         return;
       }
       const route = parseAppRoute();
@@ -564,21 +582,27 @@ export default function App() {
   }, [agents]);
 
   useEffect(() => {
-    const fetchPreview = async () => {
+    const { role, tone, securityLevel, customRole } = options;
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
       try {
         const res = await fetch('/api/agents/preview-prompt', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(options),
+          body: JSON.stringify({ role, tone, securityLevel, customRole }),
+          signal: controller.signal,
         });
         const data = await res.json();
-        setLivePromptPreview(data.systemPrompt);
-      } catch (err) {
-        console.error(err);
+        if (!controller.signal.aborted) setLivePromptPreview(data.systemPrompt || '');
+      } catch (err: any) {
+        if (err?.name !== 'AbortError') console.error(err);
       }
+    }, 400);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
     };
-    fetchPreview();
-  }, [options]);
+  }, [options.role, options.tone, options.securityLevel, options.customRole]);
 
   useEffect(() => {
     const panel = chatScrollRef.current;
@@ -763,29 +787,49 @@ export default function App() {
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputText.trim() || !activeAgent) return;
+    if ((!inputText.trim() && chatAttachments.length === 0) || !activeAgent || !editingAgentId) {
+      return;
+    }
 
     const userMessage: Message = {
       id: Math.random().toString(36).substr(2, 9),
       sender: 'user',
-      text: inputText,
+      text: inputText.trim() || '(첨부만 전송)',
       timestamp: new Date().toLocaleTimeString(),
+      attachments: chatAttachments.length
+        ? chatAttachments.map(({ name, mimeType, previewUrl }) => ({
+            name,
+            mimeType,
+            dataBase64: '',
+            previewUrl,
+          }))
+        : undefined,
     };
 
     const currentAgentId = activeAgent.id;
     const history = chatHistory[currentAgentId] || [];
+    const pendingAtt = [...chatAttachments];
+    const webSearch = enableWebSearch;
     setChatHistory({
       ...chatHistory,
       [currentAgentId]: [...history, userMessage],
     });
     setInputText('');
-    await invokeAgent(currentAgentId, userMessage.text, null);
+    setChatAttachments([]);
+    await invokeAgent(currentAgentId, userMessage.text, null, {
+      attachments: pendingAtt,
+      webSearch,
+    });
   };
 
   const invokeAgent = async (
     agentId: string,
     promptText: string,
-    signature: string | null
+    _signature: string | null,
+    extras?: {
+      attachments?: import('./types').ChatAttachment[];
+      webSearch?: boolean;
+    }
   ) => {
     const auth = await ensureAuth();
     if (!auth) {
@@ -806,41 +850,72 @@ export default function App() {
       return;
     }
 
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-
-    if (signature) {
-      headers['X-PAYMENT-PROOF'] = signature;
-      setIsVerifyingPayment(true);
-    } else {
+    if (_signature) {
       setChatHistory((prev) => ({
         ...prev,
         [agentId]: [
-          ...(prev[agentId] || []),
+          ...(prev[agentId] || []).filter((m) => m.id !== 'loading-placeholder'),
           {
-            id: 'loading-placeholder',
+            id: `pay-${Date.now()}`,
             sender: 'system',
-            text: enableA2A
-              ? '⏳ A2A + Vertex 응답 생성 중… (필요 시 카탈로그 피어 호출)'
-              : '⏳ Vertex AI Gemini 응답 생성 중… (GCP ADC)',
+            text: '유료 호출은 Catalog invoke_url(pay-gateway)로만 결제됩니다. Studio 소유자 테스트는 결제 없이 진행됩니다.',
             timestamp: new Date().toLocaleTimeString(),
             paymentStatus: 'none',
           },
         ],
       }));
+      setPendingPayment(null);
+      setIsVerifyingPayment(false);
+      return;
     }
+
+    setChatHistory((prev) => ({
+      ...prev,
+      [agentId]: [
+        ...(prev[agentId] || []),
+        {
+          id: 'loading-placeholder',
+          sender: 'system',
+          text: enableA2A
+            ? '⏳ A2A + Vertex 응답 생성 중… (필요 시 카탈로그 피어 호출)'
+            : extras?.webSearch
+              ? '⏳ 웹 검색 + Engine/Vertex 응답 생성 중…'
+              : extras?.attachments?.length
+                ? '⏳ 첨부 파일 분석 + Engine/Vertex 응답 생성 중…'
+                : '⏳ AI Applications Engine 응답 생성 중…',
+          timestamp: new Date().toLocaleTimeString(),
+          paymentStatus: 'none',
+        },
+      ],
+    }));
 
     try {
       const res = await fetch(`/api/agents/${agentId}/invoke`, {
         method: 'POST',
         credentials: 'include',
         headers: {
-          ...headers,
+          'Content-Type': 'application/json',
           'X-SolVamos-Studio': '1',
         },
         body: JSON.stringify({
           prompt: promptText,
           studioTest: true,
           enableA2A,
+          webSearch: extras?.webSearch === true,
+          answerSession: answerSessions[agentId] || undefined,
+          attachments: (extras?.attachments || []).map((a) => ({
+            name: a.name,
+            mimeType: a.mimeType,
+            dataBase64: a.dataBase64,
+          })),
+          history: (chatHistory[agentId] || [])
+            .filter((m) => m.sender === 'user' || m.sender === 'agent')
+            .filter((m) => m.id !== 'loading-placeholder')
+            .slice(-12)
+            .map((m) => ({
+              role: m.sender === 'agent' ? 'model' : 'user',
+              text: m.text,
+            })),
         }),
       });
       const data = await res.json();
@@ -872,12 +947,15 @@ export default function App() {
           prompt: promptText,
           network: data.network,
           paymentNetwork: data.paymentNetwork,
+          invokeUrl: data.invokeUrl || data.gatewayUrl,
+          gatewayUrl: data.payGatewayUrl || data.gatewayUrl,
+          message: data.message,
         });
 
         const paywallMessage: Message = {
           id: Math.random().toString(36).substr(2, 9),
           sender: 'system',
-          text: `🔒 SOLVAMOS pay.sh SECURE PAYWALL\n\nNetwork: ${data.network || data.paymentNetwork || '—'}\nFee: ${data.amount} ${data.token || 'USDC'}\nAgent vault: ${data.recipientWallet}`,
+          text: `🔒 유료 에이전트 — pay-gateway 경로만 지원\n\ninvokeUrl:\n${data.invokeUrl || data.gatewayUrl || '(gateway URL 없음)'}\n\n${data.message || 'pay CLI / 지갑으로 USDC 결제 후 gateway가 Studio로 proxy합니다.'}`,
           timestamp: new Date().toLocaleTimeString(),
           paymentStatus: 'pending_proof',
         };
@@ -887,6 +965,9 @@ export default function App() {
           [agentId]: [...withoutLoading(prev[agentId] || []), paywallMessage],
         }));
       } else if (data.status === 'success') {
+        if (typeof data.session === 'string' && data.session) {
+          setAnswerSessions((prev) => ({ ...prev, [agentId]: data.session }));
+        }
         const hops = (data.a2a?.peerHops || []).map((h: any) => ({
           toName: h.toName,
           toAgentId: h.toAgentId,
@@ -905,32 +986,24 @@ export default function App() {
                 )
                 .join('\n')
             : '';
+        const toolsNote =
+          Array.isArray(data.toolsUsed) && data.toolsUsed.length
+            ? `\n\n_tools: ${data.toolsUsed.join(', ')}_`
+            : '';
 
         const agentResponse: Message = {
           id: Math.random().toString(36).substr(2, 9),
           sender: 'agent',
-          text: `${formatAgentChatMessage(String(data.data ?? data.answer ?? ''))}${hopNote}`,
+          text: `${formatAgentChatMessage(String(data.data ?? data.answer ?? ''))}${hopNote}${toolsNote}`,
           timestamp: new Date().toLocaleTimeString(),
           confidence: data.confidence,
-          paymentStatus: signature ? 'verified' : 'none',
-          paymentTx: signature || undefined,
+          paymentStatus: 'none',
           a2aHops: hops,
+          relatedQuestions: Array.isArray(data.relatedQuestions)
+            ? data.relatedQuestions
+            : undefined,
+          toolsUsed: data.toolsUsed,
         };
-
-        if (signature) {
-          setSettlements((prev) => [
-            {
-              id: signature,
-              agentId,
-              recipientWallet: activeAgent?.publicKey || '',
-              amount: pendingPayment?.amount ?? 0.01,
-              status: 'success',
-              timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-              blockHeight: 28491200 + Math.floor(Math.random() * 500),
-            },
-            ...prev,
-          ]);
-        }
 
         setChatHistory((prev) => ({
           ...prev,
@@ -947,21 +1020,6 @@ export default function App() {
           timestamp: new Date().toLocaleTimeString(),
           paymentStatus: 'failed',
         };
-
-        if (signature) {
-          setSettlements((prev) => [
-            {
-              id: signature,
-              agentId,
-              recipientWallet: activeAgent?.publicKey || '',
-              amount: pendingPayment?.amount ?? 0.01,
-              status: 'failed',
-              timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-              blockHeight: 28491200 + Math.floor(Math.random() * 500),
-            },
-            ...prev,
-          ]);
-        }
 
         setChatHistory((prev) => ({
           ...prev,
@@ -1021,49 +1079,27 @@ export default function App() {
     }
   };
 
-  const handleAcknowledgeAndSign = async (useRandomSig = true) => {
-    if (!pendingPayment) return;
-    const net =
-      pendingPayment.paymentNetwork || serverStatus?.paymentNetwork || 'devnet';
-
-    let signature: string;
-    if (useRandomSig) {
-      if (
-        net !== 'localnet' &&
-        net !== 'sandbox' &&
-        !serverStatus?.allowPaymentBypass &&
-        !serverStatus?.sandboxProofsAllowed
-      ) {
-        alert(
-          'Devnet 모드에서는 Mock/PAYSH 증명을 쓸 수 없습니다.\npay.sh 게이트웨이로 결제하거나, 사이드바에서 Localnet으로 전환하세요.\n(메인넷은 지원하지 않습니다)'
-        );
-        return;
-      }
-      const prefix = net === 'devnet' ? 'MOCK_TX_' : 'PAYSH_LOCAL_';
-      signature = `${prefix}${Math.random().toString(36).substr(2, 10).toUpperCase()}_${Date.now().toString().slice(-4)}`;
-    } else {
-      signature = customSignature.trim();
-    }
-
-    if (!signature) {
+  const handleAcknowledgeAndSign = async (_useRandomSig = true) => {
+    if (!pendingPayment?.invokeUrl) {
       alert(
-        net === 'devnet'
-          ? 'Devnet USDC 트랜잭션 서명을 입력하세요.'
-          : 'Solana / pay.sh 트랜잭션 서명을 입력하세요.'
+        '유료 호출은 Catalog의 pay-gateway invokeUrl로만 결제됩니다.\nStudio origin X-PAYMENT-PROOF는 더 이상 지원하지 않습니다.'
       );
       return;
     }
-
-    setPaymentLogs([
-      `[Network] ${net}`,
-      `[Proof] ${useRandomSig ? 'Generated sandbox-style proof' : 'Pasted on-chain signature'}`,
-      `Signature: ${signature}`,
-      `Fee: ${pendingPayment.amount} ${pendingPayment.token}`,
-      `Recipient: ${pendingPayment.recipientWallet}`,
-    ]);
-
-    await invokeAgent(pendingPayment.agentId, pendingPayment.prompt, signature);
-    setCustomSignature('');
+    try {
+      await navigator.clipboard.writeText(pendingPayment.invokeUrl);
+      setPaymentLogs([
+        '[Gateway-only] Copied invokeUrl to clipboard',
+        pendingPayment.invokeUrl,
+        pendingPayment.message || '',
+        `Fee: ${pendingPayment.amount} ${pendingPayment.token}`,
+      ]);
+    } catch {
+      setPaymentLogs([
+        '[Gateway-only] Copy failed — select the invokeUrl from the chat message',
+        pendingPayment.invokeUrl,
+      ]);
+    }
   };
 
   const handleCopyText = (text: string, id: string) => {
@@ -1082,10 +1118,6 @@ export default function App() {
         세션 확인 중…
       </div>
     );
-  }
-
-  if (view === 'catalog') {
-    return <PublicCatalogPage />;
   }
 
   if (view === 'landing') {
@@ -1177,11 +1209,20 @@ export default function App() {
           serverStatus={serverStatus}
           enableA2A={enableA2A}
           setEnableA2A={setEnableA2A}
+          chatAttachments={chatAttachments}
+          onChatAttachmentsChange={setChatAttachments}
+          enableWebSearch={enableWebSearch}
+          setEnableWebSearch={setEnableWebSearch}
         />
       )}
       {activeTab === 'list' && (
         <AgentsPage
           agents={agents}
+          marketplaceUrl={
+            serverStatus?.catalogMarketplaceUrl ||
+            serverStatus?.catalogPageUrl ||
+            CATALOG_MARKETPLACE
+          }
           onSelect={(agent) => {
             beginEditAgent(agent);
           }}
@@ -1213,6 +1254,13 @@ export default function App() {
               alert('상태 변경 네트워크 오류');
             }
           }}
+        />
+      )}
+      {activeTab === 'lab' && (
+        <DevAgentLabPage
+          agents={agents}
+          authFetch={authFetch}
+          onBack={() => navigateTab('studio')}
         />
       )}
       {activeTab === 'settlements' && (

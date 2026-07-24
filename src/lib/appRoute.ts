@@ -3,6 +3,7 @@ import type { AppTab } from '../AppShell';
 const TAB_PATHS: Record<AppTab, string> = {
   studio: '/studio',
   list: '/agents',
+  lab: '/lab',
   settlements: '/settlements',
   account: '/account',
 };
