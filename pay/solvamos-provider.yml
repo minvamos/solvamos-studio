@@ -32,7 +32,9 @@ operator:
 endpoints:
   - method: GET
     path: 'v1/health'
-    description: 'Gateway → origin health (free).'
+    description: 'Gateway health (local respond; no upstream).'
+    routing:
+      type: respond
 
   # GET: Windows-friendly — `pay --sandbox fetch` has no -X/-d; use ?prompt=
   - method: GET
