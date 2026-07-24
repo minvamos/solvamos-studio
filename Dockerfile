@@ -19,28 +19,40 @@ RUN npm run build \
   && test -f dist/server.cjs \
   && test -d node_modules/.prisma/client
 
-FROM node:20-slim
+FROM ubuntu:24.04
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=8080
+ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update -y && apt-get install -y --no-install-recommends openssl ca-certificates \
+ARG PAY_VERSION=1.0.23
+ARG NODE_VERSION=22.14.0
+ENV PAY_PKG_VERSION=${PAY_VERSION}
+
+RUN apt-get update -y \
+  && apt-get install -y --no-install-recommends ca-certificates curl unzip xz-utils openssl \
+  && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+    | tar -xJ -C /usr/local --strip-components=1 \
+  && npm install --global "@solana/pay@${PAY_VERSION}" \
+  && mkdir -p /tmp/pay-home/.npm /tmp/solvamos-data \
+  && HOME=/tmp/pay-home npm_config_cache=/tmp/pay-home/.npm \
+       npx --yes --package "@solana/pay@${PAY_VERSION}" pay --version || true \
+  && printf '%s\n' '#!/bin/sh' 'exec npx --yes --package "@solana/pay@'"${PAY_VERSION}"'" pay "$@"' > /usr/local/bin/pay \
+  && chmod +x /usr/local/bin/pay \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json* ./
 COPY prisma ./prisma
-# Production deps + generate engines for this Linux image
 RUN npm ci --omit=dev || npm install --omit=dev \
   && npx prisma generate \
   && test -d node_modules/.prisma/client
 
 COPY --from=build /app/dist ./dist
 
-RUN mkdir -p /tmp/solvamos-data && chown -R node:node /app /tmp/solvamos-data
 ENV DATA_DIR=/tmp/solvamos-data
+ENV HOME=/tmp/pay-home
+ENV npm_config_cache=/tmp/pay-home/.npm
+ENV PAY_CLI_PATH=/usr/local/bin/pay
 EXPOSE 8080
-USER node
 
-# Boot smoke: fail image build if server cannot load (no listen needed)
-# Skipped at build — Cloud Run provides PORT; use CI docker run smoke instead.
 CMD ["node", "dist/server.cjs"]

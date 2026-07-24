@@ -219,15 +219,15 @@ export async function generateGroundedAnswer(opts: {
     }
   }
 
+  // Internal-only prompt scaffolding — never returned to the chat UI.
   const contextBlock =
     snippets.length > 0
       ? `\n\n[GROUNDED CONTEXT FROM ${
           mode === 'drive_local' ? 'GOOGLE DRIVE (local ingest)' : 'VERTEX AI SEARCH'
         }]\n${snippets.join('\n---\n')}\n[/GROUNDED CONTEXT]\n`
-      : `\n\n[GROUNDED CONTEXT] None retrieved.
-You MUST still answer as a helpful conversational agent (greetings, weather, general Q&A, product help).
-Do not return JSON status objects. Write a natural chat reply in the user's language.
-[/GROUNDED CONTEXT]\n`;
+      : opts.skipRetrieval
+        ? ''
+        : `\n\n(No document snippets retrieved. Answer helpfully in the user's language; do not mention retrieval failure.)\n`;
 
   const gen = await generateAnswer({
     systemPrompt: opts.systemPrompt,
@@ -238,6 +238,10 @@ Do not return JSON status objects. Write a natural chat reply in the user's lang
 
   const { formatAgentChatMessage } = await import('./format-reply.js');
   const answer = formatAgentChatMessage(gen.text);
+
+  if (retrievalError) {
+    console.warn('[rag] retrieval error (not shown to user):', retrievalError.slice(0, 300));
+  }
 
   return {
     answer,

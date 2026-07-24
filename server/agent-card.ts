@@ -1,6 +1,6 @@
 /**
  * Minimal Google A2A–style Agent Card for discovery.
- * Payments stay on pay.sh gateway URLs (not a substitute for x402).
+ * Paid invoke settles via x402/MPP on the pay.sh-compatible gateway URL.
  */
 import { config } from './config.js';
 import type { AgentRecord } from './agents-store.js';
@@ -25,7 +25,7 @@ export function buildAgentCard(agent: AgentRecord) {
     name: `SolVamos — ${name}`,
     description:
       listing?.description ||
-      `SolVamos RAG agent (${agent.role}). Paid invoke via pay.sh gateway.`,
+      `SolVamos RAG agent (${agent.role}). Paid invoke via x402/MPP gateway.`,
     url: config.usePayGateway ? config.payGatewayUrl : config.appUrl,
     provider: {
       organization: 'SolVamos',
@@ -43,14 +43,14 @@ export function buildAgentCard(agent: AgentRecord) {
         id: 'rag-invoke',
         name: 'Grounded RAG answer',
         description: 'Ask a question; answer is grounded in the agent AI Application / data store.',
-        tags: ['rag', 'ai-applications', 'solvamos', 'pay.sh'],
+        tags: ['rag', 'ai-applications', 'solvamos', 'x402', 'mpp'],
         examples: ['Summarize our leave policy', 'What does the handbook say about remote work?'],
-        // Commercial endpoint = pay gateway (x402), not free JSON-RPC
+        // Commercial endpoint = payment gateway (x402/MPP), not free JSON-RPC
         inputModes: ['application/json'],
         outputModes: ['application/json'],
       },
     ],
-    // SolVamos extensions (non-standard) — clients that know pay.sh
+    // SolVamos extensions — discovery + paid invoke
     extensions: {
       'solvamos.pay': {
         invokeUrl,
@@ -59,7 +59,8 @@ export function buildAgentCard(agent: AgentRecord) {
         network: config.paymentNetwork,
         recipientWallet: agent.publicKey,
         catalogId: listing?.catalogId,
-        protocol: 'pay.sh-gateway',
+        protocol: fee > 0 ? 'x402 / MPP' : 'free',
+        gateway: 'pay.sh-compatible',
       },
     },
   };

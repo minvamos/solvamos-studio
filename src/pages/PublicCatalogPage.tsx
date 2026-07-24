@@ -22,19 +22,22 @@ export default function PublicCatalogPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
-  const catalogUrl = `${window.location.origin}/api/paysh/catalog`;
+  const [catalogUrl, setCatalogUrl] = useState(`${window.location.origin}/api/catalog`);
+  const [marketplaceUrl, setMarketplaceUrl] = useState('/catalog');
 
   const load = async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/paysh/catalog', { cache: 'no-store' });
+      const res = await fetch('/api/catalog', { cache: 'no-store' });
       const data = await res.json();
       if (!res.ok || data.status !== 'success') {
         throw new Error(data.message || '카탈로그를 불러오지 못했습니다.');
       }
       setEntries(data.data || []);
       setNetwork(data.network || data.paymentNetwork || '');
+      if (data.catalogUrl) setCatalogUrl(data.catalogUrl);
+      if (data.publicPageUrl) setMarketplaceUrl(data.publicPageUrl);
     } catch (err: any) {
       setError(err.message || '카탈로그 요청 실패');
     } finally {
@@ -60,14 +63,20 @@ export default function PublicCatalogPage() {
             <div className="mb-3 flex items-center gap-3">
               <img src="/logo.png" alt="SolVamos" className="h-11 w-11 object-contain" />
               <span className="text-sm font-semibold uppercase tracking-[0.2em] text-primary">
-                Public Agent Catalog
+                Public Agent Catalog · SolVamos
               </span>
             </div>
-            <h1 className="text-3xl font-bold md:text-4xl">공개 API 카탈로그</h1>
+            <h1 className="text-3xl font-bold md:text-4xl">SolVamos 공개 API 카탈로그</h1>
             <p className="mt-2 text-on-surface-variant">
-              로그인 없이 주소를 복사해 에이전트를 호출하거나 Agent Card를 조회할 수 있습니다.
+              공개 디스커버리는 SolVamos Catalog가 원본입니다. 이 페이지는 카탈로그 API를 조회합니다.
             </p>
           </div>
+          <a
+            href={marketplaceUrl}
+            className="inline-flex items-center justify-center gap-2 rounded-lg border border-outline-variant/40 px-4 py-2 text-sm hover:bg-surface-container-high"
+          >
+            <ExternalLink className="h-4 w-4" /> Marketplace
+          </a>
           <a
             href="/"
             className="inline-flex items-center justify-center gap-2 rounded-lg border border-outline-variant/40 px-4 py-2 text-sm hover:bg-surface-container-high"
@@ -90,7 +99,7 @@ export default function PublicCatalogPage() {
                 onClick={() => copy(catalogUrl, 'catalog')}
               />
               <a
-                href="/api/paysh/catalog"
+                href={catalogUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-2 rounded-lg bg-surface-container-high px-3 py-2 text-sm hover:bg-surface-container-highest"
@@ -144,7 +153,7 @@ export default function PublicCatalogPage() {
                   </p>
 
                   <EndpointRow
-                    label={entry.feeUsdc > 0 ? 'Paid Invoke API (pay.sh)' : 'Invoke API (free)'}
+                    label={entry.feeUsdc > 0 ? 'Paid Invoke API (x402/MPP)' : 'Invoke API (free)'}
                     value={invokeUrl}
                     copied={copied === `invoke-${entry.agentId}`}
                     onCopy={() => copy(invokeUrl, `invoke-${entry.agentId}`)}
@@ -173,8 +182,8 @@ export default function PublicCatalogPage() {
                   </div>
                   {entry.feeUsdc > 0 && (
                     <p className="mt-3 text-xs text-outline">
-                      Devnet USDC 온체인 결제입니다. `--sandbox` 없이 pay CLI가 HTTP 402
-                      결제 승인·재시도를 처리합니다.
+                      Devnet/Localnet USDC 온체인(또는 sandbox) 결제입니다. `pay fetch`가
+                      HTTP 402(x402/MPP) 결제 승인·재시도를 처리합니다.
                     </p>
                   )}
                 </article>

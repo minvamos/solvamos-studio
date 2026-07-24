@@ -30,6 +30,7 @@ import {
 import {
   loadAgents,
   listAgents,
+  listAgentsForUser,
   getAgent,
   putAgent,
   deleteAgent,
@@ -45,6 +46,8 @@ import {
   getCatalogPublishMode,
   setCatalogPublishMode,
   catalogPublishInfo,
+  refreshCatalogFromRemote,
+  hydrateCatalogRemote,
 } from './server/paysh-catalog.js';
 import {
   listWallets,
@@ -72,6 +75,40 @@ assertProductionSafety();
 
 const app = express();
 app.use(express.json({ limit: '20mb' }));
+
+/** Public catalog CORS — for solvamos-catalog site / external clients (pay.sh/api style). */
+app.use((req, res, next) => {
+  const isPublicCatalog =
+    req.path === '/api/catalog' ||
+    req.path.startsWith('/api/catalog/') ||
+    req.path === '/api/paysh/catalog' ||
+    req.path.startsWith('/api/paysh/catalog/') ||
+    /^\/api\/agents\/[^/]+\/agent-card$/.test(req.path);
+
+  if (!isPublicCatalog) {
+    next();
+    return;
+  }
+
+  const origins = config.catalogCorsOrigins;
+  const reqOrigin = String(req.headers.origin || '');
+  const allow =
+    origins.includes('*') || !reqOrigin
+      ? '*'
+      : origins.includes(reqOrigin)
+        ? reqOrigin
+        : origins[0] || '*';
+
+  res.setHeader('Access-Control-Allow-Origin', allow);
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
+  res.setHeader('Vary', 'Origin');
+  if (req.method === 'OPTIONS') {
+    res.status(204).end();
+    return;
+  }
+  next();
+});
 app.disable('x-powered-by');
 
 app.use((_req, res, next) => {
@@ -131,6 +168,15 @@ app.get('/api/status', async (req, res) => {
     product: config.product,
     version: config.version,
     geminiConfigured: !!config.geminiApiKey,
+    /** Developer API key present (optional). LLM can still run via Vertex ADC. */
+    geminiApiKeyConfigured: !!config.geminiApiKey,
+    /** Vertex Gemini via Cloud Run SA / ADC — primary production path. */
+    vertexAdcProject: config.gcpProject || null,
+    llmPreferredBackend: config.geminiApiKey
+      ? 'gemini_api_key_or_vertex_adc'
+      : config.gcpProject
+        ? 'vertex_adc'
+        : 'none',
     vertexProject: config.gcpProject || null,
     vertexSearchLocation: process.env.VERTEX_SEARCH_LOCATION || 'global',
     vertexAiLocation: process.env.VERTEX_AI_LOCATION || process.env.GOOGLE_CLOUD_LOCATION || 'us-central1',
@@ -168,9 +214,15 @@ app.get('/api/status', async (req, res) => {
     defaultAgentFeeUsdc: config.defaultAgentFeeUsdc,
     apiEndpoint: `${req.protocol}://${req.get('host')}`,
     totalAgents: agents.length,
-    payShCatalogListings: listCatalog({ listedOnly: true, scope: 'all' }).length,
+    payShCatalogListings: listCatalog({ listedOnly: true }).length,
     catalogPublishMode: getCatalogPublishMode(),
-    catalogRemoteConfigured: !!process.env.PAYSH_CATALOG_URL?.trim(),
+    catalogPlatformOnly: true,
+    catalogRemoteConfigured: false,
+    catalogSiteUrl: config.catalogSiteUrl || null,
+    catalogPageUrl: config.catalogSiteUrl || `${req.protocol}://${req.get('host')}/catalog`,
+    catalogApiUrl: config.catalogSiteUrl
+      ? `${config.catalogSiteUrl}/api/catalog`
+      : `${req.protocol}://${req.get('host')}/api/catalog`,
     a2aEnabled: true,
     totalTenants: tenants.length,
   });
@@ -308,11 +360,17 @@ function publicBaseFromReq(req: express.Request): string {
 
 app.get('/api/agents', async (req, res) => {
   const publicBase = publicBaseFromReq(req);
-  const agents = await listAgents();
+  await refreshCatalogFromRemote();
+  const me = await getMeFromRequest(req);
+  const agents = await listAgentsForUser(me.user?.id || null);
   res.json({
     status: 'success',
-    catalogPageUrl: `${publicBase}/catalog`,
-    catalogApiUrl: `${publicBase}/api/paysh/catalog`,
+    catalogPageUrl: config.catalogSiteUrl
+      ? `${config.catalogSiteUrl}/marketplace`
+      : `${publicBase}/catalog`,
+    catalogApiUrl: config.catalogSiteUrl
+      ? `${config.catalogSiteUrl}/api/catalog`
+      : `${publicBase}/api/catalog`,
     data: agents.map((agent) => {
       const fee = agentFeeUsdc(agent);
       const listing = getCatalogEntry(agent.id);
@@ -322,8 +380,12 @@ app.get('/api/agents', async (req, res) => {
         fee,
         perCallPriceUsdc: fee,
         payShCatalog: catalog,
-        catalogPageUrl: catalog?.catalogPageUrl || `${publicBase}/catalog`,
-        catalogApiUrl: catalog?.catalogApiUrl || `${publicBase}/api/paysh/catalog`,
+        catalogPageUrl: catalog?.catalogPageUrl || (config.catalogSiteUrl
+          ? `${config.catalogSiteUrl}/a/${encodeURIComponent(agent.id)}`
+          : `${publicBase}/catalog`),
+        catalogApiUrl: catalog?.catalogApiUrl || (config.catalogSiteUrl
+          ? `${config.catalogSiteUrl}/api/catalog`
+          : `${publicBase}/api/catalog`),
         invokeUrl: catalog?.publicInvokeUrl || `${publicBase}/api/agents/${agent.id}/invoke`,
         agentCardUrl: catalog?.agentCardUrl || `${publicBase}/api/agents/${agent.id}/agent-card`,
       };
@@ -727,7 +789,10 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       perCallPriceUsdc: parsedFee,
     };
 
-    await putAgent(newAgent);
+    await putAgent(newAgent, {
+      ownerUserId: me.user?.id,
+      ownerEmail: me.user?.email,
+    });
     pipeline.push({ step: 'agent_record', status: 'ok', detail: agentId });
 
     const tenant = tenantId ? await getTenant(String(tenantId)) : undefined;
@@ -1006,50 +1071,95 @@ app.get('/api/agents/:id/balance', async (req, res) => {
     payShConnected: !!listing && listing.status === 'listed',
     payShCatalogId: listing?.catalogId || null,
     currentUsdcBalance: null,
-    note: 'Listed on pay.sh catalog for A2A; USDC balance audit is Solana workstream',
+    note: 'Listed on SolVamos catalog for A2A; paid calls settle via x402/MPP gateway',
   });
 });
 
-/** pay.sh catalog — discover agents other A2A callers can pay-invoke */
-app.get('/api/paysh/catalog', (req, res) => {
-  const scopeRaw = String(req.query.scope || 'all').toLowerCase();
-  const scope =
-    scopeRaw === 'internal' || scopeRaw === 'main' || scopeRaw === 'all' ? scopeRaw : 'all';
+async function sendCatalogJson(req: express.Request, res: express.Response) {
   const publicBaseUrl = publicBaseFromReq(req);
-  const data = listCatalog({ listedOnly: true, scope }).map((entry) =>
+  // Prefer live data from solvamos-catalog (source of truth).
+  if (config.catalogSiteUrl) {
+    try {
+      const qs = new URLSearchParams();
+      if (typeof req.query.tenantId === 'string') qs.set('tenantId', req.query.tenantId);
+      const url = `${config.catalogSiteUrl}/api/catalog${qs.toString() ? `?${qs}` : ''}`;
+      const upstream = await fetch(url, {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(12_000),
+      });
+      if (upstream.ok) {
+        const remote = (await upstream.json()) as any;
+        const rows = Array.isArray(remote.data)
+          ? remote.data
+          : Array.isArray(remote.agents)
+            ? remote.agents
+            : [];
+        res.json({
+          status: 'success',
+          protocol: 'solvamos / x402-mpp',
+          catalog: 'solvamos-catalog',
+          catalogUrl: `${config.catalogSiteUrl}/api/catalog`,
+          publicPageUrl: `${config.catalogSiteUrl}/marketplace`,
+          catalogSiteUrl: config.catalogSiteUrl,
+          network: networkLabel(),
+          paymentNetwork: config.paymentNetwork,
+          paymentHint:
+            'Paid agents: call invokeUrl with pay CLI (x402/MPP). Free agents: plain HTTP POST. Discovery source: solvamos-catalog.',
+          ...catalogPublishInfo(),
+          data: rows,
+          agents: remote.agents,
+        });
+        return;
+      }
+    } catch (err: any) {
+      console.warn('[catalog] proxy to catalog site failed', err?.message || err);
+    }
+  }
+
+  await refreshCatalogFromRemote({ force: true });
+  const data = listCatalog({ listedOnly: true }).map((entry) =>
     enrichCatalogListing(entry, publicBaseUrl)
   );
   res.json({
     status: 'success',
-    protocol: 'pay.sh / x402',
-    catalogUrl: `${publicBaseUrl}/api/paysh/catalog`,
-    publicPageUrl: `${publicBaseUrl}/catalog`,
+    protocol: 'solvamos / x402-mpp',
+    catalog: config.catalogSiteUrl ? 'solvamos-catalog-cache' : 'solvamos-local-fallback',
+    catalogUrl: config.catalogSiteUrl
+      ? `${config.catalogSiteUrl}/api/catalog`
+      : `${publicBaseUrl}/api/catalog`,
+    publicPageUrl: config.catalogSiteUrl
+      ? `${config.catalogSiteUrl}/marketplace`
+      : `${publicBaseUrl}/catalog`,
+    catalogSiteUrl: config.catalogSiteUrl || null,
     network: networkLabel(),
     paymentNetwork: config.paymentNetwork,
-    publishMode: getCatalogPublishMode(),
-    scope,
+    paymentHint:
+      'Paid agents: call invokeUrl with pay CLI (x402/MPP). Free agents: plain HTTP POST.',
     ...catalogPublishInfo(),
     data,
   });
-});
+}
 
-/** Dev: catalog publish target — internal | main | both */
+/** SolVamos platform catalog — A2A discovery (no official pay.sh registry). */
+app.get('/api/catalog', sendCatalogJson);
+/** @deprecated alias — prefer /api/catalog */
+app.get('/api/paysh/catalog', sendCatalogJson);
+
+/** Catalog mode is fixed to SolVamos platform-only. */
+app.get('/api/catalog/mode', (_req, res) => {
+  res.json({ status: 'success', ...catalogPublishInfo() });
+});
 app.get('/api/paysh/catalog/mode', (_req, res) => {
   res.json({ status: 'success', ...catalogPublishInfo() });
 });
 
+app.post('/api/catalog/mode', (req, res) => {
+  const result = setCatalogPublishMode(String(req.body?.mode || ''));
+  res.status(403).json({ status: 'error', message: result.error, ...catalogPublishInfo() });
+});
 app.post('/api/paysh/catalog/mode', (req, res) => {
-  const mode = String(req.body?.mode || '').toLowerCase();
-  const result = setCatalogPublishMode(mode);
-  if (!result.ok) {
-    res.status(config.isProd ? 403 : 400).json({ status: 'error', message: result.error });
-    return;
-  }
-  res.json({
-    status: 'success',
-    message: `Catalog publish mode → ${result.mode}`,
-    ...catalogPublishInfo(),
-  });
+  const result = setCatalogPublishMode(String(req.body?.mode || ''));
+  res.status(403).json({ status: 'error', message: result.error, ...catalogPublishInfo() });
 });
 
 /** Local Lab payment mode + managed pay.sh gateway status. */
@@ -1151,6 +1261,28 @@ app.post('/api/payment/network', async (req, res) => {
   });
 });
 
+app.post('/api/catalog/:agentId/register', async (req, res) => {
+  try {
+    const agent = await getAgent(req.params.agentId);
+    if (!agent) {
+      res.status(404).json({ status: 'error', message: 'Agent not found' });
+      return;
+    }
+    const listing = await registerAgentOnPayShCatalog(agent, {
+      baseUrl: publicBaseFromReq(req),
+      description: req.body?.description,
+    });
+    res.json({
+      status: 'success',
+      listing: enrichCatalogListing(listing, publicBaseFromReq(req)),
+      publishMode: getCatalogPublishMode(),
+      catalog: catalogPublishInfo(),
+    });
+  } catch (err: any) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+/** @deprecated alias */
 app.post('/api/paysh/catalog/:agentId/register', async (req, res) => {
   try {
     const agent = await getAgent(req.params.agentId);
@@ -1158,20 +1290,13 @@ app.post('/api/paysh/catalog/:agentId/register', async (req, res) => {
       res.status(404).json({ status: 'error', message: 'Agent not found' });
       return;
     }
-    const override = req.body?.publishMode
-      ? String(req.body.publishMode).toLowerCase()
-      : undefined;
     const listing = await registerAgentOnPayShCatalog(agent, {
-      baseUrl: `${req.protocol}://${req.get('host')}`,
+      baseUrl: publicBaseFromReq(req),
       description: req.body?.description,
-      publishMode:
-        override === 'internal' || override === 'main' || override === 'both'
-          ? override
-          : undefined,
     });
     res.json({
       status: 'success',
-      listing,
+      listing: enrichCatalogListing(listing, publicBaseFromReq(req)),
       publishMode: getCatalogPublishMode(),
       catalog: catalogPublishInfo(),
     });
@@ -1262,24 +1387,26 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
       return;
     }
 
-    // Commercial path: prefer official pay.sh gateway (standard 402 / X-PAYMENT)
+    // Commercial path: pay.sh-compatible gateway (HTTP 402 + x402/MPP)
     if (config.usePayGateway && !paymentProof) {
       const gw = listing?.invokeUrl || gatewayInvokeUrl(agentId);
       res.status(402).json({
         status: 'payment_required',
-        protocol: 'pay.sh-gateway',
+        protocol: 'x402 / MPP',
+        gateway: 'pay.sh-compatible',
         amount: feeAmount,
         token: 'USDC',
         gatewayUrl: gw,
         payGatewayUrl: config.payGatewayUrl,
         recipientWallet: agent.publicKey,
         network: networkLabel(),
+        catalogId: listing?.catalogId,
         payShCatalogId: listing?.catalogId,
         invokeUrl: gw,
         message:
           config.paymentNetwork === 'devnet'
-            ? `HTTP 402: Use pay.sh Devnet gateway — pay fetch "${gw}?prompt=hello" (no --sandbox).`
-            : `HTTP 402: Use pay.sh sandbox gateway — pay --sandbox fetch "${gw}?prompt=hello".`,
+            ? `HTTP 402 (x402/MPP): pay fetch "${gw}?prompt=hello" (Devnet USDC, no --sandbox).`
+            : `HTTP 402 (x402/MPP): pay --sandbox fetch "${gw}?prompt=hello" (localnet).`,
       });
       return;
     }
@@ -1288,6 +1415,7 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
       const agentShare = 1 - config.platformFeeShare;
       res.status(402).json({
         status: 'payment_required',
+        protocol: 'legacy-proof',
         amount: feeAmount,
         token: 'USDC',
         recipientWallet: agent.publicKey,
@@ -1297,9 +1425,10 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
         network: networkLabel(),
         paymentNetwork: config.paymentNetwork,
         usdcMint: config.usdcMint,
+        catalogId: listing?.catalogId,
         payShCatalogId: listing?.catalogId,
         invokeUrl: listing?.invokeUrl,
-        message: `HTTP 402: Pay ${feeAmount} USDC on ${networkLabel()} (≈${(agentShare * 100).toFixed(0)}% agent / ${(config.platformFeeShare * 100).toFixed(0)}% platform). Attach signature in X-PAYMENT-PROOF (legacy). Prefer pay.sh gateway.`,
+        message: `HTTP 402: Pay ${feeAmount} USDC on ${networkLabel()} (≈${(agentShare * 100).toFixed(0)}% agent / ${(config.platformFeeShare * 100).toFixed(0)}% platform). Prefer x402/MPP via payment gateway; legacy X-PAYMENT-PROOF still accepted.`,
       });
       return;
     }
@@ -1494,8 +1623,12 @@ async function startServer() {
     await loadTenants();
     await ensureSharedCustomerTenant();
     await loadAgents();
-    for (const a of await listAgents()) {
-      if (a.status !== 'PAUSED') {
+    const active = (await listAgents()).filter((a) => a.status !== 'PAUSED');
+    if (config.catalogSiteUrl) {
+      const n = await hydrateCatalogRemote(active, { baseUrl: config.appUrl });
+      console.log(`[boot] hydrated ${n} agents → ${config.catalogSiteUrl}`);
+    } else {
+      for (const a of active) {
         void registerAgentOnPayShCatalog(a);
       }
     }

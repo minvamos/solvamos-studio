@@ -173,21 +173,35 @@ export async function generateAnswer(opts: {
     if (keyed?.text) return keyed;
   }
 
-  // 4) Extractive fallback — still useful if indexing worked
-  if (opts.contextBlock && opts.contextBlock.includes('[GROUNDED CONTEXT')) {
+  // 4) Never dump internal RAG prompts / context blocks to the user.
+  const prompt = String(opts.userPrompt || '').trim();
+  const chitchat =
+    prompt.length <= 40 &&
+    /^(hi|hello|hey|yo|안녕|안녕하세요|하이|헬로|테스트|날씨|weather|고마워|감사)[\s!~.?]*$/i.test(
+      prompt
+    );
+  if (chitchat) {
+    const greeting = /안녕|hello|hi|hey|하이|헬로/i.test(prompt)
+      ? '안녕하세요! 무엇을 도와드릴까요?'
+      : /고마워|감사/i.test(prompt)
+        ? '천만에요. 다른 궁금한 점이 있으면 말씀해 주세요.'
+        : '네, 듣고 있어요. 궁금한 점을 편하게 물어보세요.';
     return {
-      text:
-        `아래는 Vertex/Drive에서 검색된 근거입니다. (LLM 생성 불가: Vertex ADC 또는 GEMINI_API_KEY 필요)\n\n` +
-        `${opts.contextBlock}\n\n질문: ${opts.userPrompt}`,
+      text: greeting,
       backend: 'extractive',
       error: rest?.error || 'No LLM backend available',
     };
   }
 
+  const hasSnippets =
+    !!opts.contextBlock &&
+    opts.contextBlock.includes('[GROUNDED CONTEXT') &&
+    !opts.contextBlock.includes('None retrieved');
+
   return {
-    text:
-      '답변을 생성하지 못했습니다. Cloud ADC(`gcloud auth application-default login`)와 ' +
-      'aiplatform.googleapis.com / discoveryengine.googleapis.com 활성화, 또는 GEMINI_API_KEY를 설정하세요.',
+    text: hasSnippets
+      ? '관련 문서는 찾았지만 지금은 답변 생성 엔진에 연결하지 못했어요. 잠시 후 다시 시도해 주세요.'
+      : '지금은 답변을 생성하지 못했어요. 잠시 후 다시 시도해 주시거나, 질문을 조금 더 구체적으로 적어 주세요.',
     backend: 'extractive',
     error: rest?.error || 'No generation backend',
   };

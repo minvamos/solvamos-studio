@@ -576,7 +576,7 @@ export default function StudioPage(props: Props) {
                 ))}
               </div>
               <p className="mt-2 text-[11px] text-outline">
-                프로덕션 pay.sh 게이트웨이는 유료 호출을 0.001 Devnet USDC로 정산합니다.
+                유료 호출은 pay.sh 호환 게이트웨이에서 x402/MPP로 0.001 Devnet USDC 정산합니다.
               </p>
             </div>
 
@@ -614,7 +614,7 @@ export default function StudioPage(props: Props) {
               <p className="text-solana-green font-semibold mb-2">
                 {creationResult._wasEdit || creationResult.message?.includes('updated')
                   ? '에이전트 저장 완료 (기존 ID 유지)'
-                  : '에이전트 생성 완료 · pay.sh 카탈로그 등록'}
+                  : '에이전트 생성 완료 · SolVamos 카탈로그 등록'}
               </p>
               <p className="text-sm text-on-surface-variant font-mono break-all">
                 ID: {creationResult.agent.id}
@@ -630,7 +630,7 @@ export default function StudioPage(props: Props) {
 
               <div className="mt-4 space-y-2 rounded-lg border border-outline-variant/20 bg-surface-container-lowest/70 p-3">
                 <p className="text-[11px] font-semibold uppercase tracking-wider text-solana-green">
-                  pay.sh 카탈로그 · 공개 주소
+                  SolVamos 카탈로그 · 공개 주소
                 </p>
                 {[
                   {
@@ -648,12 +648,12 @@ export default function StudioPage(props: Props) {
                     value:
                       creationResult.catalogApiUrl ||
                       creationResult.payShCatalog?.catalogApiUrl ||
-                      '/api/paysh/catalog',
+                      '/api/catalog',
                     open: true,
                   },
                   {
                     id: 'invoke',
-                    label: 'Invoke API',
+                    label: 'Invoke API (x402/MPP when paid)',
                     value:
                       creationResult.payShCatalog?.publicInvokeUrl ||
                       creationResult.payShCatalog?.invokeUrl ||
@@ -743,7 +743,7 @@ export default function StudioPage(props: Props) {
                 : '컴파일 중…'
               : editingAgentId
                 ? '변경사항 저장 (재게시 아님)'
-                : '에이전트 생성 및 pay.sh 카탈로그 게시하기'}
+                : '에이전트 생성 및 SolVamos 카탈로그 게시하기'}
           </button>
           {editingAgentId ? (
             <p className="text-xs text-on-surface-variant mt-2 text-center">
@@ -753,9 +753,9 @@ export default function StudioPage(props: Props) {
         </section>
       </div>
 
-      {/* Sandbox */}
-      <div className="flex flex-col gap-6 h-full lg:w-[35%] xl:w-[30%]">
-        <section className="glass-panel rounded-xl flex flex-col h-full border border-outline-variant/20 overflow-hidden relative min-h-[480px]">
+      {/* Sandbox — sticky so chat updates don't drag the page viewport */}
+      <div className="flex flex-col gap-6 h-full lg:w-[35%] xl:w-[30%] lg:sticky lg:top-4 lg:self-start lg:max-h-[calc(100vh-2rem)]">
+        <section className="glass-panel rounded-xl flex flex-col h-full border border-outline-variant/20 overflow-hidden relative min-h-[480px] overflow-anchor-none">
           <div className="p-4 border-b border-outline-variant/20 bg-surface-container-high/50 flex justify-between items-center gap-2 flex-wrap">
             <div className="flex items-center gap-2">
               <FlaskConical className="w-5 h-5 text-primary" />
@@ -785,7 +785,8 @@ export default function StudioPage(props: Props) {
 
           <div
             ref={chatScrollRef}
-            className="flex-1 p-4 flex flex-col gap-3 overflow-y-auto min-h-[320px] max-h-[420px]"
+            className="flex-1 p-4 flex flex-col gap-3 overflow-y-auto min-h-[280px] max-h-[360px] overflow-anchor-none"
+            style={{ overflowAnchor: 'none' }}
           >
             {!activeAgent && (
               <p className="text-sm text-on-surface-variant text-center py-8">
@@ -816,14 +817,14 @@ export default function StudioPage(props: Props) {
             <div className="mx-4 mb-2 p-3 rounded-lg bg-google-blue/10 border border-google-blue/30 text-sm space-y-2">
               <div className="flex items-center gap-2 text-google-blue font-medium">
                 <Lock className="w-4 h-4" />
-                pay.sh 결제 필요 · {pendingPayment.amount} {pendingPayment.token}
+                x402/MPP 결제 필요 · {pendingPayment.amount} {pendingPayment.token}
               </div>
               <p className="text-[11px] text-on-surface-variant">
                 모드:{' '}
                 <span className="text-on-surface font-medium">
                   {serverStatus?.paymentNetwork === 'devnet'
-                    ? 'Devnet (pay.sh 온체인)'
-                    : 'Localnet (pay.sh sandbox)'}
+                    ? 'Devnet (x402/MPP 온체인)'
+                    : 'Localnet (pay sandbox)'}
                 </span>
                 {' · '}vault{' '}
                 <span className="font-mono text-[10px]">
@@ -891,6 +892,12 @@ export default function StudioPage(props: Props) {
                 type="text"
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
+                onFocus={() => {
+                  // Prevent browser from scrolling the whole page to the input.
+                  const y = window.scrollY;
+                  const x = window.scrollX;
+                  requestAnimationFrame(() => window.scrollTo(x, y));
+                }}
                 disabled={!activeAgent}
                 placeholder={activeAgent ? '메시지 입력...' : '에이전트 생성 후 입력'}
                 className="w-full bg-surface-container-lowest border border-outline-variant/30 rounded-full pl-4 pr-12 py-2.5 text-on-surface text-sm focus:outline-none input-glow disabled:text-on-surface-variant disabled:cursor-not-allowed"
@@ -961,13 +968,17 @@ export default function StudioPage(props: Props) {
               </span>
               <span className="text-xs text-secondary">
                 {serverStatus?.paymentNetwork || '—'} ·{' '}
-                {serverStatus?.geminiConfigured ? 'Gemini OK' : 'Gemini unset'}
+                {serverStatus?.llmPreferredBackend === 'vertex_adc'
+                  ? 'Vertex ADC'
+                  : serverStatus?.geminiConfigured
+                    ? 'Gemini key'
+                    : 'LLM unset'}
               </span>
             </div>
             <div className="h-px w-full bg-outline-variant/20" />
             <div className="flex justify-between items-center">
               <span className="text-xs font-semibold text-on-surface-variant uppercase tracking-wider">
-                pay.sh catalog
+                SolVamos catalog
               </span>
               <span className="text-xs text-primary">
                 {serverStatus?.payShCatalogListings ?? '—'} listed · A2A{' '}
@@ -975,7 +986,7 @@ export default function StudioPage(props: Props) {
               </span>
             </div>
             <p className="text-[11px] text-on-surface-variant leading-relaxed mt-1">
-              사람→에이전트 대화 중, 필요하면 pay.sh 카탈로그에 등재된 다른 에이전트를 USDC로
+              사람→에이전트 대화 중, 필요하면 SolVamos 카탈로그에 등재된 다른 에이전트를 USDC(x402/MPP)로
               유료 호출해 정보를 가져옵니다.
             </p>
           </div>

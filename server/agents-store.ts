@@ -5,6 +5,8 @@
 import { compileSystemPrompt } from './prompt.js';
 import { prisma } from './db.js';
 import type { Agent as DbAgent } from '@prisma/client';
+import { upsertCatalogAgentFromRecord } from './catalog-db.js';
+import { config } from './config.js';
 
 export interface AgentRecord {
   id: string;
@@ -58,16 +60,34 @@ function toRecord(a: DbAgent): AgentRecord {
   };
 }
 
+async function syncListing(agent: AgentRecord, owner?: { userId?: string; email?: string }) {
+  try {
+    await upsertCatalogAgentFromRecord(agent, {
+      baseUrl: config.appUrl,
+      ownerUserId: owner?.userId || null,
+      ownerEmail: owner?.email || null,
+    });
+  } catch (err: any) {
+    console.warn('[agents-store] catalog sync failed', agent.id, err?.message || err);
+  }
+}
+
 export async function loadAgents(): Promise<void> {
   const count = await prisma.agent.count();
-  if (count === 0) {
+  const allowSeed =
+    process.env.NODE_ENV !== 'production' &&
+    process.env.SKIP_SEED_AGENTS !== '1' &&
+    process.env.SKIP_SEED_AGENTS !== 'true';
+  if (count === 0 && allowSeed) {
     await seedDefaultAgents();
-  } else {
+  } else if (allowSeed) {
     await ensureAcademicPeerSeed();
   }
   await ensureLocalSeedAgentsFree();
+  const { syncAllAgentsToCatalog } = await import('./catalog-db.js');
+  const synced = await syncAllAgentsToCatalog({ baseUrl: config.appUrl });
   const n = await prisma.agent.count();
-  console.log(`Loaded ${n} agents from database.`);
+  console.log(`Loaded ${n} agents from database; catalog rows synced=${synced}.`);
 }
 
 const SEED_AGENT_IDS = ['support-copilot-001', 'academic-research-001'] as const;
@@ -86,7 +106,6 @@ async function ensureAcademicPeerSeed() {
       systemPrompt: compileSystemPrompt('academic', 'academic', 'balanced'),
       invokeCount: 0,
       status: 'ACTIVE',
-      // Lab default: free chat; A2A demo still works via catalog
       feeUsdc: 0,
     },
   });
@@ -128,12 +147,33 @@ export async function listAgents(): Promise<AgentRecord[]> {
   return rows.map(toRecord);
 }
 
+/** Agents owned by a user (via AgentOwnership). Seeds shown if user has none yet. */
+export async function listAgentsForUser(userId?: string | null): Promise<AgentRecord[]> {
+  if (!userId) return listAgents();
+  const owned = await prisma.agentOwnership.findMany({
+    where: { userId },
+    include: { agent: true },
+    orderBy: { createdAt: 'desc' },
+  });
+  if (owned.length === 0) {
+    const seeds = await prisma.agent.findMany({
+      where: { id: { in: [...SEED_AGENT_IDS] } },
+      orderBy: { createdAt: 'desc' },
+    });
+    return seeds.map(toRecord);
+  }
+  return owned.map((o) => toRecord(o.agent));
+}
+
 export async function getAgent(id: string): Promise<AgentRecord | undefined> {
   const a = await prisma.agent.findUnique({ where: { id } });
   return a ? toRecord(a) : undefined;
 }
 
-export async function putAgent(agent: AgentRecord): Promise<AgentRecord> {
+export async function putAgent(
+  agent: AgentRecord,
+  opts?: { ownerUserId?: string; ownerEmail?: string }
+): Promise<AgentRecord> {
   const fee =
     typeof agent.fee === 'number'
       ? agent.fee
@@ -187,7 +227,14 @@ export async function putAgent(agent: AgentRecord): Promise<AgentRecord> {
       feeUsdc: fee,
     },
   });
-  return toRecord(saved);
+
+  const record = toRecord(saved);
+  if (opts?.ownerUserId) {
+    const { ensureOwnership } = await import('./catalog-db.js');
+    await ensureOwnership(opts.ownerUserId, record.id, 'owner');
+  }
+  await syncListing(record, { userId: opts?.ownerUserId, email: opts?.ownerEmail });
+  return record;
 }
 
 export async function bumpInvoke(id: string): Promise<void> {
@@ -198,6 +245,8 @@ export async function bumpInvoke(id: string): Promise<void> {
 }
 
 export async function deleteAgent(id: string): Promise<void> {
+  const { unlistCatalogAgent } = await import('./catalog-db.js');
+  await unlistCatalogAgent(id);
   await prisma.agent.delete({ where: { id } }).catch(() => undefined);
 }
 

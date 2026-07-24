@@ -1,9 +1,34 @@
 /**
- * Turn model output into a human chat message (no raw JSON blobs in UI).
+ * Turn model output into a human chat message (no raw JSON / RAG scaffolding in UI).
  */
 
+function stripInternalScaffolding(text: string): string {
+  let out = text;
+
+  // Drop whole grounded-context blocks (and trailing instruction noise)
+  out = out.replace(/\n?\[GROUNDED CONTEXT[\s\S]*?\[\/GROUNDED CONTEXT\]\n?/gi, '\n');
+
+  // Drop extractive / ops prefixes that must never reach chat UI
+  out = out.replace(
+    /^아래는 Vertex\/Drive에서 검색된 근거입니다\.[^\n]*\n+/i,
+    ''
+  );
+  out = out.replace(/^\(LLM 생성 불가:[^\n]*\)\n*/i, '');
+  out = out.replace(/\n*_\(retrieval note:[\s\S]*?\)_\s*$/i, '');
+  out = out.replace(/\n*질문:\s*[^\n]+\s*$/i, '');
+
+  // If the model echoed a "질문: …" line after dumping context, keep only a clean reply
+  const qIdx = out.search(/\n질문:\s*/);
+  if (qIdx >= 0 && /GROUNDED|None retrieved|LLM 생성 불가/i.test(out.slice(0, qIdx))) {
+    out = out.slice(qIdx).replace(/^\n?질문:\s*[^\n]+\n*/, '');
+  }
+
+  out = out.replace(/\n{3,}/g, '\n\n').trim();
+  return out;
+}
+
 export function formatAgentChatMessage(raw: string): string {
-  const text = String(raw || '').trim();
+  let text = stripInternalScaffolding(String(raw || '').trim());
   if (!text) return '응답이 비어 있습니다. 다시 시도해 주세요.';
 
   // Strip markdown code fences around JSON
@@ -11,6 +36,12 @@ export function formatAgentChatMessage(raw: string): string {
   const candidate = (fenced ? fenced[1] : text).trim();
 
   if (!(candidate.startsWith('{') && candidate.endsWith('}'))) {
+    // Still looks like leaked scaffold → friendly fallback
+    if (
+      /\[GROUNDED CONTEXT\]|None retrieved|LLM 생성 불가|retrieval note:/i.test(text)
+    ) {
+      return '지금은 답변을 생성하지 못했어요. 잠시 후 다시 시도해 주세요.';
+    }
     return text;
   }
 

@@ -37,7 +37,7 @@ export type A2AOrchestrationResult = {
   peerHops: A2APeerHop[];
   catalogUsed: boolean;
   planningNote?: string;
-  /** free_self | free_peers | paid_peers */
+  /** free_self | free_peers | paid_peers | self_best_effort_after_pay_fail | ... */
   spendTier?: string;
 };
 
@@ -340,6 +340,25 @@ export async function paidPeerInvoke(
   // --- Paid peer: real pay.sh gateway (preferred) ---
   if (config.usePayGateway) {
     const url = listing.invokeUrl || gatewayInvokeUrl(targetId);
+    // Cloud Run / production cannot reach loopback pay gateway.
+    if (
+      config.isProd &&
+      /^(https?:\/\/)?(127\.0\.0\.1|localhost)(:|\/|$)/i.test(url)
+    ) {
+      return {
+        fromAgentId: caller.id,
+        toAgentId: targetId,
+        toName,
+        question,
+        feeUsdc: fee,
+        paymentProof: '',
+        paymentVerified: false,
+        error:
+          'PAY_GATEWAY_URL points to localhost in production — paid A2A unavailable until a public pay gateway URL is configured',
+        catalogId: listing.catalogId,
+        tier,
+      };
+    }
     const paid = await payCurl({
       method: 'POST',
       url,
@@ -482,9 +501,6 @@ export async function orchestrateA2ATurn(opts: {
       skipRetrieval,
     });
     let answer = rag.answer;
-    if (rag.generationBackend === 'extractive' && rag.retrievalError) {
-      answer = `${answer}\n\n_(retrieval note: ${rag.retrievalError})_`;
-    }
     return {
       answer,
       confidence: rag.confidence,
@@ -516,12 +532,11 @@ export async function orchestrateA2ATurn(opts: {
 
   if (isSelfSufficient(selfRag, opts.userPrompt)) {
     notes.push('self RAG sufficient — skipped all peer spend');
-    let answer = selfRag.answer;
     if (selfRag.generationBackend === 'extractive' && selfRag.retrievalError) {
-      answer = `${answer}\n\n_(retrieval note: ${selfRag.retrievalError})_`;
+      console.warn('[a2a] retrieval failed (not shown to user):', selfRag.retrievalError);
     }
     return {
-      answer,
+      answer: selfRag.answer,
       confidence: selfRag.confidence,
       citations: selfRag.citations,
       ragMode: selfRag.mode,
@@ -575,27 +590,50 @@ export async function orchestrateA2ATurn(opts: {
     }
   }
 
+  const usefulPeerHops = peerHops.filter(
+    (h) => !h.error && h.answer && !looksUncertain(String(h.answer))
+  );
+  const paidFailures = peerHops.filter((h) => h.tier === 'paid' && !!h.error);
+  const anyPeerFailures = peerHops.filter((h) => !!h.error);
+  const peerPayFailed = paidFailures.length > 0 && usefulPeerHops.length === 0;
+  const peersUseless = peerHops.length > 0 && usefulPeerHops.length === 0;
+
+  if (peerPayFailed) {
+    notes.push(
+      `paid peer payment failed (${paidFailures.length}) — forcing self best-effort answer`
+    );
+    spendTier = 'self_best_effort_after_pay_fail';
+    for (const h of paidFailures) {
+      console.warn('[a2a] paid peer failed (hidden from user):', h.toName, h.error);
+    }
+  } else if (peersUseless) {
+    notes.push('peer hops produced no usable answers — forcing self best-effort');
+    spendTier = 'self_best_effort_after_peer_miss';
+  }
+
   const peerContext =
-    peerHops.length > 0
+    usefulPeerHops.length > 0
       ? `\n\n[A2A PEER INTEL — ${spendTier}]\n` +
-        peerHops
-          .map((h) => {
-            if (h.error) {
-              return `• ${h.toName} (${h.toAgentId}) [${h.tier || '?'}]: ERROR ${h.error}`;
-            }
-            return `• ${h.toName} (${h.toAgentId}) tier=${h.tier} fee=${h.feeUsdc} USDC proof=${h.paymentProof.slice(0, 28)}…\nQ: ${h.question}\nA: ${h.answer}`;
-          })
+        usefulPeerHops
+          .map(
+            (h) =>
+              `• ${h.toName} (${h.toAgentId}) tier=${h.tier} fee=${h.feeUsdc} USDC\nQ: ${h.question}\nA: ${h.answer}`
+          )
           .join('\n---\n') +
         `\n[/A2A PEER INTEL]\n`
       : '';
 
-  // Final synthesis: merge self draft + any peer intel (still free for the human→agent path)
+  // Payment / peer failures must never become the user-facing answer.
+  // Always synthesize a helpful self answer (Gemini-style), optionally enriched by useful peers only.
+  const forceBestEffort = peerPayFailed || peersUseless || usefulPeerHops.length === 0;
   const a2aSystem = `${liveSystemPrompt(opts.agent)}
 
-[A2A RUNTIME — COST AWARE]
-- You already attempted a free self answer; peer intel is only present if that was insufficient.
-- Prefer citing free peer hops over paid ones when both exist.
-- Never invent unpaid peer answers. Never reply with JSON-only status objects.
+[A2A RUNTIME — BEST EFFORT]
+- Answer the human completely and helpfully in their language.
+- Prefer useful peer intel when present; otherwise rely on your own RAG / general knowledge.
+- NEVER say you cannot answer because payment failed, a peer is unavailable, catalog is empty, or A2A failed.
+- NEVER return JSON status objects, payment errors, gateway errors, or "I don't know / 모릅니다" as the whole reply.
+- If specialist peer data is missing, still give the best practical answer you can (steps, caveats, what to check next).
 - Network: ${networkLabel()}
 `;
 
@@ -608,22 +646,66 @@ export async function orchestrateA2ATurn(opts: {
   });
 
   let answer = rag.answer;
+  let confidence = Math.max(rag.confidence, selfRag.confidence);
+  let citations = [...(selfRag.citations || []), ...(rag.citations || [])];
+  let ragMode = rag.mode;
+
   if (rag.generationBackend === 'extractive' && rag.retrievalError) {
-    answer = `${answer}\n\n_(retrieval note: ${rag.retrievalError})_`;
+    console.warn('[a2a] retrieval failed (not shown to user):', rag.retrievalError);
   }
-  if (peerHops.length > 0 && rag.mode === 'demo') {
-    const ok = peerHops.filter((h) => !h.error);
-    answer += `\n\n---\n[A2A] ${spendTier}: consulted ${ok.length}/${peerHops.length} peer(s).`;
-    for (const h of ok) {
-      answer += `\n→ [${h.tier}] ${h.toName} (${h.feeUsdc} USDC): ${String(h.answer).slice(0, 280)}`;
+
+  // If synthesis still looks like a dead-end (or payment-flavored), do one more self-only pass.
+  const answerLooksDead =
+    looksUncertain(answer) ||
+    /결제\s*실패|payment\s*fail|pay\.sh|402|gateway|피어.*(없|실패)|A2A.*(실패|불가)/i.test(
+      answer
+    );
+
+  if (forceBestEffort && answerLooksDead) {
+    notes.push('synthesis weak after peer miss — second self-only best-effort pass');
+    const solo = await generateGroundedAnswer({
+      systemPrompt: `${liveSystemPrompt(opts.agent)}
+
+[RUNTIME — SELF BEST EFFORT]
+- Peer consultation was unavailable or unpaid. You MUST still answer the user now.
+- Do not mention payment, peers, catalog, or A2A failures.
+- Write a natural, useful reply in the user's language (like a normal Gemini assistant).
+`,
+      userPrompt: opts.userPrompt,
+      dataStoreId: opts.agent.vertexDataStoreId,
+      agentId: opts.agent.id,
+      geminiApiKey: config.geminiApiKey || undefined,
+    });
+    if (solo.answer && !looksUncertain(solo.answer)) {
+      answer = solo.answer;
+      confidence = Math.max(confidence, solo.confidence);
+      citations = [...citations, ...(solo.citations || [])];
+      ragMode = solo.mode;
+      spendTier = 'self_best_effort_solo';
+    } else if (selfRag.answer && selfRag.answer.trim().length >= String(answer || '').trim().length) {
+      // Last resort: return the earlier free draft rather than a payment/uncertain stub.
+      answer = selfRag.answer;
+      confidence = Math.max(confidence, selfRag.confidence);
+      citations = selfRag.citations || citations;
+      ragMode = selfRag.mode;
+      spendTier = 'self_draft_fallback';
     }
+  }
+
+  if (anyPeerFailures.length > 0) {
+    // Keep failures in planning notes / logs only — never append to chat text.
+    notes.push(
+      `peer failures suppressed from UI: ${anyPeerFailures
+        .map((h) => `${h.toName}:${String(h.error).slice(0, 80)}`)
+        .join('; ')}`
+    );
   }
 
   return {
     answer,
-    confidence: Math.max(rag.confidence, selfRag.confidence),
-    citations: [...(selfRag.citations || []), ...(rag.citations || [])],
-    ragMode: rag.mode,
+    confidence,
+    citations,
+    ragMode,
     peerHops,
     catalogUsed: peers.length > 0,
     planningNote: notes.join(' | '),

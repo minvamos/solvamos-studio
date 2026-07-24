@@ -18,7 +18,7 @@ export const CREATE_STEPS: CreateStep[] = [
   { id: 'compile', label: '시스템 프롬프트 · 에이전트 메타 조립', hint: '역할 / 톤 / 보안' },
   { id: 'drive', label: '데이터 소스 수집', hint: 'Drive·웹·GCS 등 선택 소스' },
   { id: 'vertex', label: 'AI Applications 앱 · 데이터스토어', hint: '타입별 engine + store 생성' },
-  { id: 'catalog', label: 'pay.sh 카탈로그 게시', hint: 'A2A 디스커버리 · 가격' },
+  { id: 'catalog', label: 'SolVamos 카탈로그 게시', hint: 'A2A 디스커버리 · x402 가격' },
   { id: 'ready', label: '에이전트 기동 준비', hint: '샌드박스에서 바로 테스트' },
 ];
 
@@ -63,7 +63,7 @@ export default function CreateAgentProgress({
             <p className="text-xs text-on-surface-variant">
               {isEdit
                 ? '기존 vault·ID를 유지한 채 메타만 업데이트합니다'
-                : 'AI Applications · 데이터 소스 · pay.sh 카탈로그까지 순차 처리합니다'}
+                : 'AI Applications · 데이터 소스 · SolVamos 카탈로그까지 순차 처리합니다'}
             </p>
           </div>
         </div>

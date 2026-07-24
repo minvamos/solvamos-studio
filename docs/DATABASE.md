@@ -17,87 +17,19 @@ User 1──* Session
 User 1──* Wallet
 User *──* Tenant          (TenantMember)
 Tenant 1──* Agent
-Agent 1──1 CatalogListing
+User 1──* AgentOwnership *──1 Agent
+User 1──* CatalogAgent    (ownerUserId, optional)
+Agent.id == CatalogAgent.agentId == AgentOwnership.agentId
 Agent 1──* RagDocument
 ```
 
-| Table | Purpose |
-|-------|---------|
-| `User` | Google SSO identity |
-| `Session` | cookie → tokens |
-| `Tenant` | customer / lab + GCP project |
-| `Agent` | built agent + AI Applications ids (`vertexDataStoreId`, `vertexEngineId`, `aiAppType`, `dataSourceType`, …) |
-| `Wallet` | Solana addresses |
-| `CatalogListing` | pay.sh / A2A |
-| `RagDocument` | ingested text stubs (Drive/local); PDF base64는 파일 코퍼스에만 |
+| Table | Role |
+|-------|------|
+| `Agent` | Runtime (RAG / invoke / vault) |
+| `CatalogAgent` | Public discovery SoT (marketplace) |
+| `AgentOwnership` | User ↔ agentId (`owner` / `editor` / `viewer`) |
 
-### Agent columns (RAG / AI Applications)
+`CatalogListing` was replaced by `CatalogAgent`.  
+`solvamos-catalog` shares the same Cloud SQL `DATABASE_URL` and reads `CatalogAgent` (file `/tmp` is fallback only when `DATABASE_URL` is unset).
 
-| Column | Notes |
-|--------|--------|
-| `vertexDataStoreId` | Discovery Engine data store id |
-| `vertexEngineId` | AI Applications app/engine id |
-| `aiAppType` | `search_docs` \| `chat_rag` \| `website` \| `structured` \| `media` |
-| `dataSourceType` | `local_upload` \| `google_drive` \| `website_url` \| `none` \| … |
-| `websiteUri` / `gcsUri` | optional source metadata |
-| `googleDriveFolderId` | Drive source id when used |
-
-See [`docs/AI_APPLICATIONS_RAG.md`](../../docs/AI_APPLICATIONS_RAG.md).
-
-## Instance (Lab)
-
-- Project: `project-64269e62-555d-4979-88e`
-- Instance: `solvamos-studio-pg`
-- Region: `asia-northeast3`
-- DB name: `solvamos_studio`
-
-## Connect from local (dev)
-
-### Option A — Cloud SQL Auth Proxy (권장)
-
-```bash
-# one-time
-gcloud components install cloud-sql-proxy   # or download binary
-
-cloud-sql-proxy project-64269e62-555d-4979-88e:asia-northeast3:solvamos-studio-pg --port=5432
-```
-
-`.env`:
-
-```env
-DATABASE_URL=postgresql://solvamos:PASSWORD@127.0.0.1:5432/solvamos_studio?schema=public
-```
-
-### Option B — Public IP + authorized network
-
-콘솔에서 내 IP allow 후:
-
-```env
-DATABASE_URL=postgresql://solvamos:PASSWORD@PUBLIC_IP:5432/solvamos_studio?schema=public
-```
-
-## Migrate / generate
-
-```bash
-npm install
-npx prisma migrate dev --name init
-npx prisma generate
-npm run dev
-```
-
-## Cloud Run
-
-Use Cloud SQL connector / Unix socket in `DATABASE_URL`, and attach the instance to the Cloud Run service. Runtime SA needs `roles/cloudsql.client`.
-
-## Auth (JWT + signup)
-
-- Access JWT ~15m (prod) + refresh rotation; refresh hash on `Session`; reuse → revoke all
-- Cookies: `solvamos_at` / `solvamos_rt` / `solvamos_sid` (HttpOnly, SameSite=Lax, Secure in prod)
-- Email/password: `POST /api/auth/register`, `POST /api/auth/login`
-- Google: `GET /api/auth/google?intent=login|signup|link`
-- Lab tenant: `demo` / `SOLVAMOS_SHARED_TENANT_ID` / `SOLVAMOS_TENANT_ID` → `GOOGLE_CLOUD_PROJECT`
-- Env: `JWT_SECRET` (≥32 chars, required in production)
-
-```bash
-npx tsx scripts/seed-lab-tenant.ts
-```
+Seed agents (`support-copilot-001`, `academic-research-001`) live in `Agent` and are synced into `CatalogAgent` on Studio boot (`syncAllAgentsToCatalog`).

@@ -38,7 +38,7 @@ export interface Agent {
     catalogApiUrl?: string;
     agentCardUrl?: string;
     feeUsdc?: number;
-    officialPayShCatalogUrl?: string;
+    paymentProtocol?: string;
   } | null;
 }
 

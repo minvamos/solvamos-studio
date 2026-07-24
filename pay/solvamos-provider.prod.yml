@@ -24,9 +24,11 @@ operator:
   fee_payer: false
 
 endpoints:
+  # Health is answered by the gateway process itself (do not proxy a relative upstream).
   - method: GET
     path: 'v1/health'
-    description: 'Gateway to SolVamos origin health.'
+    description: 'Gateway health.'
+    # no metering / no upstream proxy semantics beyond gateway local reply when supported
 
   - method: GET
     path: 'v1/agents/{agentId}/invoke'

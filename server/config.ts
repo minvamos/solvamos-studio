@@ -90,6 +90,15 @@ export const config = {
     process.env.OAUTH_REDIRECT_URI ||
     `${process.env.APP_URL || 'http://localhost:3000'}/api/auth/google/callback`,
   appUrl: process.env.APP_URL || 'http://localhost:3000',
+  /** Public SolVamos catalog site — source of truth for discovery. */
+  catalogSiteUrl: (process.env.CATALOG_SITE_URL || '').replace(/\/$/, ''),
+  /** Shared secret for Studio → catalog writes (must match catalog CATALOG_ADMIN_SECRET). */
+  catalogAdminSecret: process.env.CATALOG_ADMIN_SECRET || '',
+  /** Origins allowed to read public catalog APIs cross-origin (comma-separated). */
+  catalogCorsOrigins: String(process.env.CATALOG_CORS_ORIGINS || '*')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
 
   orgId: process.env.SOLVAMOS_ORG_ID || '',
   customersFolderId: process.env.SOLVAMOS_CUSTOMERS_FOLDER_ID || '',

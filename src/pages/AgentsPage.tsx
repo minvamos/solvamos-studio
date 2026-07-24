@@ -33,7 +33,7 @@ export default function AgentsPage({ agents, onSelect, onEdit, onToggleStatus }:
   const [copied, setCopied] = useState<string | null>(null);
 
   const catalogPageUrl = agents[0]?.catalogPageUrl || '/catalog';
-  const catalogApiUrl = agents[0]?.catalogApiUrl || '/api/paysh/catalog';
+  const catalogApiUrl = agents[0]?.catalogApiUrl || '/api/catalog';
 
   const activeCount = agents.filter((a) => {
     const s = a.status || 'ACTIVE';
@@ -94,7 +94,7 @@ export default function AgentsPage({ agents, onSelect, onEdit, onToggleStatus }:
 
       <div className="glass-panel rounded-xl p-4 border border-outline-variant/20">
         <p className="text-[11px] font-semibold uppercase tracking-wider text-outline mb-2">
-          pay.sh 카탈로그 주소
+          SolVamos 카탈로그 주소
         </p>
         <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
           <code className="font-mono text-xs break-all text-on-surface">{catalogPageUrl}</code>

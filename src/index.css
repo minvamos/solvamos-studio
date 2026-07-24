@@ -83,9 +83,14 @@ body {
   box-shadow: 0 0 0 3px rgba(66, 133, 244, 0.2);
 }
 
+.overflow-anchor-none {
+  overflow-anchor: none;
+}
+
 .chat-markdown {
   overflow-wrap: anywhere;
   line-height: 1.55;
+  overflow-anchor: none;
 }
 
 .chat-markdown > :first-child {

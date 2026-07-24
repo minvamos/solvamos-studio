@@ -1,5 +1,6 @@
 // SolVamos Studio — platform database (Control Plane)
-// Env = fixed infra only. Mutable data lives in PostgreSQL (Cloud SQL).
+// Agents live in Agent (runtime). Public discovery lives in CatalogAgent.
+// Users own agents via AgentOwnership (agentId = CatalogAgent.agentId = Agent.id).
 
 generator client {
   provider = "prisma-client-js"
@@ -12,24 +13,26 @@ datasource db {
 
 /// Platform identity (email/password and/or Google)
 model User {
-  id               String    @id @default(cuid())
-  email            String    @unique
-  name             String?
-  picture          String?
+  id              String    @id @default(cuid())
+  email           String    @unique
+  name            String?
+  picture         String?
   /// scrypt/bcrypt hash — null if Google-only until password set
-  passwordHash     String?
+  passwordHash    String?
   /// Google subject (openid sub) when linked
-  googleSub        String?   @unique
-  emailVerifiedAt  DateTime?
+  googleSub       String?   @unique
+  emailVerifiedAt DateTime?
   /// Primary workspace tenant (shared lab GCP treated as customer)
-  primaryTenantId  String?
-  primaryTenant    Tenant?   @relation("UserPrimaryTenant", fields: [primaryTenantId], references: [id], onDelete: SetNull)
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  primaryTenantId String?
+  primaryTenant   Tenant?   @relation("UserPrimaryTenant", fields: [primaryTenantId], references: [id], onDelete: SetNull)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
-  sessions Session[]
-  wallets  Wallet[]
-  members  TenantMember[]
+  sessions   Session[]
+  wallets    Wallet[]
+  members    TenantMember[]
+  ownerships AgentOwnership[]
+  catalogAgents CatalogAgent[] @relation("CatalogAgentOwner")
 
   @@index([primaryTenantId])
 }
@@ -85,11 +88,11 @@ model Tenant {
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
-  members       TenantMember[]
-  agents        Agent[]
-  sessions      Session[]
-  listings      CatalogListing[]
-  primaryUsers  User[]         @relation("UserPrimaryTenant")
+  members      TenantMember[]
+  agents       Agent[]
+  sessions     Session[]
+  catalogAgents CatalogAgent[]
+  primaryUsers User[]          @relation("UserPrimaryTenant")
 }
 
 model TenantMember {
@@ -104,6 +107,7 @@ model TenantMember {
   @@id([tenantId, userId])
 }
 
+/// Runtime agent (RAG / invoke / vault). ID is shared with CatalogAgent.agentId.
 model Agent {
   id                  String   @id
   tenantId            String?
@@ -131,11 +135,28 @@ model Agent {
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
-  listing CatalogListing?
-  ragDocs RagDocument[]
+  ownerships AgentOwnership[]
+  ragDocs    RagDocument[]
 
   @@index([tenantId])
   @@index([vertexDataStoreId])
+}
+
+/// User ↔ Agent ownership. agentId matches CatalogAgent.agentId and Agent.id.
+model AgentOwnership {
+  id        String   @id @default(cuid())
+  userId    String
+  agentId   String
+  /// owner | editor | viewer
+  role      String   @default("owner")
+  createdAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, agentId])
+  @@index([agentId])
+  @@index([userId])
 }
 
 model Wallet {
@@ -153,29 +174,50 @@ model Wallet {
   @@index([userId])
 }
 
-model CatalogListing {
+/// Public discovery catalog (source of truth for solvamos-catalog marketplace).
+/// Replaces ephemeral /tmp JSON store. Same agentId as Agent / AgentOwnership.
+model CatalogAgent {
+  /// Public listing PK (solvamos_{agentId})
   catalogId       String   @id
+  /// Same as Agent.id — linked to users via AgentOwnership.agentId (soft link, no FK)
   agentId         String   @unique
-  agent           Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  fqn             String   @default("")
+  title           String
+  description     String   @db.Text @default("")
+  useCase         String   @db.Text @default("")
+  category        String   @default("ai_ml")
+  role            String?
+  tone            String?
+  invokeUrl       String
+  originInvokeUrl String?
+  agentCardUrl    String?
+  feeUsdc         Float    @default(0)
+  token           String   @default("USDC")
+  network         String   @default("devnet")
+  usdcMint        String?
+  paymentProtocol String   @default("free")
+  recipientWallet String?
+  tags            String[]
+  source          String   @default("studio")
+  studioOrigin    String?
   tenantId        String?
   tenant          Tenant?  @relation(fields: [tenantId], references: [id], onDelete: SetNull)
-  name            String
-  description     String   @db.Text
-  role            String
-  tone            String
-  invokeUrl      String
-  recipientWallet String
-  feeUsdc         Float
-  token           String   @default("USDC")
-  network         String
-  usdcMint        String
+  /// Denormalized owner for marketplace filters (also in AgentOwnership)
+  ownerUserId     String?
+  owner           User?    @relation("CatalogAgentOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  ownerEmail      String?
+  /// listed | unlisted | paused
   status          String   @default("listed")
-  tags            String[]
+  endpoints       Json?
   listedAt        DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  @@index([tenantId])
   @@index([status])
+  @@index([tenantId])
+  @@index([ownerUserId])
+  @@index([studioOrigin])
+  @@index([category])
+  @@map("CatalogAgent")
 }
 
 model RagDocument {

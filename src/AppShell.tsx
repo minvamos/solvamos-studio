@@ -27,10 +27,6 @@ type Props = {
   paymentNetwork?: string;
   onPaymentNetworkChange?: (network: 'localnet' | 'devnet') => void;
   paymentSwitchBusy?: boolean;
-  catalogPublishMode?: 'internal' | 'main' | 'both';
-  onCatalogPublishModeChange?: (mode: 'internal' | 'main' | 'both') => void;
-  catalogSwitchBusy?: boolean;
-  catalogRemoteConfigured?: boolean;
 };
 
 const NAV: { id: AppTab; label: string; icon: typeof Bot }[] = [
@@ -53,10 +49,6 @@ export default function AppShell({
   paymentNetwork,
   onPaymentNetworkChange,
   paymentSwitchBusy,
-  catalogPublishMode,
-  onCatalogPublishModeChange,
-  catalogSwitchBusy,
-  catalogRemoteConfigured,
 }: Props) {
   return (
     <div className="bg-background text-on-surface antialiased min-h-screen flex font-sans overflow-x-hidden">
@@ -109,46 +101,6 @@ export default function AppShell({
               </p>
             </div>
           )}
-
-          {onCatalogPublishModeChange && (
-            <div className="mt-2 p-2 rounded-lg bg-surface-container border border-outline-variant/20">
-              <p className="text-[10px] font-semibold text-on-surface-variant uppercase tracking-wider mb-2 px-1">
-                개발자 · pay.sh 카탈로그
-              </p>
-              <div className="flex gap-1">
-                {(
-                  [
-                    { id: 'internal' as const, label: '내부' },
-                    { id: 'main' as const, label: '메인' },
-                    { id: 'both' as const, label: '둘다' },
-                  ] as const
-                ).map(({ id, label }) => (
-                  <button
-                    key={id}
-                    type="button"
-                    disabled={catalogSwitchBusy}
-                    onClick={() => onCatalogPublishModeChange(id)}
-                    className={
-                      catalogPublishMode === id
-                        ? 'flex-1 py-1.5 rounded-md text-xs font-semibold bg-secondary/20 text-secondary border border-secondary/40'
-                        : 'flex-1 py-1.5 rounded-md text-xs font-medium text-on-surface-variant hover:bg-surface-container-highest'
-                    }
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              <p className="text-[10px] text-outline mt-2 px-1 leading-relaxed">
-                {catalogPublishMode === 'main'
-                  ? catalogRemoteConfigured
-                    ? '메인: 외부 PAYSH_CATALOG_URL로 게시'
-                    : '메인: Lab 미러 파일 (URL 미설정)'
-                  : catalogPublishMode === 'both'
-                    ? '내부 + 메인에 동시 게시'
-                    : '내부: 이 Studio 카탈로그만 (로컬 A2A)'}
-              </p>
-            </div>
-          )}
         </div>
 
         <div className="flex flex-col gap-1 flex-grow">
@@ -195,7 +147,7 @@ export default function AppShell({
             className="flex items-center gap-4 px-4 py-2 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest/50 transition-all rounded-lg text-left"
           >
             <Bot className="w-5 h-5" />
-            <span className="text-sm font-medium">공개 API 카탈로그</span>
+            <span className="text-sm font-medium">SolVamos 공개 카탈로그</span>
           </a>
           {onLogout && (
             <button

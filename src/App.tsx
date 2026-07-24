@@ -23,7 +23,6 @@ export default function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<AppTab>('studio');
   const [networkSwitchBusy, setNetworkSwitchBusy] = useState(false);
-  const [catalogSwitchBusy, setCatalogSwitchBusy] = useState(false);
 
   const [agents, setAgents] = useState<Agent[]>([]);
   const [activeAgent, setActiveAgent] = useState<Agent | null>(null);
@@ -584,7 +583,14 @@ export default function App() {
   useEffect(() => {
     const panel = chatScrollRef.current;
     if (!panel) return;
-    panel.scrollTo({ top: panel.scrollHeight, behavior: 'smooth' });
+    // Keep document viewport stable — only scroll the chat panel.
+    const windowY = window.scrollY;
+    const windowX = window.scrollX;
+    panel.scrollTop = panel.scrollHeight;
+    window.scrollTo(windowX, windowY);
+    requestAnimationFrame(() => {
+      window.scrollTo(windowX, windowY);
+    });
   }, [chatHistory, activeAgent, pendingPayment]);
 
   const beginEditAgent = (agent: Agent) => {
@@ -718,7 +724,7 @@ export default function App() {
             data.payShCatalog?.catalogId &&
               (isEdit
                 ? `catalog sync ${data.payShCatalog.catalogId}`
-                : `pay.sh ${data.payShCatalog.catalogId}`),
+                : `catalog ${data.payShCatalog.catalogId}`),
           ]
             .filter(Boolean)
             .join(' · ') || data.message
@@ -1015,37 +1021,6 @@ export default function App() {
     }
   };
 
-  const switchCatalogPublishMode = async (mode: 'internal' | 'main' | 'both') => {
-    setCatalogSwitchBusy(true);
-    try {
-      const res = await fetch('/api/paysh/catalog/mode', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode }),
-      });
-      const data = await res.json();
-      if (!res.ok || data.status !== 'success') {
-        alert(data.message || '카탈로그 게시 모드 전환 실패');
-        return;
-      }
-      await fetchStatusAndAgents();
-      setPaymentLogs((prev) => [
-        ...prev,
-        `[Catalog publish] → ${data.publishMode}` +
-          (data.remoteUrlConfigured
-            ? ` (remote ${data.remoteUrl})`
-            : data.publishMode !== 'internal'
-              ? ' (lab main mirror)'
-              : ''),
-      ]);
-    } catch (err) {
-      console.error(err);
-      alert('카탈로그 모드 전환 중 오류');
-    } finally {
-      setCatalogSwitchBusy(false);
-    }
-  };
-
   const handleAcknowledgeAndSign = async (useRandomSig = true) => {
     if (!pendingPayment) return;
     const net =
@@ -1151,10 +1126,6 @@ export default function App() {
       paymentNetwork={serverStatus?.paymentNetwork}
       onPaymentNetworkChange={switchPaymentNetwork}
       paymentSwitchBusy={networkSwitchBusy}
-      catalogPublishMode={serverStatus?.catalogPublishMode || 'internal'}
-      onCatalogPublishModeChange={switchCatalogPublishMode}
-      catalogSwitchBusy={catalogSwitchBusy}
-      catalogRemoteConfigured={!!serverStatus?.catalogRemoteConfigured}
     >
       {activeTab === 'studio' && (
         <StudioPage

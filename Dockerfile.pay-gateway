@@ -1,28 +1,35 @@
-FROM node:22-bookworm-slim
+FROM ubuntu:24.04
 
 ARG PAY_VERSION=1.0.23
+ARG NODE_VERSION=22.14.0
 
-RUN apt-get update -y \
-  && apt-get install -y --no-install-recommends ca-certificates curl unzip \
-  && npm install --global "@solana/pay@${PAY_VERSION}" \
-  && PAY_BIN="$(npm root -g)/@solana/pay/bin/pay" \
-  && if [ -x "$PAY_BIN" ]; then ln -sf "$PAY_BIN" /usr/local/bin/pay; fi \
-  && pay --version \
-  && rm -rf /var/lib/apt/lists/* /root/.npm
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH=/usr/local/bin:/usr/bin:/bin
+ENV PAY_PKG_VERSION=${PAY_VERSION}
+
+RUN set -eux; \
+  apt-get update -y; \
+  apt-get install -y --no-install-recommends ca-certificates curl unzip xz-utils; \
+  curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+    | tar -xJ -C /usr/local --strip-components=1; \
+  node --version; \
+  npm --version; \
+  npm install --global "@solana/pay@${PAY_VERSION}"; \
+  mkdir -p /tmp/pay-home/.npm; \
+  HOME=/tmp/pay-home npm_config_cache=/tmp/pay-home/.npm \
+    npx --yes --package "@solana/pay@${PAY_VERSION}" pay --version || true; \
+  rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY pay/solvamos-provider.prod.yml /app/provider.template.yml
 COPY scripts/start-pay-gateway.sh /app/start-pay-gateway.sh
 
 RUN sed -i 's/\r$//' /app/start-pay-gateway.sh \
-  && chmod +x /app/start-pay-gateway.sh \
-  && mkdir -p /tmp/pay-home \
-  && chown -R node:node /app /tmp/pay-home
+  && chmod +x /app/start-pay-gateway.sh
 
 ENV PORT=8080
 ENV HOME=/tmp/pay-home
+ENV npm_config_cache=/tmp/pay-home/.npm
 EXPOSE 8080
 
-USER node
 CMD ["sh", "/app/start-pay-gateway.sh"]
-

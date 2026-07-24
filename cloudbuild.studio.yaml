@@ -1,0 +1,12 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - asia-northeast3-docker.pkg.dev/project-64269e62-555d-4979-88e/solvamos-img/studio:latest
+      - .
+images:
+  - asia-northeast3-docker.pkg.dev/project-64269e62-555d-4979-88e/solvamos-img/studio:latest
+timeout: 1800s
+options:
+  logging: CLOUD_LOGGING_ONLY
