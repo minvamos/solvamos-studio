@@ -34,6 +34,29 @@ export type ChatAttachment = {
   dataBase64: string;
 };
 
+/**
+ * Discovery Engine Answer canned fallback when it cannot ground a summary.
+ * KO: "검색어에 대한 요약을 생성할 수 없습니다. 다음은 몇 가지 검색 결과입니다."
+ * EN: "I am unable to generate a summary for your query. Here are some search results."
+ */
+export function isEngineRefusalAnswer(text: string): boolean {
+  if (/요약을 생성할 수 없|검색어에 대한 요약|요약할 수 없|다음은 몇 가지 검색 결과/.test(text)) {
+    return true;
+  }
+  if (
+    /unable to generate (a )?(summary|answer)|could(?: not|n'?t) generate (a )?(summary|answer)|cannot generate (a )?(summary|answer)|no summary (could be|was) generated/i.test(
+      text
+    )
+  ) {
+    return true;
+  }
+  // EN twin of the KO second sentence — only with summary/query framing
+  return (
+    /here are some (search )?results/i.test(text) &&
+    /summary|quer(?:y|ies)|unable|could(?: not|n'?t)|cannot/i.test(text)
+  );
+}
+
 function projectId(): string | undefined {
   return process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT;
 }
@@ -471,10 +494,7 @@ export async function generateGroundedAnswer(opts: {
       const answer = formatAgentChatMessage(appAnswer.answer);
       // Engine often returns a fixed KO/EN "couldn't summarize" for greetings / OOD
       // while still setting relatedQuestions — do not treat that as a strong answer.
-      const engineRefusal =
-        /요약을 생성할 수 없|검색어에 대한 요약|요약할 수 없|could not generate.*(summary|answer)|unable to generate.*(summary|answer)/i.test(
-          answer
-        );
+      const engineRefusal = isEngineRefusalAnswer(answer);
       const noGrounding =
         engineRefusal && !(appAnswer.citations && appAnswer.citations.length);
       // relatedQuestions are follow-up chips, not a greeting reply — use Gemini chat.

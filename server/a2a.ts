@@ -9,7 +9,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { config, networkLabel } from './config.js';
 import { getAgent, bumpInvoke, listAgents, type AgentRecord } from './agents-store.js';
-import { generateGroundedAnswer, type RagResult } from './rag.js';
+import { generateGroundedAnswer, isEngineRefusalAnswer, type RagResult } from './rag.js';
 import { verifyPayment } from './payment.js';
 import { getCatalogEntry, listCatalogForA2A, type PayShCatalogEntry } from './paysh-catalog.js';
 import { compileSystemPrompt } from './prompt.js';
@@ -88,13 +88,6 @@ function splitPeersByFee(peers: PayShCatalogEntry[]): {
     else paid.push(p);
   }
   return { free, paid };
-}
-
-/** Discovery Engine Answer fallback when it cannot ground a summary (often greetings / OOD). */
-function isEngineRefusalAnswer(text: string): boolean {
-  return /요약을 생성할 수 없|검색어에 대한 요약|요약할 수 없|could not generate.*(summary|answer)|unable to generate.*(summary|answer)|no summary/i.test(
-    text
-  );
 }
 
 function looksUncertain(text: string): boolean {
