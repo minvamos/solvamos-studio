@@ -220,8 +220,12 @@ export default function AgentDetailPage({
               개요
             </h2>
             <p className="text-sm text-on-surface-variant leading-relaxed">
+              모드{' '}
+              {agent.runtimeMode === 'autonomous' ? '자율(Gemini+RAG)' : '특화(AI Applications)'} ·
               톤 {agent.tone} · 보안 {agent.securityLevel}
-              {agent.aiAppType ? ` · 앱 ${agent.aiAppType}` : ''}
+              {agent.runtimeMode !== 'autonomous' && agent.aiAppType
+                ? ` · 앱 ${agent.aiAppType}`
+                : ''}
               {agent.dataSourceType ? ` · 소스 ${agent.dataSourceType}` : ''}
             </p>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">

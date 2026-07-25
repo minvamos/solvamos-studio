@@ -159,9 +159,13 @@ export default function StudioPage(props: Props) {
   } = props;
 
   const fee = options.fee ?? 0;
+  const runtimeMode = options.runtimeMode === 'autonomous' ? 'autonomous' : 'specialized';
   const appType = options.aiAppType || 'search_docs';
   const sourceType = options.dataSourceType || 'local_upload';
-  const sourceChoices = DATA_SOURCES.filter((s) => s.forApps.includes(appType));
+  const sourceChoices =
+    runtimeMode === 'autonomous'
+      ? DATA_SOURCES
+      : DATA_SOURCES.filter((s) => s.forApps.includes(appType));
 
   if (studioView === 'landing') {
     return (
@@ -255,12 +259,9 @@ export default function StudioPage(props: Props) {
               1
             </div>
             <div>
-              <h2 className="text-2xl font-semibold text-on-surface">
-                AI Applications 앱 · 데이터 소스
-              </h2>
+              <h2 className="text-2xl font-semibold text-on-surface">에이전트 모드 · 지식 소스</h2>
               <p className="text-sm text-on-surface-variant mt-1">
-                GCP AI Applications에 앱+데이터스토어를 만들고, RAG에 맞는 소스를 고릅니다.
-                (location: global)
+                특화모드는 AI Applications Answer, 자율모드는 Vertex Gemini + Data Store RAG입니다.
               </p>
             </div>
           </div>
@@ -283,36 +284,80 @@ export default function StudioPage(props: Props) {
           </div>
 
           <div className="mb-5">
-            <p className="text-sm font-medium text-on-surface-variant mb-2">앱 유형</p>
+            <p className="text-sm font-medium text-on-surface-variant mb-2">에이전트 모드</p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {AI_APP_TYPES.map((t) => {
-                const active = appType === t.id;
-                return (
-                  <button
-                    key={t.id}
-                    type="button"
-                    onClick={() => {
-                      const nextSources = DATA_SOURCES.filter((s) => s.forApps.includes(t.id));
-                      const keep = nextSources.some((s) => s.id === sourceType);
-                      setOptions((prev) => ({
-                        ...prev,
-                        aiAppType: t.id,
-                        dataSourceType: keep ? prev.dataSourceType : nextSources[0]?.id || 'none',
-                      }));
-                    }}
-                    className={
-                      active
-                        ? 'text-left px-4 py-3 rounded-lg border border-google-blue bg-google-blue/10'
-                        : 'text-left px-4 py-3 rounded-lg border border-outline-variant/30 bg-surface-container-low hover:border-outline-variant/50'
-                    }
-                  >
-                    <p className="text-sm font-semibold text-on-surface">{t.label}</p>
-                    <p className="text-xs text-on-surface-variant mt-0.5">{t.hint}</p>
-                  </button>
-                );
-              })}
+              <button
+                type="button"
+                onClick={() =>
+                  setOptions((prev) => ({ ...prev, runtimeMode: 'specialized' }))
+                }
+                className={
+                  runtimeMode === 'specialized'
+                    ? 'text-left px-4 py-3 rounded-lg border border-google-blue bg-google-blue/10'
+                    : 'text-left px-4 py-3 rounded-lg border border-outline-variant/30 bg-surface-container-low hover:border-outline-variant/50'
+                }
+              >
+                <p className="text-sm font-semibold text-on-surface">특화모드</p>
+                <p className="text-xs text-on-surface-variant mt-0.5">
+                  문서 QA · AI Applications Engine + Data Store
+                </p>
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setOptions((prev) => ({
+                    ...prev,
+                    runtimeMode: 'autonomous',
+                    dataSourceType: prev.dataSourceType || 'local_upload',
+                  }))
+                }
+                className={
+                  runtimeMode === 'autonomous'
+                    ? 'text-left px-4 py-3 rounded-lg border border-solana-green bg-solana-green/10'
+                    : 'text-left px-4 py-3 rounded-lg border border-outline-variant/30 bg-surface-container-low hover:border-outline-variant/50'
+                }
+              >
+                <p className="text-sm font-semibold text-on-surface">자율모드</p>
+                <p className="text-xs text-on-surface-variant mt-0.5">
+                  Gemini 대화 + 필요 시 Data Store 검색 (Engine 없음)
+                </p>
+              </button>
             </div>
           </div>
+
+          {runtimeMode === 'specialized' ? (
+            <div className="mb-5">
+              <p className="text-sm font-medium text-on-surface-variant mb-2">앱 유형</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {AI_APP_TYPES.map((t) => {
+                  const active = appType === t.id;
+                  return (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => {
+                        const nextSources = DATA_SOURCES.filter((s) => s.forApps.includes(t.id));
+                        const keep = nextSources.some((s) => s.id === sourceType);
+                        setOptions((prev) => ({
+                          ...prev,
+                          aiAppType: t.id,
+                          dataSourceType: keep ? prev.dataSourceType : nextSources[0]?.id || 'none',
+                        }));
+                      }}
+                      className={
+                        active
+                          ? 'text-left px-4 py-3 rounded-lg border border-google-blue bg-google-blue/10'
+                          : 'text-left px-4 py-3 rounded-lg border border-outline-variant/30 bg-surface-container-low hover:border-outline-variant/50'
+                      }
+                    >
+                      <p className="text-sm font-semibold text-on-surface">{t.label}</p>
+                      <p className="text-xs text-on-surface-variant mt-0.5">{t.hint}</p>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
 
           <div className="mb-5">
             <p className="text-sm font-medium text-on-surface-variant mb-2">데이터 소스</p>
@@ -443,7 +488,9 @@ export default function StudioPage(props: Props) {
 
           {sourceType === 'none' && (
             <p className="text-xs text-on-surface-variant mb-4">
-              앱과 빈 데이터스토어만 만듭니다. 나중에 로컬 파일 추가로 지식을 넣을 수 있습니다.
+              {runtimeMode === 'autonomous'
+                ? '빈 Data Store만 만듭니다. 나중에 로컬 파일 추가로 지식을 넣을 수 있습니다.'
+                : '앱과 빈 데이터스토어만 만듭니다. 나중에 로컬 파일 추가로 지식을 넣을 수 있습니다.'}
             </p>
           )}
 
@@ -584,6 +631,28 @@ export default function StudioPage(props: Props) {
                   );
                 })}
               </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-on-surface-variant mb-2">
+                추가 지시문 (선택)
+              </label>
+              <textarea
+                value={options.customInstructions || ''}
+                onChange={(e) =>
+                  setOptions((prev) => ({
+                    ...prev,
+                    customInstructions: e.target.value,
+                  }))
+                }
+                rows={4}
+                maxLength={8000}
+                placeholder="예: 항상 한국어로 답하고, 사내 규정에 없는 내용은 추측하지 마세요."
+                className="w-full bg-surface-container-low border border-outline-variant/30 rounded-lg px-4 py-3 text-sm text-on-surface input-glow focus:outline-none resize-y min-h-[6rem]"
+              />
+              <p className="text-xs text-on-surface-variant mt-1">
+                역할/톤 프리셋 위에 붙는 자유 지시문입니다. 특화·자율 모두 동일하게 적용됩니다.
+              </p>
             </div>
 
             <div className="bg-surface-container p-4 rounded-lg border border-outline-variant/10">

@@ -1,6 +1,6 @@
 # SolVamos 구현 현황과 Roadmap
 
-> 기준: 2026-07-25  
+> 기준: 2026-07-26 (감사 [PLATFORM_AUDIT.md](./PLATFORM_AUDIT.md) Studio `4c4994e`)  
 > 우선순위는 기능 수가 아니라 **상업 경로의 정확성, 데이터 무결성, 운영 가능성** 순이다.
 
 ## 현재 baseline
@@ -38,8 +38,9 @@
 
 ### P0.2 gateway settlement ingestion
 
-> **감사 Critical 승격** ([PLATFORM_AUDIT.md](./PLATFORM_AUDIT.md) C3/C4):  
-> gateway-only 경로의 원본 receipt 부재 + 검증 없는 2차 payout + `/tmp` replay 캐시.
+> **감사 High** ([PLATFORM_AUDIT.md](./PLATFORM_AUDIT.md) H1 / 구 C3·C4 mitigated):  
+> native MPP로 2차 payout 배수는 기본 차단. 남은 것: gateway receipt inject + 온체인/HMAC 검증 + durable replay fail-closed.  
+> **신규 Critical C9:** Shared Lab `studioTest`가 tenant membership으로 타 유저 에이전트 무료 invoke(+A2A vault 지출) 가능 — ownership-only로 축소 필요.
 
 문제:
 

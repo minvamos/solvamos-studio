@@ -28,7 +28,6 @@ export default function App() {
   const [landingBusy, setLandingBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<AppTab>('studio');
-  const [networkSwitchBusy, setNetworkSwitchBusy] = useState(false);
 
   const [agents, setAgents] = useState<Agent[]>([]);
   const [activeAgent, setActiveAgent] = useState<Agent | null>(null);
@@ -57,6 +56,8 @@ export default function App() {
     tone: 'professional',
     securityLevel: 'strict',
     fee: 0,
+    runtimeMode: 'specialized',
+    customInstructions: '',
     aiAppType: 'search_docs',
     dataSourceType: 'local_upload',
   });
@@ -174,6 +175,9 @@ export default function App() {
       tone: (agent.tone as PromptOptions['tone']) || 'professional',
       securityLevel: (agent.securityLevel as PromptOptions['securityLevel']) || 'strict',
       fee: agent.fee ?? agent.perCallPriceUsdc ?? 0,
+      runtimeMode:
+        agent.runtimeMode === 'autonomous' ? 'autonomous' : 'specialized',
+      customInstructions: agent.customInstructions || '',
       aiAppType: (agent.aiAppType as PromptOptions['aiAppType']) || 'search_docs',
       dataSourceType: (agent.dataSourceType as PromptOptions['dataSourceType']) || 'local_upload',
       websiteUri: agent.websiteUri,
@@ -673,14 +677,20 @@ export default function App() {
   }, [agents, serverStatus?.catalogMarketplaceUrl, serverStatus?.catalogPageUrl]);
 
   useEffect(() => {
-    const { role, tone, securityLevel, customRole } = options;
+    const { role, tone, securityLevel, customRole, customInstructions } = options;
     const controller = new AbortController();
     const timer = window.setTimeout(async () => {
       try {
         const res = await fetch('/api/agents/preview-prompt', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ role, tone, securityLevel, customRole }),
+          body: JSON.stringify({
+            role,
+            tone,
+            securityLevel,
+            customRole,
+            customInstructions,
+          }),
           signal: controller.signal,
         });
         const data = await res.json();
@@ -693,7 +703,13 @@ export default function App() {
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [options.role, options.tone, options.securityLevel, options.customRole]);
+  }, [
+    options.role,
+    options.tone,
+    options.securityLevel,
+    options.customRole,
+    options.customInstructions,
+  ]);
 
   useEffect(() => {
     const panel = chatScrollRef.current;
@@ -741,6 +757,8 @@ export default function App() {
       tone: 'professional',
       securityLevel: 'strict',
       fee: 0,
+      runtimeMode: 'specialized',
+      customInstructions: '',
       aiAppType: 'search_docs',
       dataSourceType: 'local_upload',
       websiteUri: undefined,
@@ -803,12 +821,20 @@ export default function App() {
               ? `로컬 파일 ${localFiles.length}건 추가 · 메타 저장`
               : '메타·요금 저장 (vault/ID 유지)'
           : localFiles.length
-            ? `로컬 파일 ${localFiles.length}건 · AI Applications · 카탈로그…`
+            ? `로컬 파일 ${localFiles.length}건 · ${
+                options.runtimeMode === 'autonomous' ? 'Gemini+DataStore' : 'AI Applications'
+              } · 카탈로그…`
             : selectedFolderId
-              ? `Drive ${selectedDriveName || selectedFolderId} · AI Applications · 카탈로그…`
-              : `AI Applications (${options.aiAppType || 'search_docs'} / ${
-                  options.dataSourceType || 'local_upload'
-                }) · 카탈로그…`
+              ? `Drive ${selectedDriveName || selectedFolderId} · ${
+                  options.runtimeMode === 'autonomous' ? 'Gemini+DataStore' : 'AI Applications'
+                } · 카탈로그…`
+              : options.runtimeMode === 'autonomous'
+                ? `자율모드 (Gemini + Data Store / ${
+                    options.dataSourceType || 'local_upload'
+                  }) · 카탈로그…`
+                : `특화모드 AI Applications (${options.aiAppType || 'search_docs'} / ${
+                    options.dataSourceType || 'local_upload'
+                  }) · 카탈로그…`
       );
 
       const res = await fetch(isEdit ? `/api/agents/${targetId}` : '/api/agents/create', {
@@ -1152,38 +1178,6 @@ export default function App() {
     }
   };
 
-  const switchPaymentNetwork = async (network: 'localnet' | 'devnet' | 'sandbox') => {
-    setNetworkSwitchBusy(true);
-    try {
-      const res = await fetch('/api/payment/network', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ network }),
-      });
-      const data = await res.json();
-      if (!res.ok || data.status !== 'success') {
-        alert(data.message || '결제 네트워크 전환 실패');
-        return;
-      }
-      await fetchStatusAndAgents();
-      setPendingPayment(null);
-      setPaymentLogs([
-        `[Payment mode] → ${data.paymentNetwork} (${data.networkLabel})`,
-        `pay.sh: ${data.paySh?.label || ''}`,
-        `Gateway: ${data.gateway?.state || 'unknown'} pid=${data.gateway?.pid || '—'}`,
-        `RPC: ${data.solanaRpcUrl}`,
-        `USDC mint: ${data.usdcMint}`,
-        data.paymentNetwork === 'devnet'
-          ? 'Devnet: on-chain USDC via pay.sh (not mainnet)'
-          : 'Localnet: pay --sandbox (Surfpool, no real funds)',
-      ]);
-    } catch (err) {
-      console.error(err);
-      alert('결제 네트워크 전환 중 오류');
-    } finally {
-      setNetworkSwitchBusy(false);
-    }
-  };
 
   const handleAcknowledgeAndSign = async (_useRandomSig = true) => {
     if (!pendingPayment?.invokeUrl) {
@@ -1262,8 +1256,6 @@ export default function App() {
       }}
       onLogout={logout}
       paymentNetwork={serverStatus?.paymentNetwork}
-      onPaymentNetworkChange={switchPaymentNetwork}
-      paymentSwitchBusy={networkSwitchBusy}
     >
       {activeTab === 'studio' && (
         <StudioPage

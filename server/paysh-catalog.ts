@@ -281,15 +281,23 @@ function buildLocalEntry(
   };
 }
 
-async function publishToRemote(entry: PayShCatalogEntry): Promise<PayShCatalogEntry> {
+async function publishToRemote(
+  entry: PayShCatalogEntry,
+  owner?: { ownerUserId?: string | null; ownerEmail?: string | null }
+): Promise<PayShCatalogEntry> {
   const site = catalogSite();
   if (!site) return entry;
+  if (!config.catalogAdminSecret) {
+    throw new Error('CATALOG_ADMIN_SECRET unset — refusing remote catalog publish');
+  }
   const res = await fetch(`${site}/api/catalog/agents`, {
     method: 'POST',
     headers: adminHeaders(),
     body: JSON.stringify({
       studioOrigin: config.appUrl.replace(/\/$/, ''),
       listing: entry,
+      owner_user_id: owner?.ownerUserId || undefined,
+      owner_email: owner?.ownerEmail || undefined,
     }),
     signal: AbortSignal.timeout(15_000),
   });
@@ -308,12 +316,29 @@ export async function registerAgentOnPayShCatalog(
     baseUrl?: string;
     description?: string;
     publishMode?: string;
+    ownerUserId?: string | null;
+    ownerEmail?: string | null;
     /** When true, remote publish failure throws (agent create/update hard-fail). */
     requireRemote?: boolean;
   }
 ): Promise<PayShCatalogEntry> {
   const entry = buildLocalEntry(agent, opts);
   const site = catalogSite();
+  let ownerUserId = opts?.ownerUserId || null;
+  let ownerEmail = opts?.ownerEmail || null;
+  if (!ownerUserId) {
+    try {
+      const { prisma } = await import('./db.js');
+      const ownership = await prisma.agentOwnership.findFirst({
+        where: { agentId: agent.id, role: 'owner' },
+        include: { user: { select: { email: true } } },
+      });
+      ownerUserId = ownership?.userId || null;
+      ownerEmail = ownerEmail || ownership?.user?.email || null;
+    } catch {
+      /* ignore — publish may still work for unowned seed rows */
+    }
+  }
   try {
     if (!site && opts?.requireRemote) {
       throw new Error('CATALOG_SITE_URL / catalog site not configured — cannot publish remotely');
@@ -322,7 +347,7 @@ export async function registerAgentOnPayShCatalog(
       catalog[agent.id] = entry;
       return entry;
     }
-    const published = await publishToRemote(entry);
+    const published = await publishToRemote(entry, { ownerUserId, ownerEmail });
     catalog[agent.id] = published;
     lastFetchAt = 0; // invalidate so next list refreshes
     return published;

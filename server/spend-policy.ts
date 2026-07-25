@@ -1,6 +1,8 @@
 /**
  * A2A spend policy — per-call cap + daily budget + loop prevention.
  * Checked BEFORE a buyer agent pays a peer (server/a2a.ts paid path).
+ *
+ * Daily aggregation failures retry then fail-closed (never treat as spent=0).
  */
 
 import { prisma } from './db.js';
@@ -13,6 +15,7 @@ const DEFAULT_MAX_SPEND_PER_CALL_USDC = Number(
   process.env.A2A_MAX_SPEND_PER_CALL_USDC || 0.05
 );
 const DEFAULT_DAILY_BUDGET_USDC = Number(process.env.A2A_DAILY_BUDGET_USDC || 1);
+const SPEND_AGG_RETRIES = Math.max(1, Number(process.env.A2A_SPEND_AGG_RETRIES || 3));
 
 export type SpendCheckResult = {
   allowed: boolean;
@@ -28,23 +31,36 @@ function utcDayStart(): Date {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 }
 
-/** Sum of successful A2A payments made BY this agent today (UTC). */
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Sum of successful A2A payments made BY this agent today (UTC). Retries then throws. */
 export async function spentTodayUsdc(payerAgentId: string): Promise<number> {
-  try {
-    const agg = await prisma.paymentSettlement.aggregate({
-      _sum: { amountUsdc: true },
-      where: {
-        payerAgentId,
-        status: 'success',
-        createdAt: { gte: utcDayStart() },
-      },
-    });
-    return agg._sum.amountUsdc || 0;
-  } catch (err: any) {
-    // Table/column not migrated yet — fail-open on aggregation only.
-    console.warn('[spend-policy] daily aggregation failed:', err?.message || err);
-    return 0;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= SPEND_AGG_RETRIES; attempt++) {
+    try {
+      const agg = await prisma.paymentSettlement.aggregate({
+        _sum: { amountUsdc: true },
+        where: {
+          payerAgentId,
+          status: 'success',
+          createdAt: { gte: utcDayStart() },
+        },
+      });
+      return agg._sum.amountUsdc || 0;
+    } catch (err) {
+      lastErr = err;
+      console.warn(
+        `[spend-policy] daily aggregation failed attempt=${attempt}/${SPEND_AGG_RETRIES}:`,
+        (err as any)?.message || err
+      );
+      if (attempt < SPEND_AGG_RETRIES) await sleep(80 * attempt);
+    }
   }
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error(String((lastErr as any)?.message || lastErr || 'spend aggregation failed'));
 }
 
 /** Validate a prospective A2A payment against the buyer's spend policy. */
@@ -61,7 +77,19 @@ export async function checkSpendAllowance(
       ? buyer.dailyBudgetUsdc
       : DEFAULT_DAILY_BUDGET_USDC;
 
-  const spent = await spentTodayUsdc(buyer.id);
+  let spent: number;
+  try {
+    spent = await spentTodayUsdc(buyer.id);
+  } catch (err: any) {
+    return {
+      allowed: false,
+      reason: `spend ledger unavailable after ${SPEND_AGG_RETRIES} retries — A2A payment blocked (${String(err?.message || err).slice(0, 160)})`,
+      perCallLimitUsdc,
+      dailyBudgetUsdc,
+      spentTodayUsdc: -1,
+    };
+  }
+
   const base = { perCallLimitUsdc, dailyBudgetUsdc, spentTodayUsdc: spent };
 
   if (amountUsdc > perCallLimitUsdc) {

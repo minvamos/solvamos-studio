@@ -58,16 +58,13 @@ function liveSystemPrompt(agent: AgentRecord): string {
     agent.role,
     agent.tone,
     agent.securityLevel,
-    agent.customRole
+    agent.customRole,
+    agent.customInstructions
   );
 }
 
-function isChitchat(prompt: string): boolean {
-  const t = prompt.trim();
-  return (
-    t.length <= 40 &&
-    /^(hi|hello|hey|yo|안녕|안녕하세요|하이|헬로|테스트|날씨|weather|고마워|감사)[\s!~.?]*$/i.test(t)
-  );
+function agentRuntimeMode(agent: AgentRecord): 'specialized' | 'autonomous' {
+  return agent.runtimeMode === 'autonomous' ? 'autonomous' : 'specialized';
 }
 
 function agentFee(agent: AgentRecord): number {
@@ -111,6 +108,14 @@ export function isSelfSufficient(rag: RagResult, userPrompt: string): boolean {
   if (explicitPeerAsk) return false;
 
   if (rag.mode === 'demo' && (rag.confidence || 0) < 0.7) return false;
+  // Engine Answer (incl. greetings) that looks fine — do not escalate to peers
+  if (
+    rag.mode === 'ai_application' &&
+    (rag.confidence || 0) >= 0.7 &&
+    !looksUncertain(rag.answer)
+  ) {
+    return true;
+  }
   if ((rag.confidence || 0) >= SELF_SUFFICIENT_CONFIDENCE && !looksUncertain(rag.answer)) {
     return true;
   }
@@ -195,7 +200,8 @@ export async function planPeerCalls(
 COST RULES (critical):
 - Prefer free knowledge. Do NOT pay peers when your own draft is enough.
 - Among peers, prefer fee=0. Only pick fee>0 when free peers cannot cover the gap.
-- If unsure, return {"calls":[]} — wasting USDC is worse than a partial answer.
+- If this is the paid band and your own draft confidence is low (<0.45) or clearly insufficient, pick ONE cheapest relevant peer (do not return empty just to save money).
+- If your draft already answers well, return {"calls":[]}.
 
 User message:
 """${userPrompt}"""
@@ -206,7 +212,7 @@ ${catalogBrief}
 
 Return ONLY JSON:
 {"calls":[{"agentId":"...","question":"...","reason":"..."}]}
-Max ${MAX_PEER_CALLS} calls. Empty calls is OK.`,
+Max ${MAX_PEER_CALLS} calls. Empty calls is OK when self draft is sufficient.`,
         config: { temperature: 0.1 },
       });
       const text = response.text || '';
@@ -228,7 +234,7 @@ Max ${MAX_PEER_CALLS} calls. Empty calls is OK.`,
     }
   }
 
-  // Heuristic: only when user signal / role mismatch keyword — never auto-pay
+  // Heuristic: keyword / role mismatch; paid band also escalates when self RAG was weak
   const lower = userPrompt.toLowerCase();
   const calls: PeerPlan[] = [];
   const ranked = [...rankedPool].sort((a, b) => {
@@ -241,6 +247,8 @@ Max ${MAX_PEER_CALLS} calls. Empty calls is OK.`,
 
   const wantsHelp =
     /다른|전문|물어|학술|academic|peer|agent|연구|api|날씨|weather|기술|가이드/.test(lower);
+  const selfWeak =
+    typeof opts?.selfConfidence === 'number' && opts.selfConfidence < 0.45;
 
   for (const p of ranked) {
     if (calls.length >= MAX_PEER_CALLS) break;
@@ -258,8 +266,8 @@ Max ${MAX_PEER_CALLS} calls. Empty calls is OK.`,
     }
   }
 
-  // Free band only: if still empty but self was weak, try one cheapest different-role free peer
-  if (calls.length === 0 && band === 'free' && ranked.length > 0 && wantsHelp) {
+  // Free band: if still empty but self was weak, try one cheapest different-role free peer
+  if (calls.length === 0 && band === 'free' && ranked.length > 0 && (wantsHelp || selfWeak)) {
     const p = ranked.find((x) => x.role !== caller.role) || ranked[0];
     calls.push({
       agentId: p.agentId,
@@ -268,7 +276,17 @@ Max ${MAX_PEER_CALLS} calls. Empty calls is OK.`,
     });
   }
 
-  // Paid band: NEVER auto-pick without keyword/LLM — empty is correct (save money)
+  // Paid band: A2A was explicitly enabled — if self was weak, spend on one cheapest peer
+  // (toggle OFF skips this entire path; toggle ON means vault may pay).
+  if (calls.length === 0 && band === 'paid' && ranked.length > 0 && selfWeak) {
+    const p = ranked.find((x) => x.role !== caller.role) || ranked[0];
+    calls.push({
+      agentId: p.agentId,
+      question: `From peer agent ${caller.id}: please help with — ${userPrompt}`,
+      reason: `paid-peer consult after weak self (fee=${p.feeUsdc} USDC)`,
+    });
+  }
+
   return {
     calls,
     note: `planned via heuristic (${band} band, cost-aware)`,
@@ -329,6 +347,7 @@ export async function paidPeerInvoke(
       engineId: target.vertexEngineId,
       agentId: target.id,
       geminiApiKey: config.geminiApiKey || undefined,
+      runtimeMode: agentRuntimeMode(target),
     });
     await bumpInvoke(targetId);
     return {
@@ -558,6 +577,7 @@ export async function paidPeerInvoke(
     engineId: target.vertexEngineId,
     agentId: target.id,
     geminiApiKey: config.geminiApiKey || undefined,
+    runtimeMode: agentRuntimeMode(target),
   });
   await bumpInvoke(targetId);
 
@@ -596,10 +616,8 @@ export async function orchestrateA2ATurn(opts: {
   const notes: string[] = [];
   let spendTier = 'free_self';
 
-  // Studio / direct chat: one Vertex+RAG pass only (no peer escalation, no double generate)
+  // Studio / direct chat: specialized → Engine Answer; autonomous → Gemini + retrieve.
   if (!enablePeers) {
-    const hasAttachments = (opts.attachments?.length || 0) > 0;
-    const skipRetrieval = !hasAttachments && !opts.webSearch && isChitchat(opts.userPrompt);
     const rag = await generateGroundedAnswer({
       systemPrompt: `${liveSystemPrompt(opts.agent)}
 
@@ -609,27 +627,24 @@ export async function orchestrateA2ATurn(opts: {
 - Network: ${networkLabel()}
 `,
       userPrompt: opts.userPrompt,
-      dataStoreId: skipRetrieval ? undefined : opts.agent.vertexDataStoreId,
-      engineId: skipRetrieval ? undefined : opts.agent.vertexEngineId,
-      agentId: skipRetrieval ? undefined : opts.agent.id,
+      dataStoreId: opts.agent.vertexDataStoreId,
+      engineId: opts.agent.vertexEngineId,
+      agentId: opts.agent.id,
       geminiApiKey: config.geminiApiKey || undefined,
-      skipRetrieval,
+      runtimeMode: agentRuntimeMode(opts.agent),
       history: opts.history,
       attachments: opts.attachments,
       webSearch: opts.webSearch === true,
       answerSession: opts.answerSession,
     });
-    let answer = rag.answer;
     return {
-      answer,
+      answer: rag.answer,
       confidence: rag.confidence,
       citations: rag.citations,
       ragMode: rag.mode,
       peerHops: [],
       catalogUsed: false,
-      planningNote: skipRetrieval
-        ? 'direct Vertex chat (retrieval skipped for chitchat)'
-        : `AI App answer path mode=${rag.mode} backend=${rag.generationBackend || 'n/a'} engine=${rag.engineId || opts.agent.vertexEngineId || 'none'} tools=${(rag.toolsUsed || []).join(',') || 'none'}`,
+      planningNote: `AI App answer path mode=${rag.mode} backend=${rag.generationBackend || 'n/a'} engine=${rag.engineId || opts.agent.vertexEngineId || 'none'} tools=${(rag.toolsUsed || []).join(',') || 'none'}`,
       spendTier: 'free_self',
       session: rag.session,
       relatedQuestions: rag.relatedQuestions,
@@ -651,6 +666,7 @@ export async function orchestrateA2ATurn(opts: {
     engineId: opts.agent.vertexEngineId,
     agentId: opts.agent.id,
     geminiApiKey: config.geminiApiKey || undefined,
+      runtimeMode: agentRuntimeMode(opts.agent),
   });
 
   if (isSelfSufficient(selfRag, opts.userPrompt)) {
@@ -767,6 +783,7 @@ export async function orchestrateA2ATurn(opts: {
     engineId: opts.agent.vertexEngineId,
     agentId: opts.agent.id,
     geminiApiKey: config.geminiApiKey || undefined,
+      runtimeMode: agentRuntimeMode(opts.agent),
   });
 
   let answer = rag.answer;
@@ -800,6 +817,7 @@ export async function orchestrateA2ATurn(opts: {
       engineId: opts.agent.vertexEngineId,
       agentId: opts.agent.id,
       geminiApiKey: config.geminiApiKey || undefined,
+      runtimeMode: agentRuntimeMode(opts.agent),
     });
     if (solo.answer && !looksUncertain(solo.answer)) {
       answer = solo.answer;

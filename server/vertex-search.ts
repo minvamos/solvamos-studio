@@ -330,7 +330,7 @@ export type AiApplicationCreateResult = {
   sourceNote?: string;
 };
 
-/** Always create AI Applications data store + app(engine) for the chosen types. */
+/** Create Data Store (+ Engine/app unless skipEngine / autonomous). */
 export async function createAiApplicationBundle(opts: {
   displayName: string;
   appType?: string;
@@ -338,6 +338,9 @@ export async function createAiApplicationBundle(opts: {
   driveFolderId?: string;
   websiteUri?: string;
   gcsUri?: string;
+  /** When true (autonomous mode), provision Data Store only — no Answer Engine. */
+  skipEngine?: boolean;
+  runtimeMode?: 'specialized' | 'autonomous' | string;
 }): Promise<AiApplicationCreateResult> {
   // Website URL sources MUST use PUBLIC_WEBSITE — otherwise targetSites never attach
   // and answers fall back to bare Gemini against an empty CONTENT_REQUIRED store.
@@ -350,6 +353,7 @@ export async function createAiApplicationBundle(opts: {
   const project = projectId();
   const hint =
     opts.driveFolderId || opts.websiteUri || opts.gcsUri || appMeta.id || 'app';
+  const skipEngine = opts.skipEngine === true || opts.runtimeMode === 'autonomous';
 
   if (!project) {
     return {
@@ -374,6 +378,15 @@ export async function createAiApplicationBundle(opts: {
         dataSourceType: sourceMeta.id,
         status: 'error',
         message: `Lab VERTEX_DATA_STORE_ID=${configured} not found`,
+      };
+    }
+    if (skipEngine) {
+      return {
+        dataStoreId: configured,
+        appType: appMeta.id,
+        dataSourceType: sourceMeta.id,
+        status: 'existing',
+        message: `Lab shared store ${configured} (datastore-only / autonomous)`,
       };
     }
     // Lab still needs an engine/app bound to the shared store when missing.
@@ -433,12 +446,22 @@ export async function createAiApplicationBundle(opts: {
   };
 
   if (await getDataStore(dataStoreId).catch(() => false)) {
+    const sourceNote = await sourceNotesFor();
+    if (skipEngine) {
+      return {
+        dataStoreId,
+        appType: appMeta.id,
+        dataSourceType: sourceMeta.id,
+        status: 'existing',
+        message: 'Data store already exists (datastore-only / autonomous)',
+        sourceNote,
+      };
+    }
     const eng = await ensureEngine({
       dataStoreId,
       displayName: opts.displayName,
       appType: appMeta.id,
     });
-    const sourceNote = await sourceNotesFor();
     return {
       dataStoreId,
       engineId: eng.engineId,
@@ -469,12 +492,22 @@ export async function createAiApplicationBundle(opts: {
 
   if (!res.ok) {
     if (res.status === 409 || /already exists/i.test(JSON.stringify(json))) {
+      const sourceNote = await sourceNotesFor();
+      if (skipEngine) {
+        return {
+          dataStoreId,
+          appType: appMeta.id,
+          dataSourceType: sourceMeta.id,
+          status: 'existing',
+          message: 'Data store already exists (datastore-only / autonomous)',
+          sourceNote,
+        };
+      }
       const eng = await ensureEngine({
         dataStoreId,
         displayName: opts.displayName,
         appType: appMeta.id,
       });
-      const sourceNote = await sourceNotesFor();
       return {
         dataStoreId,
         engineId: eng.engineId,
@@ -525,13 +558,25 @@ export async function createAiApplicationBundle(opts: {
     await new Promise((r) => setTimeout(r, 2000));
   }
 
+  const sourceNote = await sourceNotesFor();
+
+  if (skipEngine) {
+    return {
+      dataStoreId,
+      appType: appMeta.id,
+      dataSourceType: sourceMeta.id,
+      status: 'created',
+      message: `Created Data Store ${dataStoreId} (autonomous / no Answer Engine) in ${location()}`,
+      operation: json.name,
+      sourceNote,
+    };
+  }
+
   const eng = await ensureEngine({
     dataStoreId,
     displayName: opts.displayName,
     appType: appMeta.id,
   });
-
-  const sourceNote = await sourceNotesFor();
 
   return {
     dataStoreId,

@@ -1,21 +1,20 @@
-# pay.sh gateway — localnet / devnet
+# pay.sh gateway — Devnet
 
-> 기준: 2026-07-25
+> 기준: 2026-07-26  
+> **Localnet/sandbox는 폐기.** 결제는 Solana Devnet USDC + pay-gateway만 사용한다.  
 > 유료 public invoke는 항상 pay-gateway를 통한다. Studio origin의 `X-PAYMENT-PROOF`는 상업 호출 경로가 아니다.
 
 ## 모드
 
 | 모드 | `PAYMENT_NETWORK` | gateway 실행 | 자산 |
 |---|---|---|---|
-| Localnet | `localnet` (`sandbox` 별칭) | `pay --sandbox server start pay/solvamos-provider.yml` | Surfpool, 실돈 없음 |
-| Devnet | `devnet` | `pay server start pay/solvamos-provider.devnet.yml` | Devnet USDC 테스트 토큰 |
+| Devnet | `devnet` (기본) | `pay server start pay/solvamos-provider.devnet.yml` | Devnet USDC 테스트 토큰 |
 
-메인넷은 사용하지 않습니다.
+메인넷·로컬넷은 사용하지 않습니다. `PAYMENT_NETWORK=localnet|sandbox`는 부팅 시 Devnet으로 강제됩니다.
 
-로컬 Lab에서는 `PAY_GATEWAY_MANAGED=true`가 기본이다. Studio가 pay.sh 자식 프로세스 하나를 소유하고 같은 `:1402`에서 선택 모드로 실행한다.
+로컬 Lab에서는 `PAY_GATEWAY_MANAGED=true`가 기본이다. Studio가 Devnet pay.sh 자식 프로세스 하나를 `:1402`에서 실행한다.
 
 - Studio 서버는 재시작되지 않는다.
-- 전환 중 요청은 일시 실패할 수 있다.
 - Cloud Run production에서는 managed child process가 비활성이다.
 
 ## 1회 설치

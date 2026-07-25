@@ -127,6 +127,10 @@ model Agent {
   aiAppType           String?  @default("search_docs")
   /// Data source: none | google_drive | website_url | cloud_storage | api_import | vertex_studio
   dataSourceType      String?  @default("none")
+  /// specialized = AI Applications Answer API; autonomous = Vertex Gemini + Data Store RAG
+  runtimeMode         String?  @default("specialized")
+  /// Free-form instructions appended to compiled system prompt
+  customInstructions  String?  @db.Text
   websiteUri          String?
   gcsUri              String?
   secretManagerPath   String?

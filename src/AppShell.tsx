@@ -27,8 +27,6 @@ type Props = {
   children: ReactNode;
   onLogout?: () => void;
   paymentNetwork?: string;
-  onPaymentNetworkChange?: (network: 'localnet' | 'devnet') => void;
-  paymentSwitchBusy?: boolean;
 };
 
 const NAV: { id: AppTab; label: string; icon: typeof Bot }[] = [
@@ -51,8 +49,6 @@ export default function AppShell({
   children,
   onLogout,
   paymentNetwork,
-  onPaymentNetworkChange,
-  paymentSwitchBusy,
 }: Props) {
   return (
     <div className="bg-background text-on-surface antialiased min-h-screen flex font-sans overflow-x-hidden">
@@ -67,44 +63,17 @@ export default function AppShell({
               </p>
             </div>
           </div>
-          {onPaymentNetworkChange && (
-            <div className="mt-3 p-2 rounded-lg bg-surface-container border border-outline-variant/20">
-              <p className="text-[10px] font-semibold text-on-surface-variant uppercase tracking-wider mb-2 px-1">
-                개발자 · 결제 테스트
-              </p>
-              <div className="flex gap-1">
-                <button
-                  type="button"
-                  disabled={paymentSwitchBusy}
-                  onClick={() => onPaymentNetworkChange('localnet')}
-                  className={
-                    paymentNetwork === 'localnet' || paymentNetwork === 'sandbox'
-                      ? 'flex-1 py-1.5 rounded-md text-xs font-semibold bg-solana-green/20 text-solana-green border border-solana-green/40'
-                      : 'flex-1 py-1.5 rounded-md text-xs font-medium text-on-surface-variant hover:bg-surface-container-highest'
-                  }
-                >
-                  Localnet
-                </button>
-                <button
-                  type="button"
-                  disabled={paymentSwitchBusy}
-                  onClick={() => onPaymentNetworkChange('devnet')}
-                  className={
-                    paymentNetwork === 'devnet'
-                      ? 'flex-1 py-1.5 rounded-md text-xs font-semibold bg-google-blue/20 text-google-blue border border-google-blue/40'
-                      : 'flex-1 py-1.5 rounded-md text-xs font-medium text-on-surface-variant hover:bg-surface-container-highest'
-                  }
-                >
-                  Devnet
-                </button>
-              </div>
-              <p className="text-[10px] text-outline mt-2 px-1 leading-relaxed">
-                {paymentNetwork === 'devnet'
-                  ? 'pay.sh → Devnet 온체인 USDC (메인넷 없음). 클릭 시 자동 전환'
-                  : 'pay.sh --sandbox (Surfpool). 실돈 없음. 클릭 시 자동 전환'}
-              </p>
-            </div>
-          )}
+          <div className="mt-3 p-2 rounded-lg bg-surface-container border border-outline-variant/20">
+            <p className="text-[10px] font-semibold text-on-surface-variant uppercase tracking-wider mb-1 px-1">
+              결제 네트워크
+            </p>
+            <p className="text-xs font-semibold text-google-blue px-1">
+              {paymentNetwork || 'devnet'} · Solana Devnet USDC
+            </p>
+            <p className="text-[10px] text-outline mt-1 px-1 leading-relaxed">
+              Localnet/sandbox는 폐기되었습니다. pay-gateway → Devnet 온체인만 사용합니다.
+            </p>
+          </div>
         </div>
 
         <div className="flex flex-col gap-1 flex-grow">

@@ -101,16 +101,21 @@ export default function AgentTestChat({
           </div>
           <div className="flex items-center gap-3">
             {setEnableA2A ? (
-              <label className="flex items-center gap-2 text-xs text-on-surface-variant cursor-pointer select-none">
+              <label
+                className="flex items-center gap-2 text-xs text-on-surface-variant cursor-pointer select-none"
+                title="끄면 내 RAG만. 켜면 카탈로그 피어 호출 — 유료 피어는 agent vault USDC 차감"
+              >
                 <input
                   type="checkbox"
                   checked={!!enableA2A}
                   onChange={(e) => setEnableA2A(e.target.checked)}
                   className="accent-google-blue"
                 />
-                A2A 피어 호출
+                A2A 피어
                 <span className="text-[10px] text-outline">
-                  (내 호출 무료 · 피어는 vault 과금 · {paymentNetwork || 'localnet'})
+                  {enableA2A
+                    ? `ON · 피어 과금 가능 (${paymentNetwork || 'devnet'})`
+                    : 'OFF · 내 에이전트만'}
                 </span>
               </label>
             ) : null}

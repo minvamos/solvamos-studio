@@ -20,6 +20,10 @@ export interface Agent {
   vertexEngineId?: string;
   aiAppType?: string;
   dataSourceType?: string;
+  /** specialized = AI Applications Answer; autonomous = Gemini + Data Store RAG */
+  runtimeMode?: 'specialized' | 'autonomous' | string;
+  /** Free-form instructions appended into systemPrompt */
+  customInstructions?: string;
   websiteUri?: string;
   gcsUri?: string;
   secretManagerPath?: string;
@@ -49,7 +53,11 @@ export interface PromptOptions {
   securityLevel: 'strict' | 'balanced' | 'permissive';
   /** Per-call USDC fee; 0 = free */
   fee?: number;
-  /** AI Applications app kind */
+  /** specialized = AI Applications; autonomous = Gemini + optional Data Store RAG */
+  runtimeMode?: 'specialized' | 'autonomous';
+  /** Free-form personality / policy instructions */
+  customInstructions?: string;
+  /** AI Applications app kind (specialized mode) */
   aiAppType?: 'search_docs' | 'chat_rag' | 'website' | 'structured' | 'media';
   /** Knowledge source for the app datastore */
   dataSourceType?:

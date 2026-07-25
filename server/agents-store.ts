@@ -25,6 +25,10 @@ export interface AgentRecord {
   vertexEngineId?: string;
   aiAppType?: string;
   dataSourceType?: string;
+  /** specialized = AI Applications Answer; autonomous = Gemini + Data Store RAG */
+  runtimeMode?: 'specialized' | 'autonomous' | string;
+  /** Free-form instructions appended into compiled systemPrompt */
+  customInstructions?: string;
   websiteUri?: string;
   gcsUri?: string;
   secretManagerPath?: string;
@@ -55,6 +59,8 @@ function toRecord(a: DbAgent): AgentRecord {
     vertexEngineId: (a as any).vertexEngineId || undefined,
     aiAppType: (a as any).aiAppType || undefined,
     dataSourceType: (a as any).dataSourceType || undefined,
+    runtimeMode: ((a as any).runtimeMode as string) || 'specialized',
+    customInstructions: (a as any).customInstructions || undefined,
     websiteUri: (a as any).websiteUri || undefined,
     gcsUri: (a as any).gcsUri || undefined,
     secretManagerPath: a.secretManagerPath || undefined,
@@ -187,6 +193,10 @@ export async function putAgent(
       : typeof agent.perCallPriceUsdc === 'number'
         ? agent.perCallPriceUsdc
         : 0.001;
+  const runtimeMode =
+    agent.runtimeMode === 'autonomous' || agent.runtimeMode === 'specialized'
+      ? agent.runtimeMode
+      : 'specialized';
 
   const saved = await prisma.agent.upsert({
     where: { id: agent.id },
@@ -206,6 +216,8 @@ export async function putAgent(
       vertexEngineId: agent.vertexEngineId || null,
       aiAppType: agent.aiAppType || 'search_docs',
       dataSourceType: agent.dataSourceType || 'none',
+      runtimeMode,
+      customInstructions: agent.customInstructions || null,
       websiteUri: agent.websiteUri || null,
       gcsUri: agent.gcsUri || null,
       secretManagerPath: agent.secretManagerPath || null,
@@ -227,6 +239,8 @@ export async function putAgent(
       vertexEngineId: agent.vertexEngineId || null,
       aiAppType: agent.aiAppType || 'search_docs',
       dataSourceType: agent.dataSourceType || 'none',
+      runtimeMode,
+      customInstructions: agent.customInstructions || null,
       websiteUri: agent.websiteUri || null,
       gcsUri: agent.gcsUri || null,
       secretManagerPath: agent.secretManagerPath || null,

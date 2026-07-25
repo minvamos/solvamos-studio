@@ -9,7 +9,8 @@ export function compileSystemPrompt(
   role: string,
   tone: string,
   securityLevel: string,
-  customRole?: string
+  customRole?: string,
+  customInstructions?: string
 ): string {
   let roleInstruction = '';
   let toneInstruction = '';
@@ -65,11 +66,21 @@ export function compileSystemPrompt(
       securityInstruction = `Be helpful and honest about uncertainty.`;
   }
 
+  const custom = String(customInstructions || '').trim();
+  const customBlock = custom
+    ? `
+
+[CUSTOM INSTRUCTIONS]
+${custom.slice(0, 8000)}
+[/CUSTOM INSTRUCTIONS]`
+    : '';
+
   return `
 [SOLVAMOS AGENT]
 ROLE: ${roleInstruction}
 TONE: ${toneInstruction}
 GROUNDING: ${securityInstruction}
+${customBlock}
 
 CAPABILITIES:
 - You are a full conversational agent (greetings, weather talk, explanations, brainstorming, product help).

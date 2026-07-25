@@ -8,11 +8,9 @@ dotenv.config();
 export type CustomerTier = 'starter' | 'professional' | 'enterprise';
 
 /**
- * Two product modes only (no mainnet):
- * - localnet → pay.sh `--sandbox` (Surfpool; no real funds)
- * - devnet → pay.sh without `--sandbox`, Solana Devnet on-chain USDC
- *
- * Legacy env `PAYMENT_NETWORK=sandbox` maps to `localnet`.
+ * Payment network: Devnet only at runtime (no mainnet).
+ * `localnet` remains in the type for legacy branches but is never selected —
+ * env/UI sandbox aliases are coerced to Devnet.
  */
 export type PaymentNetwork = 'localnet' | 'devnet';
 
@@ -23,8 +21,7 @@ function bool(name: string, fallback = false): boolean {
 }
 
 function resolvePaymentNetwork(): PaymentNetwork {
-  const raw = (process.env.PAYMENT_NETWORK || process.env.SOLANA_NETWORK || 'localnet').toLowerCase();
-  // sandbox / pay.sh aliases → localnet (official pay --sandbox)
+  const raw = (process.env.PAYMENT_NETWORK || process.env.SOLANA_NETWORK || 'devnet').toLowerCase();
   if (
     raw === 'sandbox' ||
     raw === 'paysh' ||
@@ -33,28 +30,27 @@ function resolvePaymentNetwork(): PaymentNetwork {
     raw === 'local' ||
     raw === 'localhost'
   ) {
-    return 'localnet';
+    console.warn(
+      `[payment] PAYMENT_NETWORK=${raw} is retired — forcing Devnet (Solana Devnet USDC)`
+    );
   }
   return 'devnet';
 }
 
-function defaultRpc(network: PaymentNetwork): string {
+function defaultRpc(_network: PaymentNetwork): string {
   if (process.env.SOLANA_RPC_URL) return process.env.SOLANA_RPC_URL;
-  if (network === 'localnet') return process.env.PAYSH_SANDBOX_RPC || 'https://402.surfnet.dev:8899';
   return 'https://api.devnet.solana.com';
 }
 
-function defaultUsdcMint(network: PaymentNetwork): string {
+function defaultUsdcMint(_network: PaymentNetwork): string {
   if (process.env.USDC_MINT) return process.env.USDC_MINT;
   // Devnet USDC (Circle faucet mint commonly used in demos)
-  if (network === 'devnet') return '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
-  // pay.sh sandbox / Surfpool — mint is managed by gateway; placeholder for UI
-  return process.env.USDC_MINT_LOCAL || 'LocalUsdC111111111111111111111111111111111';
+  return '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
 }
 
 const paymentNetwork = resolvePaymentNetwork();
 
-/** Mutable runtime payment settings (dev UI can switch localnet ↔ devnet). */
+/** Mutable runtime payment settings (Devnet only). */
 let runtimeNetwork: PaymentNetwork = paymentNetwork;
 let runtimeRpcOverride: string | undefined = process.env.SOLANA_RPC_URL || undefined;
 let runtimeMintOverride: string | undefined = process.env.USDC_MINT || undefined;
@@ -193,52 +189,38 @@ export const config = {
   allowLegacySandboxProof: bool('ALLOW_LEGACY_SANDBOX_PROOF', false),
 };
 
-/** pay.sh CLI should pass `--sandbox` (Surfpool). True only in localnet mode. */
+/** pay.sh CLI `--sandbox` — retired with localnet; always false. */
 export function payCliUsesSandbox(): boolean {
-  return config.paymentNetwork === 'localnet';
+  return false;
 }
 
 /** Which provider YAML + CLI flags match the current Studio payment mode. */
 export function payShModeInfo() {
-  if (config.paymentNetwork === 'devnet') {
-    return {
-      paymentNetwork: 'devnet' as const,
-      cliSandbox: false,
-      operatorNetwork: 'devnet' as const,
-      providerYaml: 'pay/solvamos-provider.devnet.yml',
-      gatewayStartHint:
-        'pay server start pay/solvamos-provider.devnet.yml --bind 127.0.0.1:1402  (no --sandbox)',
-      clientCallHint: 'pay fetch "http://127.0.0.1:1402/v1/agents/<ID>/invoke?prompt=hi"  (no --sandbox)',
-      funds: 'on-chain Devnet USDC (faucet / test tokens — not mainnet)',
-      label: 'Devnet · pay.sh on-chain',
-    };
-  }
   return {
-    paymentNetwork: 'localnet' as const,
-    cliSandbox: true,
-    operatorNetwork: 'localnet' as const,
-    providerYaml: 'pay/solvamos-provider.yml',
+    paymentNetwork: 'devnet' as const,
+    cliSandbox: false,
+    operatorNetwork: 'devnet' as const,
+    providerYaml: 'pay/solvamos-provider.devnet.yml',
     gatewayStartHint:
-      'pay --sandbox server start pay/solvamos-provider.yml --bind 127.0.0.1:1402',
-    clientCallHint:
-      'pay --sandbox fetch "http://127.0.0.1:1402/v1/agents/<ID>/invoke?prompt=hi"',
-    funds: 'pay.sh Surfpool sandbox — no real funds',
-    label: 'Localnet · pay.sh sandbox',
+      'pay server start pay/solvamos-provider.devnet.yml --bind 127.0.0.1:1402  (no --sandbox)',
+    clientCallHint: 'pay fetch "http://127.0.0.1:1402/v1/agents/<ID>/invoke?prompt=hi"  (no --sandbox)',
+    funds: 'on-chain Devnet USDC (faucet / test tokens — not mainnet)',
+    label: 'Devnet · pay.sh on-chain',
   };
 }
 
-/** Normalize UI/API aliases: sandbox → localnet. Mainnet rejected. */
+/** Normalize UI/API aliases. Localnet/sandbox retired; mainnet rejected. */
 export function normalizePaymentNetwork(raw: string): PaymentNetwork | null {
   const n = (raw || '').toLowerCase().trim();
   if (n === 'mainnet' || n === 'main') return null;
   if (n === 'sandbox' || n === 'paysh' || n === 'pay.sh' || n === 'localnet' || n === 'local') {
-    return 'localnet';
+    return null;
   }
-  if (n === 'devnet' || n === 'dev') return 'devnet';
+  if (n === 'devnet' || n === 'dev' || n === '') return 'devnet';
   return null;
 }
 
-/** Switch payment network at runtime (blocked in production). */
+/** Switch payment network at runtime (blocked in production; Devnet only). */
 export function setPaymentNetwork(
   network: string,
   opts?: { rpcUrl?: string; usdcMint?: string }
@@ -250,13 +232,12 @@ export function setPaymentNetwork(
   if (!normalized) {
     return {
       ok: false,
-      error: 'network must be localnet | devnet (sandbox→localnet). mainnet is not supported',
+      error: 'network must be Devnet. localnet/sandbox are retired; mainnet is not supported',
     };
   }
   runtimeNetwork = normalized;
   if (opts?.rpcUrl) runtimeRpcOverride = opts.rpcUrl;
-  else if (normalized === 'devnet') runtimeRpcOverride = process.env.SOLANA_RPC_URL || undefined;
-  else runtimeRpcOverride = process.env.PAYSH_SANDBOX_RPC || process.env.SOLANA_RPC_URL || undefined;
+  else runtimeRpcOverride = process.env.SOLANA_RPC_URL || undefined;
 
   if (opts?.usdcMint) runtimeMintOverride = opts.usdcMint;
   else runtimeMintOverride = process.env.USDC_MINT || undefined;
@@ -283,22 +264,15 @@ export function paymentNetworkInfo() {
     allowLegacySandboxProof: config.allowLegacySandboxProof,
     usePayGateway: config.usePayGateway,
     payGatewayUrl: config.payGatewayUrl,
-    /** Legacy field: localnet may still accept PAYSH_* if ALLOW_LEGACY_SANDBOX_PROOF */
-    sandboxProofsAllowed:
-      config.allowLegacySandboxProof &&
-      (config.paymentNetwork === 'localnet' || config.allowPaymentBypass),
+    /** Legacy sandbox proofs — only with explicit ALLOW_LEGACY_SANDBOX_PROOF (not for product path) */
+    sandboxProofsAllowed: config.allowLegacySandboxProof && config.allowPaymentBypass,
     paySh: mode,
     gatewayRestartRequired: !config.payGatewayManaged,
     modes: [
       {
-        id: 'localnet' as const,
-        label: 'Localnet',
-        description: 'pay.sh --sandbox (Surfpool). 실돈 없음. 예전 UI Sandbox와 동일.',
-      },
-      {
         id: 'devnet' as const,
         label: 'Devnet',
-        description: 'pay.sh → Solana Devnet 온체인 USDC (테스트 토큰). 메인넷 없음.',
+        description: 'pay.sh → Solana Devnet 온체인 USDC (테스트 토큰). 메인넷/로컬넷 없음.',
       },
     ],
   };
@@ -313,11 +287,7 @@ export function assertProductionSafety() {
   if (config.allowPaymentBypass) {
     problems.push('ALLOW_PAYMENT_BYPASS must be false in production');
   }
-  if (config.paymentNetwork === 'localnet') {
-    problems.push(
-      'PAYMENT_NETWORK=localnet (pay.sh sandbox) must not be used in production — use devnet'
-    );
-  }
+
   if (!config.gcpProject) {
     problems.push('GOOGLE_CLOUD_PROJECT is required in production');
   }
@@ -335,6 +305,5 @@ export function assertProductionSafety() {
 }
 
 export function networkLabel(): string {
-  if (config.paymentNetwork === 'localnet') return 'pay.sh-sandbox / localnet';
   return 'pay.sh → solana-devnet';
 }

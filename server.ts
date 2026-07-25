@@ -14,7 +14,6 @@ import { savePrivateKeyToGCP, createAgentVaultKeypair } from './server/vault.js'
 import {
   listSettlementsForUser,
   recordSettlement,
-  getSettlementBySignature,
 } from './server/settlements.js';
 import { verifyPayment } from './server/payment.js';
 import {
@@ -22,6 +21,10 @@ import {
   getWalletBalances,
   ensureUsdcAtaForOwner,
 } from './server/pay-payer.js';
+import {
+  parseGatewayReceiptHeaders,
+  settleVerifiedGatewaySale,
+} from './server/gateway-settle.js';
 import { parseCallChainHeader } from './server/spend-policy.js';
 import { payApiRouter } from './server/payapi.js';
 import { ensureAiApplication, destroyAiApplication, syncLocalCorpusToVertex } from './server/rag.js';
@@ -627,6 +630,8 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       fee,
       aiAppType,
       dataSourceType,
+      runtimeMode: bodyRuntimeMode,
+      customInstructions,
       websiteUri,
       gcsUri,
       localFiles,
@@ -639,6 +644,11 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       });
       return;
     }
+
+    const runtimeMode =
+      bodyRuntimeMode === 'autonomous' ? 'autonomous' : 'specialized';
+    const customInstructionsText =
+      typeof customInstructions === 'string' ? customInstructions.trim() : '';
 
     const me = await getMeFromRequest(req);
     const sid = me.sessionId || (await resolveSessionId(req));
@@ -684,7 +694,13 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
     const secretKeyBase64 = vaultKeys.secretKeyBase64;
     const vaultMode = 'agent_vault' as const;
 
-    const systemPrompt = compileSystemPrompt(role, tone, securityLevel, customRole);
+    const systemPrompt = compileSystemPrompt(
+      role,
+      tone,
+      securityLevel,
+      customRole,
+      customInstructionsText || undefined
+    );
 
     const parsedFeeEarly =
       typeof fee === 'number'
@@ -706,7 +722,7 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
 
     okStep(
       'tenant_bind',
-      `tenant=${tenantId} project=${config.gcpProject || 'n/a'} (shared GCP as customer)`
+      `tenant=${tenantId} project=${config.gcpProject || 'n/a'} mode=${runtimeMode}`
     );
 
     // Empty datastore is allowed — customers may create an agent first and add knowledge later.
@@ -785,6 +801,8 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       googleDriveFolderId: googleDriveFolderId ? String(googleDriveFolderId) : undefined,
       aiAppType: aiAppType || 'search_docs',
       dataSourceType: resolvedSource,
+      runtimeMode,
+      customInstructions: customInstructionsText || undefined,
       websiteUri: websiteUri ? String(websiteUri) : undefined,
       gcsUri: gcsUri ? String(gcsUri) : undefined,
       secretManagerPath: gcpStorage.path,
@@ -799,14 +817,15 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
     let indexingStatus: AgentRecord['status'] = 'ACTIVE';
     let driveIngest: { docs: number; message?: string } | null = null;
 
-    // Always provision AI Applications (data store + app/engine) — Drive is optional source
+    // Specialized: Engine + Data Store. Autonomous: Data Store only (Gemini + retrieve).
     // Website URL forces PUBLIC_WEBSITE app type so site/* indexing can attach.
     const provisionAppType =
       resolvedSource === 'website_url' || websiteUri ? 'website' : aiAppType || 'search_docs';
-    serverLog('info', 'create', 'Provisioning AI Applications bundle', {
+    serverLog('info', 'create', 'Provisioning AI Applications / Data Store', {
       agentId,
       provisionAppType,
       resolvedSource,
+      runtimeMode,
     });
     const aiApp = await ensureAiApplication({
       displayName: agentName || agentId,
@@ -815,11 +834,18 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       driveFolderId: googleDriveFolderId ? String(googleDriveFolderId) : undefined,
       websiteUri: websiteUri ? String(websiteUri) : undefined,
       gcsUri: gcsUri ? String(gcsUri) : undefined,
+      runtimeMode,
+      skipEngine: runtimeMode === 'autonomous',
     });
     vertexDataStoreId = aiApp.dataStoreId;
-    vertexEngineId = aiApp.engineId;
+    vertexEngineId = runtimeMode === 'autonomous' ? undefined : aiApp.engineId;
 
-    if (!aiApp.engineId || aiApp.status === 'error' || aiApp.status === 'pending') {
+    const provisionFailed =
+      aiApp.status === 'error' ||
+      aiApp.status === 'pending' ||
+      !aiApp.dataStoreId ||
+      (runtimeMode === 'specialized' && !aiApp.engineId);
+    if (provisionFailed) {
       if (aiApp.dataStoreId) {
         await destroyAiApplication({
           dataStoreId: aiApp.dataStoreId,
@@ -830,17 +856,25 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       }
       failCreate(
         'ai_applications',
-        `AI Applications 앱/엔진 생성 실패: ${
-          aiApp.message || 'Discovery Engine engine/app missing'
-        }. GOOGLE_CLOUD_PROJECT·ADC·discoveryengine.googleapis.com·Discovery Engine Admin IAM을 확인하세요.`
+        runtimeMode === 'autonomous'
+          ? `Data Store 생성 실패: ${
+              aiApp.message || 'Discovery Engine data store missing'
+            }. GOOGLE_CLOUD_PROJECT·ADC·discoveryengine.googleapis.com·Discovery Engine Admin IAM을 확인하세요.`
+          : `AI Applications 앱/엔진 생성 실패: ${
+              aiApp.message || 'Discovery Engine engine/app missing'
+            }. GOOGLE_CLOUD_PROJECT·ADC·discoveryengine.googleapis.com·Discovery Engine Admin IAM을 확인하세요.`
       );
     }
     indexingStatus = 'ACTIVE';
     okStep(
       'ai_applications',
-      `${aiApp.message || aiApp.dataStoreId} engine=${aiApp.engineId}${
-        aiApp.sourceNote ? ` · ${aiApp.sourceNote}` : ''
-      }`
+      runtimeMode === 'autonomous'
+        ? `${aiApp.message || aiApp.dataStoreId} (datastore-only)${
+            aiApp.sourceNote ? ` · ${aiApp.sourceNote}` : ''
+          }`
+        : `${aiApp.message || aiApp.dataStoreId} engine=${aiApp.engineId}${
+            aiApp.sourceNote ? ` · ${aiApp.sourceNote}` : ''
+          }`
     );
 
     if (needsDrive && sid) {
@@ -947,6 +981,8 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       vertexEngineId,
       aiAppType: aiApp.appType,
       dataSourceType: aiApp.dataSourceType,
+      runtimeMode,
+      customInstructions: customInstructionsText || undefined,
       websiteUri: websiteUri ? String(websiteUri) : undefined,
       gcsUri: gcsUri ? String(gcsUri) : undefined,
       secretManagerPath: gcpStorage.path,
@@ -1095,6 +1131,8 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
       description,
       aiAppType,
       dataSourceType,
+      runtimeMode: bodyRuntimeMode,
+      customInstructions,
       websiteUri,
       gcsUri,
       localFiles,
@@ -1105,6 +1143,18 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
     const nextSecurity = securityLevel || existing.securityLevel;
     const nextCustom =
       customRole !== undefined ? customRole || undefined : existing.customRole;
+    const nextRuntimeMode =
+      bodyRuntimeMode === 'autonomous' || bodyRuntimeMode === 'specialized'
+        ? bodyRuntimeMode
+        : existing.runtimeMode === 'autonomous'
+          ? 'autonomous'
+          : 'specialized';
+    const nextCustomInstructions =
+      customInstructions !== undefined
+        ? typeof customInstructions === 'string'
+          ? customInstructions.trim() || undefined
+          : undefined
+        : existing.customInstructions;
     const nextName = agentName !== undefined ? agentName : existing.agentName;
     const nextFee =
       typeof fee === 'number'
@@ -1154,12 +1204,13 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
     let driveIngest: { docs: number; message?: string } | null = null;
     let indexingStatus = nextStatus;
 
-    // Missing store (legacy agents) or Drive source change → ensure AI Applications bundle
+    // Missing store (legacy agents) or Drive source change → ensure store (+ engine if specialized)
     if (!vertexDataStoreId || (folderChanged && nextFolder) || hasLocalFiles) {
-      serverLog('info', 'update', 'Ensuring AI Applications bundle', {
+      serverLog('info', 'update', 'Ensuring AI Applications / Data Store', {
         agentId: existing.id,
         folderChanged,
         hasLocalFiles,
+        runtimeMode: nextRuntimeMode,
       });
       const aiApp = await ensureAiApplication({
         displayName: nextName || existing.id,
@@ -1168,18 +1219,53 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
         driveFolderId: nextFolder,
         websiteUri: nextWebsite,
         gcsUri: nextGcs,
+        runtimeMode: nextRuntimeMode,
+        skipEngine: nextRuntimeMode === 'autonomous',
       });
-      if (aiApp.status === 'error' || !aiApp.engineId) {
+      const updateProvisionFailed =
+        aiApp.status === 'error' ||
+        !aiApp.dataStoreId ||
+        (nextRuntimeMode === 'specialized' && !aiApp.engineId);
+      if (updateProvisionFailed) {
         serverLog('error', 'update', 'AI Applications ensure failed', {
           agentId: existing.id,
           message: aiApp.message,
         });
         throw new Error(
-          `[ai_applications] ${aiApp.message || 'AI Applications engine/app missing on update'}`
+          `[ai_applications] ${
+            aiApp.message ||
+            (nextRuntimeMode === 'autonomous'
+              ? 'Data Store missing on update'
+              : 'AI Applications engine/app missing on update')
+          }`
         );
       }
       vertexDataStoreId = aiApp.dataStoreId;
-      vertexEngineId = aiApp.engineId || vertexEngineId;
+      if (nextRuntimeMode === 'autonomous') {
+        vertexEngineId = undefined;
+      } else {
+        vertexEngineId = aiApp.engineId || vertexEngineId;
+      }
+    } else if (nextRuntimeMode === 'autonomous') {
+      // Switching to autonomous: keep store, drop engine requirement
+      vertexEngineId = undefined;
+    } else if (nextRuntimeMode === 'specialized' && vertexDataStoreId && !vertexEngineId) {
+      const aiApp = await ensureAiApplication({
+        displayName: nextName || existing.id,
+        appType: nextAiAppType,
+        dataSourceType: resolvedSource,
+        driveFolderId: nextFolder,
+        websiteUri: nextWebsite,
+        gcsUri: nextGcs,
+        runtimeMode: 'specialized',
+      });
+      if (aiApp.status === 'error' || !aiApp.engineId) {
+        throw new Error(
+          `[ai_applications] ${aiApp.message || 'Engine required for specialized mode'}`
+        );
+      }
+      vertexEngineId = aiApp.engineId;
+      vertexDataStoreId = aiApp.dataStoreId || vertexDataStoreId;
     }
 
     if (folderChanged && nextFolder) {
@@ -1273,7 +1359,13 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
       customRole: nextCustom,
       tone: nextTone,
       securityLevel: nextSecurity,
-      systemPrompt: compileSystemPrompt(nextRole, nextTone, nextSecurity, nextCustom),
+      systemPrompt: compileSystemPrompt(
+        nextRole,
+        nextTone,
+        nextSecurity,
+        nextCustom,
+        nextCustomInstructions
+      ),
       fee: nextFee,
       perCallPriceUsdc: nextFee,
       status: indexingStatus,
@@ -1282,6 +1374,8 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
       vertexEngineId,
       aiAppType: nextAiAppType,
       dataSourceType: resolvedSource,
+      runtimeMode: nextRuntimeMode,
+      customInstructions: nextCustomInstructions,
       websiteUri: nextWebsite,
       gcsUri: nextGcs,
       // Vault pubkey never changes on edit
@@ -1321,12 +1415,13 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
 });
 
 app.post('/api/agents/preview-prompt', (req, res) => {
-  const { role, tone, securityLevel, customRole } = req.body;
+  const { role, tone, securityLevel, customRole, customInstructions } = req.body;
   const systemPrompt = compileSystemPrompt(
     role || 'support',
     tone || 'professional',
     securityLevel || 'strict',
-    customRole
+    customRole,
+    typeof customInstructions === 'string' ? customInstructions : undefined
   );
   res.json({ systemPrompt });
 });
@@ -1506,7 +1601,7 @@ app.post('/api/payment/network', async (req, res) => {
   if (!normalized) {
     res.status(400).json({
       status: 'error',
-      message: 'network must be localnet | devnet. mainnet is not supported',
+      message: 'network must be Devnet. localnet/sandbox are retired; mainnet is not supported',
     });
     return;
   }
@@ -1799,28 +1894,6 @@ function secretsEqual(provided: string, expected: string): boolean {
   return crypto.timingSafeEqual(a, b);
 }
 
-/** Parse optional gateway payment receipt headers (idempotency + amount check). */
-function parseGatewayReceiptHeaders(req: express.Request): {
-  signature: string | null;
-  amountUsdc: number | null;
-  payer: string | null;
-  network: string | null;
-} {
-  const signature =
-    String(req.headers['x-payment-signature'] || req.headers['x-pay-receipt-id'] || '').trim() ||
-    null;
-  const amountRaw = String(req.headers['x-payment-amount'] || '').trim();
-  const amountUsdc = amountRaw ? Number(amountRaw) : null;
-  const payer = String(req.headers['x-payment-payer'] || '').trim() || null;
-  const network = String(req.headers['x-payment-network'] || '').trim() || null;
-  return {
-    signature,
-    amountUsdc: amountUsdc != null && Number.isFinite(amountUsdc) ? amountUsdc : null,
-    payer,
-    network,
-  };
-}
-
 /** pay.sh gateway upstream — no paywall (settlement already done by gateway). */
 function assertPayInternal(req: express.Request, res: express.Response): boolean {
   const secret = config.payInternalSecret;
@@ -1908,8 +1981,8 @@ async function handleInternalInvoke(req: express.Request, res: express.Response)
     );
     res.status(out.httpStatus).json(out.body);
 
-    // External gateway sale payout only when a receipt id is present (idempotent).
-    // Without receipt headers, invoke still runs but USDC is not moved from operator wallet.
+    // Native MPP already moved USDC on-chain. Ledger PaymentSettlement after
+    // verifyPayment (header signature or recent vault ATA scan).
     if (out.httpStatus === 200) {
       void settleExternalGatewaySale(agentId, receipt);
     }
@@ -1919,14 +1992,11 @@ async function handleInternalInvoke(req: express.Request, res: express.Response)
 }
 
 /**
- * Ledger a gateway-settled external sale (fire-and-forget, receipt-gated).
+ * Ledger a gateway-settled external sale (fire-and-forget).
  *
- * With pay.sh native MPP splits, the buyer TX already sends seller% → agent vault
- * and remainder → platform treasury. Studio must NOT run a second payout from the
- * operator wallet. We only upsert PaymentSettlement when receipt headers exist.
- *
- * Set GATEWAY_LEGACY_PAYOUT=true to restore the old operator→seller redistrib path
- * (only for gateways that still charge 100% into PAY_RECIPIENT).
+ * Native MPP: buyer TX already split seller% → vault + remainder → treasury.
+ * We verify on-chain (header sig or ATA scan) then upsert PaymentSettlement.
+ * No second operator→seller payout unless GATEWAY_LEGACY_PAYOUT=true.
  */
 async function settleExternalGatewaySale(
   agentId: string,
@@ -1942,54 +2012,31 @@ async function settleExternalGatewaySale(
     if (!agent) return;
     const fee = agentFeeUsdc(agent);
     if (!(fee > 0)) return;
-    if (config.paymentNetwork !== 'devnet') {
-      console.log('[gateway-settle] skipped — network is not devnet');
-      return;
-    }
 
-    const receiptSig = receipt.signature?.trim() || '';
-    if (!receiptSig) {
-      console.warn(
-        `[gateway-settle] skipped — missing X-Payment-Signature / X-Pay-Receipt-Id for agent=${agent.id}`
-      );
-      return;
-    }
-
-    if (receipt.amountUsdc == null || !(receipt.amountUsdc > 0)) {
-      console.warn(`[gateway-settle] skipped — missing X-Payment-Amount for agent=${agent.id}`);
-      return;
-    }
-    if (receipt.amountUsdc < fee * 0.98 || receipt.amountUsdc > fee * 1.02) {
-      console.warn(
-        `[gateway-settle] skipped — amount mismatch agent=${agent.id} charged=${receipt.amountUsdc} fee=${fee}`
-      );
-      return;
-    }
-
-    const existing = await getSettlementBySignature(receiptSig);
-    if (existing?.status === 'success') {
-      console.log(`[gateway-settle] idempotent skip — ${receiptSig.slice(0, 16)}…`);
-      return;
-    }
-
-    await recordSettlement({
-      signature: receiptSig,
-      agentId: agent.id,
-      recipientWallet: agent.publicKey,
-      amountUsdc: receipt.amountUsdc,
-      status: 'success',
-      network: receipt.network || config.paymentNetwork,
-      proofKind: 'gateway_receipt',
+    const settled = await settleVerifiedGatewaySale({
+      agent,
+      feeUsdc: fee,
+      hint: receipt,
+      payer: receipt.payer,
     });
-    serverLog('info', 'payment', `gateway native-split receipt agent=${agent.id} fee=${fee}`, {
-      receipt: receiptSig,
-      payer: receipt.payer || undefined,
-      sellerShareUsdc: fee * (1 - config.platformFeeShare),
-      platformShareUsdc: fee * config.platformFeeShare,
-    });
+    if (settled.recorded) {
+      serverLog('info', 'payment', `gateway ledger ok agent=${agent.id} fee=${fee}`, {
+        signature: settled.signature,
+        source: settled.source,
+        payer: receipt.payer || undefined,
+        sellerShareUsdc: fee * (1 - config.platformFeeShare),
+        platformShareUsdc: fee * config.platformFeeShare,
+      });
+    } else if (settled.skipped && settled.skipped !== 'idempotent') {
+      console.warn(
+        `[gateway-settle] ledger skipped agent=${agent.id}: ${settled.skipped}${
+          settled.error ? ` (${settled.error})` : ''
+        }`
+      );
+    }
 
     const legacyPayout = String(process.env.GATEWAY_LEGACY_PAYOUT || '').toLowerCase() === 'true';
-    if (!legacyPayout) {
+    if (!legacyPayout || !settled.signature) {
       return;
     }
 
@@ -2005,21 +2052,12 @@ async function settleExternalGatewaySale(
         proofKind: 'gateway_payout',
       });
       serverLog('info', 'payment', `gateway legacy payout agent=${agent.id} fee=${fee}`, {
-        receipt: receiptSig,
+        receipt: settled.signature,
         signature: payout.signature,
         sellerShareUsdc: payout.sellerShareUsdc,
         platformShareUsdc: payout.platformShareUsdc,
       });
     } else {
-      await recordSettlement({
-        signature: `GATEWAY_PAYOUT_FAIL_${receiptSig}`,
-        agentId: agent.id,
-        recipientWallet: agent.publicKey,
-        amountUsdc: fee,
-        status: 'failed',
-        network: config.paymentNetwork,
-        proofKind: 'gateway_payout',
-      });
       console.warn('[gateway-settle] legacy payout failed:', payout.error);
     }
   } catch (err: any) {

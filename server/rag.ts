@@ -362,6 +362,8 @@ export async function ensureAiApplication(opts: {
   driveFolderId?: string;
   websiteUri?: string;
   gcsUri?: string;
+  skipEngine?: boolean;
+  runtimeMode?: 'specialized' | 'autonomous' | string;
 }) {
   return createAiApplicationBundle(opts);
 }
@@ -399,9 +401,12 @@ export async function generateGroundedAnswer(opts: {
   attachments?: ChatAttachment[];
   /** Ground with Google Search via Vertex Gemini tool */
   webSearch?: boolean;
+  /** specialized = Engine Answer first; autonomous = Gemini + optional Data Store retrieve */
+  runtimeMode?: 'specialized' | 'autonomous' | string;
 }): Promise<RagResult> {
   const hasAttachments = (opts.attachments?.length || 0) > 0;
   const wantWeb = opts.webSearch === true;
+  const autonomous = opts.runtimeMode === 'autonomous';
 
   // Attachments / live web search → Vertex Gemini multimodal (+ optional Google Search tool)
   // still grounded with DataStore snippets when available.
@@ -453,8 +458,8 @@ export async function generateGroundedAnswer(opts: {
     };
   }
 
-  // 1) Preferred: AI Applications Engine Answer API (the app answers with RAG)
-  if (!opts.skipRetrieval && opts.engineId) {
+  // 1) Specialized: AI Applications Engine Answer API (the app answers with RAG)
+  if (!autonomous && !opts.skipRetrieval && opts.engineId) {
     const appAnswer = await answerFromAiApplication({
       engineId: opts.engineId,
       query: opts.userPrompt,
@@ -523,8 +528,8 @@ export async function generateGroundedAnswer(opts: {
     };
   }
 
-  // 2) No engine → for RAG agents this is a misconfiguration
-  if (!opts.skipRetrieval && opts.dataStoreId && !opts.engineId) {
+  // 2) Specialized: store without engine is a misconfiguration
+  if (!autonomous && !opts.skipRetrieval && opts.dataStoreId && !opts.engineId) {
     return {
       answer:
         '이 에이전트에 AI Applications Engine(앱)이 연결되어 있지 않습니다. 에이전트를 다시 저장/생성해 Engine을 프로비저닝하세요. (Data Store만 있고 App이 없으면 RAG 앱이 대답할 수 없습니다.)',
@@ -536,7 +541,7 @@ export async function generateGroundedAnswer(opts: {
     };
   }
 
-  // 3) Chitchat / no-RAG path — Vertex Gemini only
+  // 3) Autonomous (or no-engine chitchat): Vertex Gemini + optional Data Store retrieve
   let snippets: string[] = [];
   let citations: RagCitation[] = [];
   let mode: RagResult['mode'] = 'gemini_only';

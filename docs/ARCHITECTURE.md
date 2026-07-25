@@ -14,8 +14,8 @@ SolVamos는 사용자가 도메인 지식과 정책을 가진 AI 에이전트를
 - **pay-gateway**: 유료 호출의 유일한 상업 결제 진입점
 - **Cloud SQL PostgreSQL**: 플랫폼 메타데이터와 공개 listing의 영속 저장소
 - **Discovery Engine Datastore**: 에이전트 지식의 원본 검색 인덱스
-- **AI Applications Engine**: Datastore 위에서 grounded Answer API를 제공하는 앱
-- **Vertex Gemini**: 첨부·실시간 웹검색·fallback 생성
+- **AI Applications Engine**: Datastore 위에서 grounded Answer API를 제공하는 앱 (`runtimeMode=specialized`)
+- **Vertex Gemini**: 자율모드(`runtimeMode=autonomous`) 기본 응답기 + 첨부·웹검색·Data Store retrieve RAG · 특화모드 fallback
 - **Secret Manager/KMS**: 에이전트별 Solana vault private key 보관
 
 ## 2. 배포 토폴로지
@@ -87,15 +87,21 @@ Studio Prisma schema가 migration 소유자다. Catalog는 동일 DB의 `Catalog
 
 로컬 JSON corpus와 `RagDocument`는 ingest 및 장애 시 fallback/mirror다. 운영 지식의 최종 검색 대상은 Datastore다.
 
-### 3.3 앱/Engine
+### 3.3 앱/Engine과 runtimeMode
 
-`Agent.vertexEngineId`는 Datastore를 사용하는 AI Applications Engine을 가리킨다.
+`Agent.runtimeMode`가 응답 경로를 나눈다.
+
+- **specialized** (기본): `vertexEngineId` + Datastore. Engine Answer API가 우선 (`promptSpec.preamble` = systemPrompt)
+- **autonomous**: Datastore만 생성·적재. Engine 없음. 매 턴 Vertex Gemini + 필요 시 Datastore `:search` 스니펫 주입
+- `customInstructions`는 프리셋(role/tone/security) 컴파일 결과에 append되어 양쪽 모드의 동일 systemPrompt로 쓰인다
+
+`Agent.vertexEngineId`는 specialized에서 Datastore를 쓰는 AI Applications Engine을 가리킨다.
 
 - Search Engine은 `SEARCH_ADD_ON_LLM`으로 생성
 - Engine Answer API: `engines/{engineId}/servingConfigs/default_search:answer`
-- Engine이 없으면 RAG 에이전트는 정상 앱으로 간주하지 않으며 재프로비저닝 안내를 반환
+- specialized에서 Engine이 없으면 재프로비저닝 안내; autonomous에서는 Engine 없음을 정상으로 본다
 
-Datastore는 지식이고 Engine은 그 지식을 검색·생성 기능으로 제공하는 앱이다. 둘은 같은 리소스가 아니다.
+Datastore는 지식이고 Engine은 그 지식을 Answer API로 제공하는 앱이다. 둘은 같은 리소스가 아니다.
 
 ## 4. 에이전트 생성
 
@@ -165,7 +171,7 @@ flowchart TD
 
 ### 5.1 텍스트 RAG
 
-기본 텍스트 질문은 Engine Answer API를 우선한다.
+specialized 기본 텍스트 질문은 Engine Answer API를 우선한다. autonomous는 Engine을 건너뛰고 Gemini(+retrieve)만 사용한다.
 
 - citation 포함
 - 한국어 답변

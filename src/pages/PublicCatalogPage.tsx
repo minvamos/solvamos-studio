@@ -182,8 +182,8 @@ export default function PublicCatalogPage() {
                   </div>
                   {entry.feeUsdc > 0 && (
                     <p className="mt-3 text-xs text-outline">
-                      Devnet/Localnet USDC 온체인(또는 sandbox) 결제입니다. `pay fetch`가
-                      HTTP 402(x402/MPP) 결제 승인·재시도를 처리합니다.
+                      Devnet USDC 온체인 결제입니다. `pay fetch`가 HTTP 402(x402/MPP)
+                      결제 승인·재시도를 처리합니다.
                     </p>
                   )}
                 </article>
