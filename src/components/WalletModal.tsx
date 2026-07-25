@@ -24,25 +24,17 @@ type Props = {
   onRemove: (id: string) => Promise<void>;
 };
 
-type PhantomProvider = {
-  isPhantom?: boolean;
-  isConnected?: boolean;
-  publicKey?: { toString: () => string } | null;
-  connect: (opts?: { onlyIfTrusted?: boolean }) => Promise<{
-    publicKey: { toString: () => string };
-  }>;
-  disconnect?: () => Promise<void>;
-  request?: (args: {
-    method: string;
-    params?: Record<string, unknown>;
-  }) => Promise<{ publicKey?: { toString: () => string } } | unknown>;
-};
-
 declare global {
   interface Window {
-    solana?: PhantomProvider;
+    solana?: {
+      isPhantom?: boolean;
+      connect: () => Promise<{ publicKey: { toString: () => string } }>;
+    };
     phantom?: {
-      solana?: PhantomProvider;
+      solana?: {
+        isPhantom?: boolean;
+        connect: () => Promise<{ publicKey: { toString: () => string } }>;
+      };
     };
     solflare?: {
       connect: () => Promise<void>;
@@ -53,45 +45,6 @@ declare global {
 
 function short(addr: string) {
   return `${addr.slice(0, 4)}…${addr.slice(-4)}`;
-}
-
-function getPhantomProvider(): PhantomProvider | null {
-  const fromNamespace = window.phantom?.solana;
-  if (fromNamespace?.isPhantom) return fromNamespace;
-  if (window.solana?.isPhantom) return window.solana;
-  return null;
-}
-
-/** Phantom injects async after page load — wait briefly before giving up. */
-function waitForPhantom(timeoutMs = 2500): Promise<PhantomProvider | null> {
-  const existing = getPhantomProvider();
-  if (existing) return Promise.resolve(existing);
-  return new Promise((resolve) => {
-    const started = Date.now();
-    const onReady = () => {
-      const p = getPhantomProvider();
-      if (p) {
-        cleanup();
-        resolve(p);
-      }
-    };
-    const tick = window.setInterval(() => {
-      if (getPhantomProvider()) {
-        cleanup();
-        resolve(getPhantomProvider());
-        return;
-      }
-      if (Date.now() - started >= timeoutMs) {
-        cleanup();
-        resolve(null);
-      }
-    }, 120);
-    const cleanup = () => {
-      window.clearInterval(tick);
-      window.removeEventListener('phantom#initialized', onReady);
-    };
-    window.addEventListener('phantom#initialized', onReady);
-  });
 }
 
 export default function WalletModal({
@@ -122,91 +75,25 @@ export default function WalletModal({
     }
   };
 
-  const readProviderAddress = (provider: PhantomProvider): string => {
-    try {
-      return provider.publicKey?.toString?.() || '';
-    } catch {
-      return '';
-    }
-  };
-
-  /** Phantom sometimes throws "Unexpected error" with no popup — try several connect paths. */
-  const requestPhantomAddress = async (provider: PhantomProvider): Promise<string> => {
-    let addr = readProviderAddress(provider);
-    if (addr) return addr;
-
-    const attempts: Array<() => Promise<string>> = [
-      async () => {
-        const res = await provider.connect();
-        return res?.publicKey?.toString?.() || readProviderAddress(provider);
-      },
-      async () => {
-        const res = await provider.connect({ onlyIfTrusted: false });
-        return res?.publicKey?.toString?.() || readProviderAddress(provider);
-      },
-      async () => {
-        if (!provider.request) return '';
-        const res = (await provider.request({
-          method: 'connect',
-          params: { onlyIfTrusted: false },
-        })) as { publicKey?: { toString: () => string } } | undefined;
-        return res?.publicKey?.toString?.() || readProviderAddress(provider);
-      },
-    ];
-
-    let lastErr: unknown = null;
-    for (const attempt of attempts) {
-      try {
-        addr = (await attempt()) || '';
-        if (addr) return addr;
-      } catch (err) {
-        lastErr = err;
-        const msg = String((err as any)?.message || '');
-        const code = (err as any)?.code;
-        // User cancelled — stop retrying.
-        if (code === 4001 || /reject|denied|cancel/i.test(msg)) throw err;
-      }
-    }
-
-    // Stale session: disconnect then one more connect().
-    if (provider.disconnect) {
-      try {
-        await provider.disconnect();
-      } catch {
-        /* ignore */
-      }
-      await new Promise((r) => setTimeout(r, 250));
-      try {
-        const res = await provider.connect({ onlyIfTrusted: false });
-        addr = res?.publicKey?.toString?.() || readProviderAddress(provider);
-        if (addr) return addr;
-      } catch (err) {
-        lastErr = err;
-      }
-    }
-
-    if (lastErr) throw lastErr;
-    return '';
-  };
-
+  /** Restore the original single-call path that worked before retry/disconnect hardening. */
   const connectPhantom = async () => {
     setLocalError(null);
     setPhantomBusy(true);
     try {
-      const provider = await waitForPhantom();
+      const provider =
+        window.solana?.isPhantom
+          ? window.solana
+          : window.phantom?.solana?.isPhantom
+            ? window.phantom.solana
+            : null;
       if (!provider?.isPhantom) {
         setLocalError(
-          'Phantom을 찾지 못했습니다. 확장 프로그램을 설치·잠금 해제한 뒤 이 탭을 새로고침하거나, 아래 칸에 주소를 직접 입력하세요.'
+          'Phantom이 없습니다. https://phantom.app 설치 후 다시 시도하거나 주소를 직접 입력하세요.'
         );
         return;
       }
-      const addr = await requestPhantomAddress(provider);
-      if (!addr) {
-        setLocalError(
-          'Phantom 팝업이 열리지 않았습니다. 확장 아이콘을 눌러 잠금을 해제한 뒤, 주소창 팝업 차단을 허용하고 다시 시도하세요. 또는 아래 칸에 주소를 직접 붙여넣으세요.'
-        );
-        return;
-      }
+      const res = await provider.connect();
+      const addr = res.publicKey.toString();
       await onAdd(addr, 'Phantom', 'phantom');
     } catch (err: any) {
       const code = err?.code;
@@ -214,15 +101,9 @@ export default function WalletModal({
       if (code === 4001 || /reject|denied|cancel/i.test(msg)) {
         setLocalError('Phantom 연결이 취소되었습니다.');
       } else if (/login required|unauthorized|401/i.test(msg)) {
-        setLocalError('지갑 등록에는 Google 로그인이 필요합니다. 먼저 로그인한 뒤 다시 시도하세요.');
+        setLocalError('지갑 등록에는 로그인이 필요합니다. 먼저 로그인한 뒤 다시 시도하세요.');
       } else if (/invalid solana address/i.test(msg)) {
-        setLocalError(
-          '받은 주소가 유효하지 않습니다. Phantom 네트워크(Solana)를 확인한 뒤 다시 시도하세요.'
-        );
-      } else if (/unexpected error/i.test(msg)) {
-        setLocalError(
-          'Phantom이 팝업 없이 실패했습니다(Unexpected error). ① Phantom 아이콘 클릭해 잠금 해제 ② 다른 지갑 확장 잠시 끄기 ③ 이 사이트 팝업 허용 후 새로고침·재시도. 안 되면 아래 칸에 Solana 주소를 직접 등록하세요.'
-        );
+        setLocalError('받은 주소가 유효하지 않습니다. 주소를 직접 입력해 등록하세요.');
       } else {
         setLocalError(msg || 'Phantom 연결 실패');
       }
@@ -336,10 +217,6 @@ export default function WalletModal({
               <Link2 className="w-4 h-4" />
               {phantomBusy ? 'Phantom 연결 중…' : 'Phantom으로 연결'}
             </button>
-            <p className="text-[11px] text-outline leading-relaxed">
-              팝업이 안 뜨면 Phantom을 먼저 잠금 해제한 뒤 다시 누르거나, Phantom 설정에서 주소를 복사해 아래에
-              붙여넣으세요.
-            </p>
             <div className="flex flex-col gap-2">
               <input
                 value={label}
