@@ -43,8 +43,14 @@ fs.writeFileSync(
 );
 
 // Ensure a local Solana identity exists for pay server validation.
+// If an operator key is mounted (Secret Manager volume), copy it into place so
+// the pay server signs with the funded operator wallet.
 const idPath = path.join(process.env.HOME, '.config', 'solana', 'id.json');
-if (!fs.existsSync(idPath)) {
+const operatorKeyFile = process.env.PAY_OPERATOR_KEY_FILE || '';
+if (operatorKeyFile && fs.existsSync(operatorKeyFile)) {
+  fs.copyFileSync(operatorKeyFile, idPath);
+  console.log('[pay-gateway] installed mounted operator key ->', idPath);
+} else if (!fs.existsSync(idPath)) {
   // 64-byte secret key placeholder: pay/setup may overwrite; keep file present.
   const seed = crypto.randomBytes(32);
   // Minimal ed25519-looking 64-byte array (seed||pub) — pay setup prefers its own.
@@ -54,9 +60,15 @@ if (!fs.existsSync(idPath)) {
 }
 NODE
 
-# Prefetch / refresh pay identity when possible (ignore failures — server may still boot).
-npx --yes --package "@solana/pay@${PAY_PKG_VERSION}" pay setup --yes >/tmp/pay-setup.log 2>&1 \
-  || echo "[pay-gateway] pay setup skipped/failed (see /tmp/pay-setup.log)"
+if [ -n "${PAY_OPERATOR_KEY_FILE:-}" ] && [ -f "${PAY_OPERATOR_KEY_FILE:-}" ]; then
+  # Mounted operator key already installed above — do NOT run pay setup, it may
+  # replace the funded identity with a fresh (unfunded) one.
+  echo "[pay-gateway] operator key mounted; skipping pay setup"
+else
+  # Prefetch / refresh pay identity when possible (ignore failures — server may still boot).
+  npx --yes --package "@solana/pay@${PAY_PKG_VERSION}" pay setup --yes >/tmp/pay-setup.log 2>&1 \
+    || echo "[pay-gateway] pay setup skipped/failed (see /tmp/pay-setup.log)"
+fi
 
 echo "[pay-gateway] starting on 0.0.0.0:${PORT:-8080} -> origin ${PAY_ORIGIN_URL}"
 # shellcheck disable=SC2086

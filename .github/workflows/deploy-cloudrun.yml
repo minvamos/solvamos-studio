@@ -441,8 +441,9 @@ jobs:
             --min-instances=0 \
             --max=1 \
             --max-instances=1 \
-            --update-env-vars="PAY_ORIGIN_URL=${URL},PAY_GATEWAY_URL=${GATEWAY_URL},PAY_RECIPIENT=AoUNKE8uQ8y1FEtU6YSFCsopK9veP6jZ6EGNoULjdwva,SOLANA_RPC_URL=https://api.devnet.solana.com" \
-            --update-secrets="PAY_INTERNAL_SECRET=pay-internal-secret:latest"
+            --update-env-vars="PAY_ORIGIN_URL=${URL},PAY_GATEWAY_URL=${GATEWAY_URL},PAY_RECIPIENT=AoUNKE8uQ8y1FEtU6YSFCsopK9veP6jZ6EGNoULjdwva,SOLANA_RPC_URL=https://api.devnet.solana.com,PAYMENT_NETWORK=devnet,PAY_SANDBOX=0,PAY_OPERATOR_KEY_FILE=/secrets/pay-operator/id.json" \
+            --remove-env-vars="PAYSH_SANDBOX_RPC" \
+            --update-secrets="PAY_INTERNAL_SECRET=pay-internal-secret:latest,/secrets/pay-operator/id.json=pay-operator-key:latest"
 
           gcloud run services update "${SERVICE}" \
             --project="${PROJECT_ID}" \
