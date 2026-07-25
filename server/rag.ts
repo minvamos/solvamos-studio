@@ -131,8 +131,6 @@ export async function answerFromAiApplication(opts: {
       promptSpec: opts.preamble
         ? { preamble: opts.preamble.slice(0, 4000) }
         : undefined,
-      // Return corpus images/figures in answers when available (Engine multimodal)
-      multimodalSpec: { imageSource: 'ALL_AVAILABLE_SOURCES' },
     },
     searchSpec: {
       searchParams: {
