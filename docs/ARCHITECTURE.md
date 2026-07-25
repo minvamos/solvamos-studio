@@ -332,14 +332,15 @@ vault:
 - **부분 구현**: 모델/UI 또는 fallback은 있으나 운영 이벤트 source가 연결되지 않음
 - **계획**: config/스켈레톤만 있거나 production safety가 검증되지 않음
 
-세부 우선순위는 [ROADMAP.md](./ROADMAP.md), 사용자·운영 프로세스는 [PROCESSES.md](./PROCESSES.md)를 따른다.
+세부 우선순위는 [ROADMAP.md](./ROADMAP.md), 사용자·운영 프로세스는 [PROCESSES.md](./PROCESSES.md)를 따른다.  
+2026-07-25 코드베이스 감사(Critical/High 목록·결제 경로 판정)는 [PLATFORM_AUDIT.md](./PLATFORM_AUDIT.md)를 본다.
 
 ## 13. 현재 코드에서 확인된 구조적 주의사항
 
 ### Authorization
 
-- `GET /api/agents`는 인증 user ID를 얻지 못하면 전체 Agent 목록으로 fallback한다.
-- tenant 관련 일부 route는 shared Lab 전제를 가지고 있어 모든 read/mutation에 product-grade tenant authorization이 일관 적용된 상태가 아니다.
+- `GET /api/agents`는 비로그인 시 빈 목록을 반환해야 한다(전체 Agent fallback 금지). Critical 패치 이후 정책은 소유권 스코프.
+- tenant/agent mutation은 owner/admin 또는 `userCanManageAgent`를 요구한다. 상세 갭·이력은 [PLATFORM_AUDIT.md](./PLATFORM_AUDIT.md).
 - `requireGoogleSession`이라는 이름의 middleware는 실제로는 일반 로그인만 요구하고, Drive token은 ingest 시점에 별도 확인한다.
 
 ### Shared Datastore Lab flag

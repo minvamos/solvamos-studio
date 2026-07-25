@@ -49,6 +49,50 @@ function mapRow(row: {
   };
 }
 
+/** Durable replay / idempotency check — true if signature already exists. */
+export async function settlementSignatureExists(signature: string): Promise<boolean> {
+  const key = signature.trim();
+  if (!key) return false;
+  try {
+    const row = await prisma.paymentSettlement.findUnique({
+      where: { signature: key },
+      select: { signature: true },
+    });
+    return !!row;
+  } catch (err: any) {
+    const msg = String(err?.message || err);
+    if (
+      err?.code === 'P2021' ||
+      /PaymentSettlement.*does not exist|relation .*PaymentSettlement.*does not exist/i.test(msg)
+    ) {
+      return false;
+    }
+    throw err;
+  }
+}
+
+export async function getSettlementBySignature(
+  signature: string
+): Promise<{ signature: string; status: string; proofKind: string | null } | null> {
+  const key = signature.trim();
+  if (!key) return null;
+  try {
+    return await prisma.paymentSettlement.findUnique({
+      where: { signature: key },
+      select: { signature: true, status: true, proofKind: true },
+    });
+  } catch (err: any) {
+    const msg = String(err?.message || err);
+    if (
+      err?.code === 'P2021' ||
+      /PaymentSettlement.*does not exist|relation .*PaymentSettlement.*does not exist/i.test(msg)
+    ) {
+      return null;
+    }
+    throw err;
+  }
+}
+
 export async function recordSettlement(input: {
   signature: string;
   agentId: string;

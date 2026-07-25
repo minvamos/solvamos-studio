@@ -106,3 +106,15 @@ export async function projectIdForTenant(tenantId: string): Promise<string | und
   const t = await getTenant(tenantId);
   return t?.projectId;
 }
+
+/** True when user is owner or admin of the tenant. */
+export async function userIsTenantAdmin(
+  userId: string | undefined | null,
+  tenantId: string
+): Promise<boolean> {
+  if (!userId || !tenantId) return false;
+  const membership = await prisma.tenantMember.findUnique({
+    where: { tenantId_userId: { tenantId, userId } },
+  });
+  return !!membership && ['owner', 'admin'].includes(membership.role);
+}

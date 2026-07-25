@@ -5,12 +5,17 @@
 
 import express from 'express';
 import path from 'path';
+import crypto from 'crypto';
 import { Keypair } from '@solana/web3.js';
 import dotenv from 'dotenv';
 
 import { compileSystemPrompt } from './server/prompt.js';
 import { savePrivateKeyToGCP, createAgentVaultKeypair } from './server/vault.js';
-import { listSettlementsForUser, recordSettlement } from './server/settlements.js';
+import {
+  listSettlementsForUser,
+  recordSettlement,
+  getSettlementBySignature,
+} from './server/settlements.js';
 import { verifyPayment } from './server/payment.js';
 import { payoutGatewaySale, getWalletBalances } from './server/pay-payer.js';
 import { parseCallChainHeader } from './server/spend-policy.js';
@@ -20,7 +25,7 @@ import { aiApplicationsCatalog, getDataSourceType } from './server/ai-applicatio
 import { ingestDriveSourceForAgent } from './server/drive-ingest.js';
 import { ingestLocalUploadsForAgent } from './server/local-ingest.js';
 import { registerDriveAuthRoutes, isDriveAuthAvailable, isOAuthClientConfigured, requireGoogleSession, resolveSessionId, getSession } from './server/drive-oauth.js';
-import { loadTenants, listTenants, getTenant, upsertTenant } from './server/tenants.js';
+import { loadTenants, listTenants, getTenant, upsertTenant, userIsTenantAdmin } from './server/tenants.js';
 import { provisionCustomerProject, plannedProjectId, buildProvisionPlan, resolveTenancyMode } from './server/provision.js';
 import { provisionTenantCloudRun } from './server/cloudrun-provision.js';
 import {
@@ -159,8 +164,8 @@ loadPayShCatalog();
 registerPlatformAuthRoutes(app);
 registerDriveAuthRoutes(app);
 
-/** Developer: ring-buffer server logs — open for now (no auth). */
-app.get('/api/dev/logs', (req, res) => {
+/** Developer: ring-buffer server logs — login required (may contain secrets/paths). */
+app.get('/api/dev/logs', requireGoogleSession, (req, res) => {
   const level = String(req.query.level || 'all') as any;
   const tag = req.query.tag ? String(req.query.tag) : undefined;
   const q = req.query.q ? String(req.query.q) : undefined;
@@ -172,7 +177,7 @@ app.get('/api/dev/logs', (req, res) => {
   });
 });
 
-app.delete('/api/dev/logs', (_req, res) => {
+app.delete('/api/dev/logs', requireGoogleSession, (_req, res) => {
   const cleared = clearDevLogs();
   res.json({ status: 'success', cleared });
 });
@@ -366,24 +371,47 @@ app.get('/api/tenants/:id', async (req, res) => {
   res.json({ status: 'success', tenant: t });
 });
 
-app.patch('/api/tenants/:id', async (req, res) => {
+async function requireTenantAdminFromReq(
+  req: express.Request,
+  res: express.Response,
+  tenantId: string
+): Promise<boolean> {
+  const me = await getMeFromRequest(req);
+  if (!me.connected || !me.user?.id) {
+    res.status(401).json({ status: 'error', message: '로그인이 필요합니다.' });
+    return false;
+  }
+  const ok = await userIsTenantAdmin(me.user.id, tenantId);
+  if (!ok) {
+    res.status(403).json({
+      status: 'error',
+      message: '이 테넌트를 변경할 권한이 없습니다. (owner/admin 필요)',
+    });
+    return false;
+  }
+  return true;
+}
+
+app.patch('/api/tenants/:id', requireGoogleSession, async (req, res) => {
   const existing = await getTenant(req.params.id);
   if (!existing) {
     res.status(404).json({ status: 'error', message: 'Tenant not found' });
     return;
   }
+  if (!(await requireTenantAdminFromReq(req, res, existing.tenantId))) return;
   const updated = await upsertTenant({ ...existing, ...req.body, tenantId: existing.tenantId });
   res.json({ status: 'success', tenant: updated });
 });
 
 /** Redeploy / create tenant Cloud Run in shared project (Lab). */
-app.post('/api/tenants/:id/cloud-run', async (req, res) => {
+app.post('/api/tenants/:id/cloud-run', requireGoogleSession, async (req, res) => {
   try {
     const existing = await getTenant(req.params.id);
     if (!existing) {
       res.status(404).json({ status: 'error', message: 'Tenant not found' });
       return;
     }
+    if (!(await requireTenantAdminFromReq(req, res, existing.tenantId))) return;
     const cloudRun = await provisionTenantCloudRun({
       tenantId: existing.tenantId,
       displayName: existing.displayName,
@@ -985,19 +1013,14 @@ app.delete('/api/agents/:id', requireGoogleSession, async (req, res) => {
     }
 
     const me = await getMeFromRequest(req);
-    const allowed = await userCanManageAgent(me.user?.id, agentId);
-    // Allow delete when ownership row is missing (legacy) only for the signed-in user
-    // who can already list the agent via session — still require a user id.
     if (!me.user?.id) {
       res.status(401).json({ status: 'error', message: '로그인이 필요합니다.' });
       return;
     }
+    const allowed = await userCanManageAgent(me.user.id, agentId);
     if (!allowed) {
-      const ownershipCount = await prisma.agentOwnership.count({ where: { agentId } });
-      if (ownershipCount > 0) {
-        res.status(403).json({ status: 'error', message: '이 에이전트를 삭제할 권한이 없습니다.' });
-        return;
-      }
+      res.status(403).json({ status: 'error', message: '이 에이전트를 삭제할 권한이 없습니다.' });
+      return;
     }
 
     const result = await destroyAgent(agentId);
@@ -1016,6 +1039,16 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
     const existing = await getAgent(req.params.id);
     if (!existing) {
       res.status(404).json({ status: 'error', message: 'Agent not found' });
+      return;
+    }
+
+    const me = await getMeFromRequest(req);
+    if (!me.user?.id) {
+      res.status(401).json({ status: 'error', message: '로그인이 필요합니다.' });
+      return;
+    }
+    if (!(await userCanManageAgent(me.user.id, existing.id))) {
+      res.status(403).json({ status: 'error', message: '이 에이전트를 수정할 권한이 없습니다.' });
       return;
     }
 
@@ -1471,11 +1504,23 @@ app.post('/api/payment/network', async (req, res) => {
   });
 });
 
-app.post('/api/catalog/:agentId/register', async (req, res) => {
+async function handleCatalogRegister(req: express.Request, res: express.Response) {
   try {
     const agent = await getAgent(req.params.agentId);
     if (!agent) {
       res.status(404).json({ status: 'error', message: 'Agent not found' });
+      return;
+    }
+    const me = await getMeFromRequest(req);
+    if (!me.user?.id) {
+      res.status(401).json({ status: 'error', message: '로그인이 필요합니다.' });
+      return;
+    }
+    if (!(await userCanManageAgent(me.user.id, agent.id))) {
+      res.status(403).json({
+        status: 'error',
+        message: '이 에이전트를 Catalog에 등록할 권한이 없습니다.',
+      });
       return;
     }
     const listing = await registerAgentOnPayShCatalog(agent, {
@@ -1491,29 +1536,11 @@ app.post('/api/catalog/:agentId/register', async (req, res) => {
   } catch (err: any) {
     res.status(500).json({ status: 'error', message: err.message });
   }
-});
+}
+
+app.post('/api/catalog/:agentId/register', requireGoogleSession, handleCatalogRegister);
 /** @deprecated alias */
-app.post('/api/paysh/catalog/:agentId/register', async (req, res) => {
-  try {
-    const agent = await getAgent(req.params.agentId);
-    if (!agent) {
-      res.status(404).json({ status: 'error', message: 'Agent not found' });
-      return;
-    }
-    const listing = await registerAgentOnPayShCatalog(agent, {
-      baseUrl: publicBaseFromReq(req),
-      description: req.body?.description,
-    });
-    res.json({
-      status: 'success',
-      listing: enrichCatalogListing(listing, publicBaseFromReq(req)),
-      publishMode: getCatalogPublishMode(),
-      catalog: catalogPublishInfo(),
-    });
-  } catch (err: any) {
-    res.status(500).json({ status: 'error', message: err.message });
-  }
-});
+app.post('/api/paysh/catalog/:agentId/register', requireGoogleSession, handleCatalogRegister);
 
 app.post('/api/agents/:id/invoke', async (req, res) => {
   try {
@@ -1721,15 +1748,43 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
   }
 });
 
+function secretsEqual(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+/** Parse optional gateway payment receipt headers (idempotency + amount check). */
+function parseGatewayReceiptHeaders(req: express.Request): {
+  signature: string | null;
+  amountUsdc: number | null;
+  payer: string | null;
+  network: string | null;
+} {
+  const signature =
+    String(req.headers['x-payment-signature'] || req.headers['x-pay-receipt-id'] || '').trim() ||
+    null;
+  const amountRaw = String(req.headers['x-payment-amount'] || '').trim();
+  const amountUsdc = amountRaw ? Number(amountRaw) : null;
+  const payer = String(req.headers['x-payment-payer'] || '').trim() || null;
+  const network = String(req.headers['x-payment-network'] || '').trim() || null;
+  return {
+    signature,
+    amountUsdc: amountUsdc != null && Number.isFinite(amountUsdc) ? amountUsdc : null,
+    payer,
+    network,
+  };
+}
+
 /** pay.sh gateway upstream — no paywall (settlement already done by gateway). */
 function assertPayInternal(req: express.Request, res: express.Response): boolean {
   const secret = config.payInternalSecret;
-  const provided =
-    (req.headers['x-pay-internal-secret'] as string) ||
-    (typeof req.query.pay_internal === 'string' ? req.query.pay_internal : '');
+  // Header only — never accept ?pay_internal= (logs / Referer leakage).
+  const provided = String(req.headers['x-pay-internal-secret'] || '');
 
   if (secret) {
-    if (provided !== secret) {
+    if (!secretsEqual(provided, secret)) {
       res.status(403).json({
         status: 'error',
         message: 'Forbidden — set PAY_INTERNAL_SECRET and configure gateway routing.auth',
@@ -1791,6 +1846,7 @@ async function handleInternalInvoke(req: express.Request, res: express.Response)
             dataBase64: String(a.dataBase64).replace(/^data:[^;]+;base64,/, ''),
           }))
       : [];
+    const receipt = parseGatewayReceiptHeaders(req);
     const out = await runAgentInvoke(
       {
         agentId,
@@ -1808,27 +1864,91 @@ async function handleInternalInvoke(req: express.Request, res: express.Response)
     );
     res.status(out.httpStatus).json(out.body);
 
-    // External gateway sale: forward seller share → agent vault, platform share
-    // → treasury, and record the payout in the settlements ledger (async).
+    // External gateway sale payout only when a receipt id is present (idempotent).
+    // Without receipt headers, invoke still runs but USDC is not moved from operator wallet.
     if (out.httpStatus === 200) {
-      void settleExternalGatewaySale(agentId);
+      void settleExternalGatewaySale(agentId, receipt);
     }
   } catch (err: any) {
     res.status(500).json({ status: 'error', message: err.message });
   }
 }
 
-/** Payout + ledger for a gateway-settled external sale (fire-and-forget). */
-async function settleExternalGatewaySale(agentId: string) {
+/**
+ * Ledger a gateway-settled external sale (fire-and-forget, receipt-gated).
+ *
+ * With pay.sh native MPP splits, the buyer TX already sends seller% → agent vault
+ * and remainder → platform treasury. Studio must NOT run a second payout from the
+ * operator wallet. We only upsert PaymentSettlement when receipt headers exist.
+ *
+ * Set GATEWAY_LEGACY_PAYOUT=true to restore the old operator→seller redistrib path
+ * (only for gateways that still charge 100% into PAY_RECIPIENT).
+ */
+async function settleExternalGatewaySale(
+  agentId: string,
+  receipt: {
+    signature: string | null;
+    amountUsdc: number | null;
+    payer: string | null;
+    network: string | null;
+  }
+) {
   try {
     const agent = await getAgent(agentId);
     if (!agent) return;
     const fee = agentFeeUsdc(agent);
     if (!(fee > 0)) return;
     if (config.paymentNetwork !== 'devnet') {
-      console.log('[gateway-payout] skipped — network is not devnet');
+      console.log('[gateway-settle] skipped — network is not devnet');
       return;
     }
+
+    const receiptSig = receipt.signature?.trim() || '';
+    if (!receiptSig) {
+      console.warn(
+        `[gateway-settle] skipped — missing X-Payment-Signature / X-Pay-Receipt-Id for agent=${agent.id}`
+      );
+      return;
+    }
+
+    if (receipt.amountUsdc == null || !(receipt.amountUsdc > 0)) {
+      console.warn(`[gateway-settle] skipped — missing X-Payment-Amount for agent=${agent.id}`);
+      return;
+    }
+    if (receipt.amountUsdc < fee * 0.98 || receipt.amountUsdc > fee * 1.02) {
+      console.warn(
+        `[gateway-settle] skipped — amount mismatch agent=${agent.id} charged=${receipt.amountUsdc} fee=${fee}`
+      );
+      return;
+    }
+
+    const existing = await getSettlementBySignature(receiptSig);
+    if (existing?.status === 'success') {
+      console.log(`[gateway-settle] idempotent skip — ${receiptSig.slice(0, 16)}…`);
+      return;
+    }
+
+    await recordSettlement({
+      signature: receiptSig,
+      agentId: agent.id,
+      recipientWallet: agent.publicKey,
+      amountUsdc: receipt.amountUsdc,
+      status: 'success',
+      network: receipt.network || config.paymentNetwork,
+      proofKind: 'gateway_receipt',
+    });
+    serverLog('info', 'payment', `gateway native-split receipt agent=${agent.id} fee=${fee}`, {
+      receipt: receiptSig,
+      payer: receipt.payer || undefined,
+      sellerShareUsdc: fee * (1 - config.platformFeeShare),
+      platformShareUsdc: fee * config.platformFeeShare,
+    });
+
+    const legacyPayout = String(process.env.GATEWAY_LEGACY_PAYOUT || '').toLowerCase() === 'true';
+    if (!legacyPayout) {
+      return;
+    }
+
     const payout = await payoutGatewaySale(agent.publicKey, fee);
     if (payout.ok && payout.signature) {
       await recordSettlement({
@@ -1840,14 +1960,15 @@ async function settleExternalGatewaySale(agentId: string) {
         network: config.paymentNetwork,
         proofKind: 'gateway_payout',
       });
-      serverLog('info', 'payment', `gateway sale payout agent=${agent.id} fee=${fee}`, {
+      serverLog('info', 'payment', `gateway legacy payout agent=${agent.id} fee=${fee}`, {
+        receipt: receiptSig,
         signature: payout.signature,
         sellerShareUsdc: payout.sellerShareUsdc,
         platformShareUsdc: payout.platformShareUsdc,
       });
     } else {
       await recordSettlement({
-        signature: `GATEWAY_PAYOUT_FAIL_${agent.id}_${Date.now()}`,
+        signature: `GATEWAY_PAYOUT_FAIL_${receiptSig}`,
         agentId: agent.id,
         recipientWallet: agent.publicKey,
         amountUsdc: fee,
@@ -1855,10 +1976,10 @@ async function settleExternalGatewaySale(agentId: string) {
         network: config.paymentNetwork,
         proofKind: 'gateway_payout',
       });
-      console.warn('[gateway-payout] failed:', payout.error);
+      console.warn('[gateway-settle] legacy payout failed:', payout.error);
     }
   } catch (err: any) {
-    console.warn('[gateway-payout] error:', err?.message || err);
+    console.warn('[gateway-settle] error:', err?.message || err);
   }
 }
 

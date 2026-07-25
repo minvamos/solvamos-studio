@@ -55,7 +55,7 @@ ENV npm_config_cache=/tmp/pay-home/.npm
 ENV PAY_CLI_PATH=/usr/local/bin/pay
 EXPOSE 8080
 
-# Apply pending Prisma migrations before boot. Best-effort: the server must
-# still boot without a reachable DB (degraded mode — CI smoke relies on this),
-# so a failed migrate logs loudly instead of blocking startup.
-CMD ["sh", "-c", "npx prisma migrate deploy || echo '[boot] prisma migrate deploy failed — starting anyway (degraded/no-DB mode)'; exec node dist/server.cjs"]
+# Apply pending Prisma migrations before boot.
+# Production: fail-closed (migrate must succeed).
+# CI / no-DB smoke: set BOOT_ALLOW_DEGRADED=true to continue after migrate failure.
+CMD ["sh", "-c", "if npx prisma migrate deploy; then exec node dist/server.cjs; elif [ \"$BOOT_ALLOW_DEGRADED\" = \"true\" ]; then echo '[boot] prisma migrate deploy failed — starting anyway (BOOT_ALLOW_DEGRADED)'; exec node dist/server.cjs; else echo '[boot] prisma migrate deploy failed — refusing to start (set BOOT_ALLOW_DEGRADED=true only for smoke)'; exit 1; fi"]

@@ -3,10 +3,16 @@ set -eu
 
 : "${PAY_ORIGIN_URL:?PAY_ORIGIN_URL is required}"
 : "${PAY_INTERNAL_SECRET:?PAY_INTERNAL_SECRET is required}"
-: "${PAY_RECIPIENT:?PAY_RECIPIENT is required}"
+
+# Primary charge recipient = platform treasury (remainder after seller split).
+# PAY_RECIPIENT remains accepted as legacy fallback when treasury unset.
+PLATFORM_TREASURY_PUBKEY="${PLATFORM_TREASURY_PUBKEY:-${PAY_RECIPIENT:-}}"
+: "${PLATFORM_TREASURY_PUBKEY:?PLATFORM_TREASURY_PUBKEY or PAY_RECIPIENT is required}"
 
 export PROVIDER_TEMPLATE=/app/provider.template.yml
 export PROVIDER_RUNTIME=/tmp/provider.yml
+export PLATFORM_TREASURY_PUBKEY
+export PLATFORM_FEE_SHARE="${PLATFORM_FEE_SHARE:-0.1}"
 export HOME="${HOME:-/tmp/pay-home}"
 export npm_config_cache="${npm_config_cache:-/tmp/pay-home/.npm}"
 mkdir -p "$HOME" "$npm_config_cache" "$HOME/.config/solana"
@@ -32,22 +38,41 @@ fi
 export SOLANA_RPC_URL="$RPC_URL"
 
 # ── provider config generator ────────────────────────────────────────────────
-# Renders PROVIDER_TEMPLATE → $PROVIDER_OUT, replacing __PAY_ORIGIN_URL__ and
-# injecting per-agent priced endpoints from the live Studio catalog so each
-# agent is metered at its own feeUsdc (falls back to the static generic price).
+# Renders PROVIDER_TEMPLATE → $PROVIDER_OUT:
+#  - per-agent feeUsdc from Studio /api/catalog (NOT a hardcoded 0.001)
+#  - MPP splits: seller vault gets seller% ; treasury (operator.recipient) gets remainder
 cat > /tmp/gen-provider.mjs <<'NODE'
 import fs from 'node:fs';
 
 const template = fs.readFileSync(process.env.PROVIDER_TEMPLATE, 'utf8');
 const origin = process.env.PAY_ORIGIN_URL.replace(/\/+$/, '');
 const outPath = process.env.PROVIDER_OUT || process.env.PROVIDER_RUNTIME;
+const treasury = String(process.env.PLATFORM_TREASURY_PUBKEY || '').trim();
+const share = Math.min(0.99, Math.max(0.01, Number(process.env.PLATFORM_FEE_SHARE || 0.1) || 0.1));
+const sellerPercent = Math.min(99, Math.max(1, Math.round((1 - share) * 100)));
 
-function endpointBlock(agentId, method, price) {
+const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const AGENT_ID_RE = /^[A-Za-z0-9_-]+$/;
+
+function formatPrice(fee) {
+  return fee.toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function sellerAlias(agentId) {
+  return `seller_${agentId.replace(/[^A-Za-z0-9_]/g, '_')}`;
+}
+
+function endpointBlock(agentId, method, price, alias) {
   return [
     `  - method: ${method}`,
     `    path: 'v1/agents/${agentId}/invoke'`,
-    `    description: 'Paid SolVamos agent invoke (${agentId}).'`,
+    `    description: 'Paid SolVamos agent invoke (${agentId}) — catalog fee, ${sellerPercent}/${100 - sellerPercent} split.'`,
     '    metering:',
+    '      schemes:',
+    '        - mpp-charge',
+    '      splits:',
+    `        - recipient: ${alias}`,
+    `          percent: ${sellerPercent}`,
     '      dimensions:',
     '        - direction: usage',
     '          unit: requests',
@@ -57,44 +82,90 @@ function endpointBlock(agentId, method, price) {
   ].join('\n');
 }
 
-async function fetchPerAgentEndpoints() {
-  try {
-    const res = await fetch(`${origin}/api/catalog`, {
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = await res.json();
-    const rows = Array.isArray(json.agents) ? json.agents : Array.isArray(json.data) ? json.data : [];
-    const seen = new Set();
-    const blocks = [];
-    for (const row of rows) {
-      const agentId = String(row.agent_id || row.agentId || '');
-      const fee = Number(row.fee_usdc ?? row.feeUsdc ?? 0) || 0;
-      const status = String(row.status || 'listed');
-      if (!agentId || seen.has(agentId) || fee <= 0 || status !== 'listed') continue;
-      // Keep YAML injection-safe: agent ids are slug-like.
-      if (!/^[A-Za-z0-9_-]+$/.test(agentId)) continue;
-      seen.add(agentId);
-      const price = fee.toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
-      blocks.push(endpointBlock(agentId, 'GET', price));
-      blocks.push(endpointBlock(agentId, 'POST', price));
-    }
-    return blocks.join('\n\n');
-  } catch (err) {
-    console.warn('[pay-gateway] catalog fetch failed — static pricing only:', err?.message || err);
-    return '';
-  }
+async function fetchCatalogAgents() {
+  const res = await fetch(`${origin}/api/catalog`, {
+    headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const json = await res.json();
+  const rows = Array.isArray(json.agents)
+    ? json.agents
+    : Array.isArray(json.data)
+      ? json.data
+      : [];
+  return rows;
 }
 
-const perAgent = await fetchPerAgentEndpoints();
+async function buildInjection() {
+  const rows = await fetchCatalogAgents();
+  const seen = new Set();
+  const recipientLines = [];
+  const endpointBlocks = [];
+  let injected = 0;
+
+  for (const row of rows) {
+    const agentId = String(row.agent_id || row.agentId || '');
+    const fee = Number(row.fee_usdc ?? row.feeUsdc ?? 0) || 0;
+    const status = String(row.status || 'listed');
+    const wallet = String(
+      row.recipient_wallet || row.recipientWallet || row.publicKey || row.public_key || ''
+    ).trim();
+
+    if (!agentId || seen.has(agentId) || fee <= 0 || status !== 'listed') continue;
+    if (!AGENT_ID_RE.test(agentId)) continue;
+    if (!BASE58_RE.test(wallet)) {
+      console.warn(`[pay-gateway] skip ${agentId}: invalid recipient wallet`);
+      continue;
+    }
+
+    seen.add(agentId);
+    const alias = sellerAlias(agentId);
+    const price = formatPrice(fee);
+    recipientLines.push(`  ${alias}:`);
+    recipientLines.push(`    account: '${wallet}'`);
+    recipientLines.push(`    label: 'Agent ${agentId} vault'`);
+    endpointBlocks.push(endpointBlock(agentId, 'GET', price, alias));
+    endpointBlocks.push(endpointBlock(agentId, 'POST', price, alias));
+    injected += 1;
+  }
+
+  return {
+    injected,
+    recipientsYaml: recipientLines.length ? `${recipientLines.join('\n')}\n` : '',
+    endpointsYaml: endpointBlocks.length ? `${endpointBlocks.join('\n\n')}\n\n` : '',
+  };
+}
+
+if (!BASE58_RE.test(treasury)) {
+  console.error(`[pay-gateway] invalid PLATFORM_TREASURY_PUBKEY: ${treasury}`);
+  process.exit(1);
+}
+
+let injection = { injected: 0, recipientsYaml: '', endpointsYaml: '' };
+try {
+  injection = await buildInjection();
+} catch (err) {
+  console.warn(
+    '[pay-gateway] catalog fetch failed — no per-agent paid routes (wildcard will not charge/proxy):',
+    err?.message || err
+  );
+}
+
 let out = template.replaceAll('__PAY_ORIGIN_URL__', origin + '/');
+out = out.replaceAll('__PLATFORM_TREASURY__', treasury);
+out = out.replace(
+  /^[ \t]*# __PER_AGENT_RECIPIENTS__[^\n]*\n(?:[ \t]*#[^\n]*\n)*/m,
+  injection.recipientsYaml || '  # (no paid agents listed)\n'
+);
 out = out.replace(
   /^[ \t]*# __PER_AGENT_ENDPOINTS__[^\n]*\n(?:[ \t]*#[^\n]*\n)*/m,
-  perAgent ? `${perAgent}\n\n` : ''
+  injection.endpointsYaml || ''
 );
 fs.writeFileSync(outPath, out, 'utf8');
-console.log(`[pay-gateway] provider config -> ${outPath} (${perAgent ? 'per-agent pricing' : 'static pricing'})`);
+console.log(
+  `[pay-gateway] provider -> ${outPath} agents=${injection.injected} seller%=${sellerPercent} treasury=${treasury.slice(0, 8)}…`
+);
 NODE
 
 node /tmp/gen-provider.mjs
@@ -104,6 +175,8 @@ node /tmp/gen-provider.mjs
 # ~/.config/pay/accounts.yml. When an operator key is mounted (Secret Manager
 # volume, Solana id.json format), register it as that account so the server
 # uses the funded operator wallet instead of a random ephemeral key.
+# Note: with native splits, USDC goes to seller vault + treasury — operator key
+# is for challenge/signing (and optional fee_payer), not for holding the charge.
 node <<'NODE'
 const fs = require('node:fs');
 const crypto = require('node:crypto');
@@ -152,9 +225,7 @@ if (operatorKeyFile && fs.existsSync(operatorKeyFile)) {
   fs.copyFileSync(operatorKeyFile, idPath);
   console.log(`[pay-gateway] operator key registered as pay account '${network}/gateway' (${pubkeyB58})`);
 } else if (!fs.existsSync(idPath)) {
-  // 64-byte secret key placeholder: pay/setup may overwrite; keep file present.
   const seed = crypto.randomBytes(32);
-  // Minimal ed25519-looking 64-byte array (seed||pub) — pay setup prefers its own.
   const secret = Array.from(Buffer.concat([seed, seed]));
   fs.writeFileSync(idPath, JSON.stringify(secret));
   console.log('[pay-gateway] wrote bootstrap solana identity', idPath);
@@ -162,33 +233,29 @@ if (operatorKeyFile && fs.existsSync(operatorKeyFile)) {
 NODE
 
 if [ -n "${PAY_OPERATOR_KEY_FILE:-}" ] && [ -f "${PAY_OPERATOR_KEY_FILE:-}" ]; then
-  # Mounted operator key already installed above — do NOT run pay setup, it may
-  # replace the funded identity with a fresh (unfunded) one.
   echo "[pay-gateway] operator key mounted; skipping pay setup"
 else
-  # Prefetch / refresh pay identity when possible (ignore failures — server may still boot).
   npx --yes --package "@solana/pay@${PAY_PKG_VERSION}" pay setup --yes >/tmp/pay-setup.log 2>&1 \
     || echo "[pay-gateway] pay setup skipped/failed (see /tmp/pay-setup.log)"
 fi
 
-echo "[pay-gateway] starting on 0.0.0.0:${PORT:-8080} -> origin ${PAY_ORIGIN_URL}"
+echo "[pay-gateway] starting on 0.0.0.0:${PORT:-8080} -> origin ${PAY_ORIGIN_URL} treasury=${PLATFORM_TREASURY_PUBKEY}"
 # shellcheck disable=SC2086
+# --recipient = platform treasury (MPP primary / remainder after seller split)
 npx --yes --package "@solana/pay@${PAY_PKG_VERSION}" pay ${SANDBOX_ARGS} server start "$PROVIDER_RUNTIME" \
   --bind "0.0.0.0:${PORT:-8080}" \
-  --recipient "$PAY_RECIPIENT" \
+  --recipient "$PLATFORM_TREASURY_PUBKEY" \
   --rpc-url "$RPC_URL" &
 PAY_PID=$!
 
 # ── pricing refresher ────────────────────────────────────────────────────────
-# Re-render the provider config periodically; when agent pricing changes the
-# container exits so Cloud Run boots a fresh instance with the new prices.
 if [ "$PRICING_REFRESH_SECONDS" -gt 0 ] 2>/dev/null; then
   (
     while true; do
       sleep "$PRICING_REFRESH_SECONDS"
       if PROVIDER_OUT=/tmp/provider.next.yml node /tmp/gen-provider.mjs >/dev/null 2>&1; then
         if ! cmp -s /tmp/provider.next.yml "$PROVIDER_RUNTIME"; then
-          echo "[pay-gateway] agent pricing changed — restarting to reload provider config"
+          echo "[pay-gateway] agent pricing/recipients changed — restarting to reload provider config"
           kill "$PAY_PID" 2>/dev/null || true
           exit 0
         fi

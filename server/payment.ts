@@ -8,6 +8,7 @@
 import { Connection } from '@solana/web3.js';
 import { config } from './config.js';
 import { dataFile, ensureDataDir } from './data-paths.js';
+import { settlementSignatureExists } from './settlements.js';
 import fs from 'fs';
 
 export type PaymentVerifyResult = {
@@ -64,6 +65,24 @@ function assertNotReplayed(signature: string, logs: string[]): string | null {
   return null;
 }
 
+/** File cache + durable PaymentSettlement.signature (Cloud Run /tmp survives poorly alone). */
+async function assertNotReplayedDurable(
+  signature: string,
+  logs: string[]
+): Promise<string | null> {
+  const local = assertNotReplayed(signature, logs);
+  if (local) return local;
+  try {
+    if (await settlementSignatureExists(signature)) {
+      logs.push(`[Replay] Rejected — signature already in PaymentSettlement`);
+      return 'Payment proof already used (replay blocked)';
+    }
+  } catch (err: any) {
+    console.warn('[payment] durable replay check failed:', err?.message || err);
+  }
+  return null;
+}
+
 function markProofUsed(signature: string) {
   usedProofs[signature.trim()] = Date.now();
   saveReplayCache();
@@ -115,7 +134,7 @@ export async function verifyPayment(
     `[Split] total=${expectedUsdcAmount} USDC → agent ${(agentShare * 100).toFixed(0)}% / platform ${(platformShare * 100).toFixed(0)}%`
   );
 
-  const replayErr = assertNotReplayed(signature, logs);
+  const replayErr = await assertNotReplayedDurable(signature, logs);
   if (replayErr) {
     return { verified: false, logs, error: replayErr, network };
   }

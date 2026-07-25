@@ -217,15 +217,23 @@ Catalog cold start에서는 Studio가 bulk hydrate할 수 있다. 운영 DB가 �
 - 사용자 소유 agent 기준 `/api/settlements`
 - Solana Explorer URL
 
-하지만 gateway-only 유료 호출에서 gateway가 Studio에 결제 receipt/signature를 전달·기록하는 계약이 아직 없다. 따라서 이 화면은 완전한 상업 ledger로 간주하면 안 된다.
+부분 구현 (native MPP split + Critical 패치):
 
-필요한 완료 프로세스:
+- **유료 gateway 결제(목표)**: pay.sh `recipients` + `metering.splits`로 **한 TX**에  
+  판매자 에이전트 vault ≈90% + `PLATFORM_TREASURY` 나머지 ≈10%.  
+  가격은 Catalog `feeUsdc`(에이전트별)이며 하드코딩 `0.001`이 아님.
+- Internal invoke는 receipt 헤더가 있으면 `PaymentSettlement`(`gateway_receipt`)만 기록.  
+  기본값으로 operator→seller **2차 payout 없음** (`GATEWAY_LEGACY_PAYOUT=true`일 때만 구경로).
+- receipt 헤더가 없으면 invoke는 될 수 있으나 원장 기록/레거시 payout 없음.
+- A2A proof replay는 파일 캐시 + `PaymentSettlement.signature`로 이중 차단.
+- pay-gateway → Studio receipt 헤더 inject는 아직 follow-up ([ROADMAP](./ROADMAP.md) P0.2).
 
-1. gateway가 verified receipt ID/signature/amount/network/agentId를 signed header 또는 callback으로 전달
-2. Studio가 idempotency key로 `PaymentSettlement` upsert
-3. Catalog fee와 gateway charged amount 일치 검증
-4. refund/dispute/failed 상태 모델 추가
-5. webhook replay 방지와 audit log
+남은 완료 프로세스:
+
+1. gateway가 verified receipt를 signed header로 origin에 전달
+2. refund/dispute/failed 상태 모델 추가
+3. webhook audit log
+4. 로컬 managed gateway(`pay-gateway-manager`)에도 per-agent split YAML 생성 정렬
 
 ## 11. 배포
 

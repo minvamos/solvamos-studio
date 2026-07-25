@@ -1,5 +1,11 @@
 # yaml-language-server: $schema=https://pay.sh/docs-assets/provider.schema.json
-# Production template. start-pay-gateway.sh replaces __PAY_ORIGIN_URL__ at boot.
+# Production template. start-pay-gateway.sh replaces placeholders at boot
+# (origin URL, treasury pubkey, per-agent recipients, per-agent endpoints).
+#
+# Charge model (one on-chain TX via MPP splits):
+#   seller agent vault  ← metering.splits percent (default 90)
+#   platform treasury   ← operator.recipient remainder (default 10)
+# Price comes from Catalog feeUsdc per agent — not a fixed 0.001.
 name: solvamos-studio
 subdomain: solvamos-studio
 title: 'SolVamos Studio Agents (Devnet)'
@@ -15,44 +21,37 @@ routing:
     key: 'X-Pay-Internal-Secret'
     value_from_env: PAY_INTERNAL_SECRET
 
+# Seller vaults injected at boot (one alias per listed paid agent).
+recipients:
+  # __PER_AGENT_RECIPIENTS__
+
 operator:
   currencies:
     usd: ['USDC']
   network: devnet
   # Stateless Cloud Run gateway: the caller pays network fees.
-  # This avoids storing a hot private key in the container.
   fee_payer: false
+  # Platform treasury receives the remainder after seller split (≈10%).
+  recipient: '__PLATFORM_TREASURY__'
 
 endpoints:
-  # Free local reply — do NOT proxy to origin (avoids "Invalid upstream URL: relative URL without a base").
   - method: GET
     path: 'v1/health'
     description: 'Gateway health.'
     routing:
       type: respond
 
-  # __PER_AGENT_ENDPOINTS__ (start-pay-gateway.sh injects per-agent priced
-  # endpoints here from the live catalog; more-specific paths take priority)
+  # __PER_AGENT_ENDPOINTS__ (catalog feeUsdc + 90/10 splits; more-specific paths win)
 
+  # Unknown / unlisted agent IDs: do NOT meter or proxy (avoids free internal invoke).
   - method: GET
     path: 'v1/agents/{agentId}/invoke'
-    description: 'Paid SolVamos agent invoke through query parameter prompt.'
-    metering:
-      dimensions:
-        - direction: usage
-          unit: requests
-          scale: 1
-          tiers:
-            - price_usd: 0.001
+    description: 'Unlisted agent — no catalog price. Use a listed per-agent path.'
+    routing:
+      type: respond
 
   - method: POST
     path: 'v1/agents/{agentId}/invoke'
-    description: 'Paid SolVamos agent invoke with a JSON body.'
-    metering:
-      dimensions:
-        - direction: usage
-          unit: requests
-          scale: 1
-          tiers:
-            - price_usd: 0.001
-
+    description: 'Unlisted agent — no catalog price. Use a listed per-agent path.'
+    routing:
+      type: respond

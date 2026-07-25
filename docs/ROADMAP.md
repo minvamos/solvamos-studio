@@ -21,35 +21,42 @@
 
 ## P0 — 상업 호출을 닫힌 루프로 만들기
 
-### P0.1 동적 gateway 가격
+### P0.1 동적 gateway 가격 + native split
 
-문제:
+문제 (해소 중):
 
-- Agent/Catalog fee는 가변
-- provider YAML metering은 `0.001` 고정
+- Agent/Catalog fee는 가변 → boot 시 `/api/catalog`에서 per-agent `feeUsdc` 주입
+- 단일 `PAY_RECIPIENT` 전액 수금 → MPP `recipients` + `metering.splits`로 한 TX 90/10
 
 완료 조건:
 
-- gateway가 agent ID별 가격을 신뢰 가능한 source에서 조회하거나 signed quote를 사용
+- gateway가 agent ID별 가격을 Catalog `feeUsdc`에서 조회 (하드코딩 금지)
 - 402 amount와 `CatalogAgent.feeUsdc`가 일치
+- seller vault + treasury가 **한 TX**로 정산 (`PLATFORM_FEE_SHARE`)
 - 가격 변경 시 cache/in-flight quote 정책 정의
 - client가 결제한 amount를 origin이 검증 가능한 receipt로 전달
 
 ### P0.2 gateway settlement ingestion
 
+> **감사 Critical 승격** ([PLATFORM_AUDIT.md](./PLATFORM_AUDIT.md) C3/C4):  
+> gateway-only 경로의 원본 receipt 부재 + 검증 없는 2차 payout + `/tmp` replay 캐시.
+
 문제:
 
 - `PaymentSettlement`와 UI는 존재
-- gateway-only 호출의 verified receipt가 Studio DB에 기록되지 않음
+- gateway-only 호출의 verified buyer receipt가 Studio DB에 닫힌 루프로 연결되지 않음
+- internal secret만으로 payout이 트리거되면 자금 배수 위험
 
 완료 조건:
 
-- signed callback/header 계약
-- signature/receipt ID idempotency
+- signed callback/header 계약 (`X-Payment-Signature`, `X-Payment-Amount` 등)
+- signature/receipt ID idempotency (`PaymentSettlement.signature`)
+- receipt 없으면 **payout 금지** (invoke는 secret으로만 허용 가능 — 안전 기본값)
 - agentId, charged amount, token, network, payer, recipient, gateway request ID 저장
 - 성공/실패/refund/dispute 상태
-- webhook replay 차단
+- webhook/replay 차단 (파일 캐시 보조 + DB unique)
 - settlement UI와 실제 gateway 거래 대조
+- follow-up: pay-gateway가 receipt 헤더를 origin으로 실제로 inject
 
 ### P0.3 public origin 봉쇄 검증
 
@@ -62,7 +69,10 @@
 
 ### P0.4 migration과 production roll-out
 
+> **감사 Critical** ([PLATFORM_AUDIT.md](./PLATFORM_AUDIT.md) C7): prod에서 migrate best-effort면 스키마 불일치로 spend-policy fail-open 가능.
+
 - `PaymentSettlement` migration 적용
+- production CMD는 migrate fail-closed; `BOOT_ALLOW_DEGRADED=true`일 때만 best-effort (CI smoke)
 - Studio/Catalog Prisma schema drift 검사
 - build → deploy → smoke 자동화
 - production safety env 검증
@@ -81,7 +91,16 @@
 
 ### P0.6 Authorization matrix
 
-- 인증 없는 `/api/agents`가 전체 Agent를 반환하지 않도록 정책 결정
+> **감사 Critical 승격** ([PLATFORM_AUDIT.md](./PLATFORM_AUDIT.md) C1/C2/C5/C6):  
+> agent PATCH 소유권 누락, `/api/dev/logs` 공개, tenant/catalog 무인증 mutation, 비로그인 전체 agent list.
+
+완료/진행 조건:
+
+- 비로그인 `GET /api/agents` → 빈 배열 (전체 Agent fallback 금지)
+- `PATCH`/`DELETE /api/agents/:id` → `userCanManageAgent` 필수
+- `/api/dev/logs` GET/DELETE → 로그인 필수
+- tenant PATCH / cloud-run → tenant owner|admin
+- catalog register → ownership 필수
 - tenant/agent read·mutation route별 owner/editor/viewer 권한 표
 - `requireGoogleSession`을 실제 의미에 맞게 `requireUserSession`과 Drive token guard로 분리
 - shared Lab 편의 route와 production route 분리

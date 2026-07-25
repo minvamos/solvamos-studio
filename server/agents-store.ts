@@ -155,7 +155,8 @@ export async function listAgents(): Promise<AgentRecord[]> {
 
 /** Agents owned by a user (via AgentOwnership). Seeds shown if user has none yet. */
 export async function listAgentsForUser(userId?: string | null): Promise<AgentRecord[]> {
-  if (!userId) return listAgents();
+  // Anonymous callers must not see the full agent inventory (vault keys, prompts, Vertex IDs).
+  if (!userId) return [];
   const owned = await prisma.agentOwnership.findMany({
     where: { userId },
     include: { agent: true },
