@@ -239,6 +239,20 @@ else
     || echo "[pay-gateway] pay setup skipped/failed (see /tmp/pay-setup.log)"
 fi
 
+# ── ensure USDC ATAs for split recipients ────────────────────────────────────
+# pay server exits if any metering.splits recipient lacks a USDC ATA.
+# Operator pays rent; ATA owner = seller vault / treasury.
+if [ -n "${PAY_OPERATOR_KEY_FILE:-}" ] && [ -f "${PAY_OPERATOR_KEY_FILE:-}" ]; then
+  echo "[pay-gateway] ensuring USDC ATAs for split recipients…"
+  if ! node /app/ensure-pay-atas.mjs; then
+    echo "[pay-gateway] ERROR: ATA ensure failed — pay server would crash on boot"
+    echo "[pay-gateway] Top up operator wallet with devnet SOL, then redeploy."
+    exit 1
+  fi
+else
+  echo "[pay-gateway] WARN: no PAY_OPERATOR_KEY_FILE — skipping ATA ensure (pay may fail if ATAs missing)"
+fi
+
 echo "[pay-gateway] starting on 0.0.0.0:${PORT:-8080} -> origin ${PAY_ORIGIN_URL} treasury=${PLATFORM_TREASURY_PUBKEY}"
 # shellcheck disable=SC2086
 # --recipient = platform treasury (MPP primary / remainder after seller split)

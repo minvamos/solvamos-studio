@@ -23,8 +23,12 @@ RUN set -eux; \
 WORKDIR /app
 COPY pay/solvamos-provider.prod.yml /app/provider.template.yml
 COPY scripts/start-pay-gateway.sh /app/start-pay-gateway.sh
+COPY scripts/ensure-pay-atas.mjs /app/ensure-pay-atas.mjs
 
-RUN sed -i 's/\r$//' /app/start-pay-gateway.sh \
+# Used by ensure-pay-atas.mjs to create USDC ATAs for split recipients at boot.
+RUN npm init -y >/dev/null 2>&1 \
+  && npm install --omit=dev @solana/web3.js@1.98.2 @solana/spl-token@0.4.13 \
+  && sed -i 's/\r$//' /app/start-pay-gateway.sh \
   && chmod +x /app/start-pay-gateway.sh
 
 ENV PORT=8080
