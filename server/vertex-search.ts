@@ -58,15 +58,28 @@ async function gcpFetch(path: string, init?: RequestInit): Promise<Response> {
       'GCP ADC unavailable. Run `gcloud auth application-default login` or set GOOGLE_APPLICATION_CREDENTIALS, and GOOGLE_CLOUD_PROJECT.'
     );
   }
+  const project = projectId();
   const url = path.startsWith('http') ? path : `${apiHost()}/v1/${path.replace(/^\//, '')}`;
   return fetch(url, {
     ...init,
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
+      // Required for many ADC identities — without this, Discovery Engine create
+      // often returns 403 and engines never appear in AI Applications console.
+      ...(project ? { 'X-Goog-User-Project': project } : {}),
       ...(init?.headers || {}),
     },
   });
+}
+
+function isSharedLabStore(dataStoreId: string | undefined): boolean {
+  if (!dataStoreId) return false;
+  const sharedLab =
+    process.env.VERTEX_SHARED_DATA_STORE === 'true' ||
+    process.env.VERTEX_SHARED_DATA_STORE === '1';
+  const configured = process.env.VERTEX_DATA_STORE_ID?.trim();
+  return sharedLab && !!configured && dataStoreId === configured;
 }
 
 async function waitOperation(opName: string, timeoutMs = 180_000): Promise<any> {
@@ -107,20 +120,43 @@ export async function getDataStore(dataStoreId: string): Promise<boolean> {
   return res.ok;
 }
 
+type EnsureEngineResult = {
+  engineId?: string;
+  error?: string;
+};
+
+async function waitForDataStoreReady(dataStoreId: string, attempts = 8): Promise<boolean> {
+  for (let i = 0; i < attempts; i++) {
+    if (await getDataStore(dataStoreId).catch(() => false)) return true;
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  return false;
+}
+
 async function ensureEngine(opts: {
   dataStoreId: string;
   displayName: string;
   appType: AiAppType;
-}): Promise<string | null> {
+}): Promise<EnsureEngineResult> {
   const parent = parentCollection();
-  if (!parent) return null;
+  if (!parent) return { error: 'GOOGLE_CLOUD_PROJECT not set (no collection parent)' };
   const meta = getAiAppType(opts.appType);
-  const engineId = `${opts.dataStoreId}-eng`.slice(0, 63);
+  // Keep suffix intact — do not truncate mid-id after appending -eng.
+  const baseId = opts.dataStoreId.slice(0, 59);
+  const engineId = `${baseId}-eng`.slice(0, 63);
 
   const get = await gcpFetch(`${parent}/engines/${engineId}`);
-  if (get.ok) return engineId;
+  if (get.ok) return { engineId };
 
-  const tryCreate = async (searchTier: string): Promise<string | null> => {
+  // Datastore create LRO can report done before GET is consistent — wait briefly.
+  const ready = await waitForDataStoreReady(opts.dataStoreId);
+  if (!ready) {
+    return { error: `Data store ${opts.dataStoreId} not readable yet; cannot create engine/app` };
+  }
+
+  const errors: string[] = [];
+
+  const tryCreate = async (searchTier: string | null): Promise<string | null> => {
     const body: Record<string, unknown> = {
       displayName: `${opts.displayName} (${meta.label})`.slice(0, 128),
       solutionType: meta.solutionType,
@@ -131,7 +167,7 @@ async function ensureEngine(opts: {
     if (meta.solutionType === 'SOLUTION_TYPE_SEARCH') {
       // LLM add-on required for engines/.../servingConfigs/*:answer grounded generation
       body.searchEngineConfig = {
-        searchTier,
+        searchTier: searchTier || 'SEARCH_TIER_STANDARD',
         searchAddOns: ['SEARCH_ADD_ON_LLM'],
       };
     } else {
@@ -155,23 +191,60 @@ async function ensureEngine(opts: {
           console.warn('[vertex-search] engine op wait', err?.message || err)
         );
       }
+      // Confirm GET — console lists engines that exist as resources.
+      const confirm = await gcpFetch(`${parent}/engines/${engineId}`);
+      if (confirm.ok) return engineId;
+      errors.push(`engine create returned ok but GET failed (${confirm.status})`);
       return engineId;
     }
     if (res.status === 409) return engineId;
-    console.warn(
-      '[vertex-search] engine create',
-      searchTier,
-      res.status,
-      JSON.stringify(json).slice(0, 400)
-    );
+    const detail = `${searchTier || 'chat'} ${res.status}: ${JSON.stringify(json).slice(0, 350)}`;
+    console.warn('[vertex-search] engine create', detail);
+    errors.push(detail);
     return null;
   };
 
-  // Prefer Enterprise + LLM (Answer API); fall back to Standard + LLM.
-  return (
-    (await tryCreate(process.env.VERTEX_SEARCH_TIER || 'SEARCH_TIER_ENTERPRISE')) ||
-    (await tryCreate('SEARCH_TIER_STANDARD'))
-  );
+  if (meta.solutionType === 'SOLUTION_TYPE_SEARCH') {
+    const created =
+      (await tryCreate(process.env.VERTEX_SEARCH_TIER || 'SEARCH_TIER_ENTERPRISE')) ||
+      (await tryCreate('SEARCH_TIER_STANDARD'));
+    if (created) return { engineId: created };
+  } else {
+    // Chat engines need Dialogflow; if that fails, fall back to Search app so
+    // something still appears under AI Applications.
+    const chatId = await tryCreate(null);
+    if (chatId) return { engineId: chatId };
+    console.warn('[vertex-search] chat engine failed — falling back to SEARCH app');
+    const searchMeta = getAiAppType('search_docs');
+    const searchBody: Record<string, unknown> = {
+      displayName: `${opts.displayName} (문서 검색 fallback)`.slice(0, 128),
+      solutionType: searchMeta.solutionType,
+      industryVertical: searchMeta.industryVertical,
+      dataStoreIds: [opts.dataStoreId],
+      searchEngineConfig: {
+        searchTier: process.env.VERTEX_SEARCH_TIER || 'SEARCH_TIER_ENTERPRISE',
+        searchAddOns: ['SEARCH_ADD_ON_LLM'],
+      },
+    };
+    const res = await gcpFetch(`${parent}/engines?engineId=${encodeURIComponent(engineId)}`, {
+      method: 'POST',
+      body: JSON.stringify(searchBody),
+    });
+    const json: any = await res.json().catch(() => ({}));
+    if (res.ok || res.status === 409) {
+      if (json.name?.includes('/operations/')) {
+        await waitOperation(json.name).catch(() => null);
+      }
+      return { engineId };
+    }
+    errors.push(`search-fallback ${res.status}: ${JSON.stringify(json).slice(0, 350)}`);
+  }
+
+  return {
+    error:
+      errors.join(' | ') ||
+      'AI Applications engine/app create failed — enable discoveryengine.googleapis.com and check IAM (Discovery Engine Admin)',
+  };
 }
 
 async function registerWebsiteTarget(dataStoreId: string, websiteUri: string): Promise<string> {
@@ -255,11 +328,11 @@ export async function createAiApplicationBundle(opts: {
 
   if (!project) {
     return {
-      dataStoreId: sanitizeId(opts.displayName, hint),
+      dataStoreId: '',
       appType: appMeta.id,
       dataSourceType: sourceMeta.id,
       status: 'error',
-      message: 'GOOGLE_CLOUD_PROJECT not set',
+      message: 'GOOGLE_CLOUD_PROJECT not set — cannot create AI Applications resources',
     };
   }
 
@@ -269,26 +342,42 @@ export async function createAiApplicationBundle(opts: {
   const configured = process.env.VERTEX_DATA_STORE_ID?.trim();
   if (sharedLab && configured) {
     const exists = await getDataStore(configured).catch(() => false);
+    if (!exists) {
+      return {
+        dataStoreId: configured,
+        appType: appMeta.id,
+        dataSourceType: sourceMeta.id,
+        status: 'error',
+        message: `Lab VERTEX_DATA_STORE_ID=${configured} not found`,
+      };
+    }
+    // Lab still needs an engine/app bound to the shared store when missing.
+    const eng = await ensureEngine({
+      dataStoreId: configured,
+      displayName: opts.displayName,
+      appType: appMeta.id,
+    });
     return {
       dataStoreId: configured,
+      engineId: eng.engineId,
       appType: appMeta.id,
       dataSourceType: sourceMeta.id,
-      status: exists ? 'existing' : 'pending',
-      message: exists
-        ? `Lab shared VERTEX_DATA_STORE_ID=${configured}`
-        : `Lab VERTEX_DATA_STORE_ID=${configured} not found yet`,
+      status: eng.engineId ? 'existing' : 'error',
+      message: eng.engineId
+        ? `Lab shared store ${configured} + engine ${eng.engineId}`
+        : eng.error || `Lab shared store ${configured} but engine/app create failed`,
     };
   }
 
   const tokenOk = await getGcpAccessToken();
   if (!tokenOk) {
     return {
-      dataStoreId: sanitizeId(opts.displayName, hint),
+      dataStoreId: '',
       appType: appMeta.id,
       dataSourceType: sourceMeta.id,
       status: 'error',
       message:
-        'ADC missing — cannot create AI Applications resources. `gcloud auth application-default login`',
+        'ADC missing — cannot create AI Applications resources. Set GOOGLE_APPLICATION_CREDENTIALS or run `gcloud auth application-default login`, and ensure GOOGLE_CLOUD_PROJECT is set.',
     };
   }
 
@@ -319,22 +408,22 @@ export async function createAiApplicationBundle(opts: {
   };
 
   if (await getDataStore(dataStoreId).catch(() => false)) {
-    const engineId =
-      (await ensureEngine({
-        dataStoreId,
-        displayName: opts.displayName,
-        appType: appMeta.id,
-      })) || undefined;
+    const eng = await ensureEngine({
+      dataStoreId,
+      displayName: opts.displayName,
+      appType: appMeta.id,
+    });
     const sourceNote = await sourceNotesFor();
     return {
       dataStoreId,
-      engineId,
+      engineId: eng.engineId,
       appType: appMeta.id,
       dataSourceType: sourceMeta.id,
-      status: engineId ? 'existing' : 'error',
-      message: engineId
+      status: eng.engineId ? 'existing' : 'error',
+      message: eng.engineId
         ? 'Data store already exists; ensured engine/app'
-        : 'Data store exists but AI Applications engine/app create failed — check Discovery Engine API + IAM',
+        : eng.error ||
+          'Data store exists but AI Applications engine/app create failed — check Discovery Engine API + IAM',
       sourceNote,
     };
   }
@@ -355,31 +444,30 @@ export async function createAiApplicationBundle(opts: {
 
   if (!res.ok) {
     if (res.status === 409 || /already exists/i.test(JSON.stringify(json))) {
-      const engineId =
-        (await ensureEngine({
-          dataStoreId,
-          displayName: opts.displayName,
-          appType: appMeta.id,
-        })) || undefined;
+      const eng = await ensureEngine({
+        dataStoreId,
+        displayName: opts.displayName,
+        appType: appMeta.id,
+      });
       const sourceNote = await sourceNotesFor();
       return {
         dataStoreId,
-        engineId,
+        engineId: eng.engineId,
         appType: appMeta.id,
         dataSourceType: sourceMeta.id,
-        status: engineId ? 'existing' : 'error',
-        message: engineId
+        status: eng.engineId ? 'existing' : 'error',
+        message: eng.engineId
           ? 'Data store already exists'
-          : 'Data store exists but engine/app create failed',
+          : eng.error || 'Data store exists but engine/app create failed',
         sourceNote,
       };
     }
     return {
-      dataStoreId,
+      dataStoreId: '',
       appType: appMeta.id,
       dataSourceType: sourceMeta.id,
       status: 'error',
-      message: `Create data store failed (${res.status}): ${JSON.stringify(json).slice(0, 400)}. Enable discoveryengine.googleapis.com.`,
+      message: `Create data store failed (${res.status}): ${JSON.stringify(json).slice(0, 400)}. Enable discoveryengine.googleapis.com and grant Discovery Engine Admin to the runtime SA.`,
     };
   }
 
@@ -392,33 +480,137 @@ export async function createAiApplicationBundle(opts: {
         appType: appMeta.id,
         dataSourceType: sourceMeta.id,
         status: 'pending',
-        message: `Create started but wait failed: ${err.message}`,
+        message: `Data store create started but wait failed: ${err.message}`,
         operation: json.name,
       };
     }
   }
 
-  const engineId =
-    (await ensureEngine({
-      dataStoreId,
-      displayName: opts.displayName,
-      appType: appMeta.id,
-    })) || undefined;
+  const eng = await ensureEngine({
+    dataStoreId,
+    displayName: opts.displayName,
+    appType: appMeta.id,
+  });
 
   const sourceNote = await sourceNotesFor();
 
   return {
     dataStoreId,
-    engineId,
+    engineId: eng.engineId,
     appType: appMeta.id,
     dataSourceType: sourceMeta.id,
-    status: engineId ? 'created' : 'error',
-    message: engineId
-      ? `Created AI Applications data store ${dataStoreId} + app/engine ${engineId} (${appMeta.label}) in ${location()}`
-      : `Created data store ${dataStoreId} but AI Applications engine/app was NOT created — answers fall back to bare Gemini until engine exists`,
+    status: eng.engineId ? 'created' : 'error',
+    message: eng.engineId
+      ? `Created AI Applications data store ${dataStoreId} + app/engine ${eng.engineId} (${appMeta.label}) in ${location()}`
+      : eng.error ||
+        `Created data store ${dataStoreId} but AI Applications engine/app was NOT created — answers fall back to bare Gemini until engine exists`,
     operation: json.name,
     sourceNote,
   };
+}
+
+export type AiApplicationDeleteResult = {
+  engineDeleted: boolean;
+  dataStoreDeleted: boolean;
+  skippedSharedLab: boolean;
+  details: string[];
+};
+
+/** Delete AI Applications engine (app) then data store. Skips shared lab store. */
+export async function deleteAiApplicationBundle(opts: {
+  dataStoreId?: string;
+  engineId?: string;
+}): Promise<AiApplicationDeleteResult> {
+  const details: string[] = [];
+  const parent = parentCollection();
+  if (!parent) {
+    return {
+      engineDeleted: false,
+      dataStoreDeleted: false,
+      skippedSharedLab: false,
+      details: ['GOOGLE_CLOUD_PROJECT not set — skipped GCP delete'],
+    };
+  }
+
+  if (isSharedLabStore(opts.dataStoreId)) {
+    return {
+      engineDeleted: false,
+      dataStoreDeleted: false,
+      skippedSharedLab: true,
+      details: [
+        `Shared lab store ${opts.dataStoreId} preserved (VERTEX_SHARED_DATA_STORE)`,
+      ],
+    };
+  }
+
+  const tokenOk = await getGcpAccessToken();
+  if (!tokenOk) {
+    return {
+      engineDeleted: false,
+      dataStoreDeleted: false,
+      skippedSharedLab: false,
+      details: ['ADC missing — skipped GCP delete'],
+    };
+  }
+
+  let engineDeleted = false;
+  let dataStoreDeleted = false;
+  const engineId =
+    opts.engineId || (opts.dataStoreId ? `${opts.dataStoreId.slice(0, 59)}-eng`.slice(0, 63) : undefined);
+
+  if (engineId) {
+    try {
+      const res = await gcpFetch(`${parent}/engines/${engineId}?force=true`, {
+        method: 'DELETE',
+      });
+      const json: any = await res.json().catch(() => ({}));
+      if (res.ok || res.status === 404) {
+        if (json.name?.includes('/operations/')) {
+          await waitOperation(json.name, 120_000).catch(() => null);
+        }
+        engineDeleted = res.status !== 404;
+        details.push(
+          res.status === 404
+            ? `Engine ${engineId} already gone`
+            : `Deleted AI Applications engine/app ${engineId}`
+        );
+      } else {
+        details.push(
+          `Engine delete ${engineId} failed (${res.status}): ${JSON.stringify(json).slice(0, 200)}`
+        );
+      }
+    } catch (err: any) {
+      details.push(`Engine delete error: ${err?.message || err}`);
+    }
+  }
+
+  if (opts.dataStoreId) {
+    try {
+      const res = await gcpFetch(`${parent}/dataStores/${opts.dataStoreId}?force=true`, {
+        method: 'DELETE',
+      });
+      const json: any = await res.json().catch(() => ({}));
+      if (res.ok || res.status === 404) {
+        if (json.name?.includes('/operations/')) {
+          await waitOperation(json.name, 120_000).catch(() => null);
+        }
+        dataStoreDeleted = res.status !== 404;
+        details.push(
+          res.status === 404
+            ? `Data store ${opts.dataStoreId} already gone`
+            : `Deleted data store ${opts.dataStoreId}`
+        );
+      } else {
+        details.push(
+          `Data store delete ${opts.dataStoreId} failed (${res.status}): ${JSON.stringify(json).slice(0, 200)}`
+        );
+      }
+    } catch (err: any) {
+      details.push(`Data store delete error: ${err?.message || err}`);
+    }
+  }
+
+  return { engineDeleted, dataStoreDeleted, skippedSharedLab: false, details };
 }
 
 /** @deprecated use createAiApplicationBundle */

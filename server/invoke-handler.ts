@@ -10,6 +10,8 @@ import {
   getCatalogEntry,
   registerAgentOnPayShCatalog,
 } from './paysh-catalog.js';
+import { recordInvokeEvidence } from './invoke-evidence.js';
+import { serverLog } from './dev-log.js';
 
 export type InvokeInput = {
   agentId: string;
@@ -106,7 +108,45 @@ export async function runAgentInvoke(
   });
   await bumpInvoke(input.agentId);
 
-  const body: InvokeSuccess = {
+  const generation =
+    result.ragMode === 'ai_application' ? 'ai_application_answer' : 'vertex_gemini_rag';
+
+  const evidence = recordInvokeEvidence({
+    agentId: agent.id,
+    agentName: agent.agentName || agent.customRole || agent.role,
+    prompt: input.prompt,
+    answer: result.answer,
+    confidence: result.confidence,
+    citations: result.citations || [],
+    toolsUsed: result.toolsUsed || [],
+    ragMode: result.ragMode,
+    generation,
+    engineId: agent.vertexEngineId || null,
+    dataStoreId: agent.vertexDataStoreId || null,
+    websiteUri: agent.websiteUri,
+    dataSourceType: agent.dataSourceType,
+    aiAppType: agent.aiAppType,
+    gcsUri: agent.gcsUri,
+    googleDriveFolderId: agent.googleDriveFolderId,
+    relatedQuestions: result.relatedQuestions || [],
+    retrievalError: (result as any).retrievalError,
+    a2a: {
+      catalogUsed: result.catalogUsed,
+      planningNote: result.planningNote,
+      peerHops: result.peerHops,
+      spendTier: result.spendTier,
+    },
+    studioOwnerTest: studio,
+  });
+
+  serverLog('info', 'invoke', `agent=${agent.id} mode=${result.ragMode}`, {
+    evidenceId: evidence.id,
+    citations: evidence.citations.length,
+    hosts: evidence.referencedHosts,
+    tools: evidence.toolsUsed,
+  });
+
+  const body: InvokeSuccess & { evidenceId?: string; referencedHosts?: string[]; referencedUrls?: string[] } = {
     status: 'success',
     answer: result.answer,
     data: result.answer,
@@ -118,13 +158,15 @@ export async function runAgentInvoke(
     feeUsdc: studio ? 0 : feeAmount,
     paywallSkipped: studio || paymentLogs.some((l) => /paywall skipped|gateway settled/i.test(l)),
     payShCatalogId: listing?.catalogId,
-    generation:
-      result.ragMode === 'ai_application' ? 'ai_application_answer' : 'vertex_gemini_rag',
+    generation,
     engineId: agent.vertexEngineId || null,
     dataStoreId: agent.vertexDataStoreId || null,
     session: result.session || null,
     relatedQuestions: result.relatedQuestions || [],
     toolsUsed: result.toolsUsed || [],
+    evidenceId: evidence.id,
+    referencedHosts: evidence.referencedHosts,
+    referencedUrls: evidence.referencedUrls,
     a2a: {
       catalogUsed: result.catalogUsed,
       planningNote: result.planningNote,

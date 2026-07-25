@@ -130,6 +130,55 @@ function agentIdFromLocalSecretPath(secretPath: string): string | null {
   return m?.[1] || null;
 }
 
+/** Best-effort delete of agent vault secret (Secret Manager or local mock). */
+export async function deletePrivateKeyFromGCP(secretPath?: string | null): Promise<{
+  deleted: boolean;
+  detail: string;
+}> {
+  if (!secretPath) {
+    return { deleted: false, detail: 'No secretManagerPath' };
+  }
+
+  if (secretPath.includes('LOCAL_DEV') || secretPath.includes('MOCK_PROJECT')) {
+    if (!allowLocalFallback()) {
+      return { deleted: false, detail: 'Local vault fallback disabled' };
+    }
+    const agentId = agentIdFromLocalSecretPath(secretPath);
+    if (!agentId) return { deleted: false, detail: 'Could not parse agentId from path' };
+    const file = localVaultPath();
+    if (!fs.existsSync(file)) return { deleted: true, detail: 'Local vault file absent' };
+    try {
+      const vault = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+      if (agentId in vault) {
+        delete vault[agentId];
+        fs.writeFileSync(file, JSON.stringify(vault, null, 2), 'utf8');
+      }
+      return { deleted: true, detail: `Removed local vault entry ${agentId}` };
+    } catch (err: any) {
+      return { deleted: false, detail: err?.message || 'Local vault delete failed' };
+    }
+  }
+
+  const projectId = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT;
+  if (!projectId) {
+    return { deleted: false, detail: 'GOOGLE_CLOUD_PROJECT not set' };
+  }
+
+  try {
+    const client = new SecretManagerServiceClient();
+    // Path may be .../secrets/ID/versions/N — delete the secret resource.
+    const secretName = secretPath.replace(/\/versions\/[^/]+$/, '');
+    await client.deleteSecret({ name: secretName });
+    return { deleted: true, detail: `Deleted Secret Manager secret ${secretName}` };
+  } catch (err: any) {
+    const msg = String(err?.message || err);
+    if (err?.code === 5 || /not found/i.test(msg)) {
+      return { deleted: true, detail: `Secret already gone: ${msg.slice(0, 120)}` };
+    }
+    return { deleted: false, detail: msg.slice(0, 200) };
+  }
+}
+
 export async function loadPrivateKeyFromGCP(secretPath: string): Promise<string | null> {
   if (secretPath.includes('LOCAL_DEV') || secretPath.includes('MOCK_PROJECT')) {
     if (!allowLocalFallback()) return null;

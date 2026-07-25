@@ -4,6 +4,8 @@ const TAB_PATHS: Record<AppTab, string> = {
   studio: '/studio',
   list: '/agents',
   lab: '/lab',
+  evidence: '/evidence',
+  logs: '/logs',
   settlements: '/settlements',
   account: '/account',
 };

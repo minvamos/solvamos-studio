@@ -12,6 +12,8 @@ import AgentsPage from './pages/AgentsPage';
 import SettlementsPage from './pages/SettlementsPage';
 import MyPage from './pages/MyPage';
 import DevAgentLabPage from './pages/DevAgentLabPage';
+import DevEvidencePage from './pages/DevEvidencePage';
+import DevLogsPage from './pages/DevLogsPage';
 import WalletModal, { type WalletRow } from './components/WalletModal';
 import CreateAgentProgress, { CREATE_STEPS, EDIT_STEPS } from './components/CreateAgentProgress';
 import { formatAgentChatMessage } from './lib/formatAgentMessage';
@@ -40,6 +42,7 @@ export default function App() {
 
   const [builderStep, setBuilderStep] = useState<1 | 2 | 3>(1);
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
+  const [deletingAgentId, setDeletingAgentId] = useState<string | null>(null);
   /** Drive folder id when edit started — only send folder on PATCH if user changed it */
   const [editBaselineFolderId, setEditBaselineFolderId] = useState<string>('');
   const [savingAsEdit, setSavingAsEdit] = useState(false);
@@ -742,8 +745,14 @@ export default function App() {
           data.driveIngest?.docs != null
             ? `Drive 문서 ${data.driveIngest.docs}건 주입`
             : null;
+        const engineNote = data.vertexEngineId
+          ? `AI App ${data.vertexEngineId}`
+          : data.agent?.vertexEngineId
+            ? `AI App ${data.agent.vertexEngineId}`
+            : null;
         setCreateDetail(
           [
+            engineNote,
             ingestNote,
             data.payShCatalog?.catalogId &&
               (isEdit
@@ -1227,6 +1236,7 @@ export default function App() {
             beginEditAgent(agent);
           }}
           onEdit={beginEditAgent}
+          deletingAgentId={deletingAgentId}
           onToggleStatus={async (agent) => {
             const next =
               agent.status === 'PAUSED' || agent.status === 'inactive' ? 'ACTIVE' : 'PAUSED';
@@ -1254,6 +1264,44 @@ export default function App() {
               alert('상태 변경 네트워크 오류');
             }
           }}
+          onDelete={async (agent) => {
+            const title = agent.agentName || agent.customRole || agent.role;
+            const ok = window.confirm(
+              `"${title}" 에이전트를 삭제할까요?\n\nAI Applications 앱·데이터스토어·카탈로그·vault까지 함께 제거됩니다.`
+            );
+            if (!ok) return;
+            setDeletingAgentId(agent.id);
+            try {
+              const res = await fetch(`/api/agents/${encodeURIComponent(agent.id)}`, {
+                method: 'DELETE',
+                credentials: 'include',
+                headers: {
+                  ...(driveSessionId ? { 'X-SolVamos-Session': driveSessionId } : {}),
+                },
+              });
+              const data = await res.json();
+              if (data.status === 'success') {
+                setAgents((prev) => prev.filter((a) => a.id !== agent.id));
+                if (activeAgent?.id === agent.id) {
+                  setActiveAgent(null);
+                  setEditingAgentId(null);
+                }
+                const gcpNote = (data.aiApp?.details || []).slice(0, 2).join(' · ');
+                alert(
+                  gcpNote
+                    ? `삭제 완료\n${gcpNote}`
+                    : '에이전트가 삭제되었습니다.'
+                );
+              } else {
+                alert(data.message || '삭제 실패');
+              }
+            } catch (err) {
+              console.error(err);
+              alert('삭제 네트워크 오류');
+            } finally {
+              setDeletingAgentId(null);
+            }
+          }}
         />
       )}
       {activeTab === 'lab' && (
@@ -1263,6 +1311,10 @@ export default function App() {
           onBack={() => navigateTab('studio')}
         />
       )}
+      {activeTab === 'evidence' && (
+        <DevEvidencePage agents={agents} authFetch={authFetch} />
+      )}
+      {activeTab === 'logs' && <DevLogsPage authFetch={authFetch} />}
       {activeTab === 'settlements' && (
         <SettlementsPage settlements={settlements} agents={agents} />
       )}

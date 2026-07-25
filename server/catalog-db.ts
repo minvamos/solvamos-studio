@@ -156,6 +156,22 @@ export async function unlistCatalogAgent(agentId: string) {
     .catch(() => undefined);
 }
 
+/** Hard-remove CatalogAgent row (agent delete). */
+export async function deleteCatalogAgentRow(agentId: string) {
+  await prisma.catalogAgent.deleteMany({ where: { agentId } }).catch(() => undefined);
+}
+
+export async function userCanManageAgent(
+  userId: string | undefined | null,
+  agentId: string
+): Promise<boolean> {
+  if (!userId) return false;
+  const row = await prisma.agentOwnership.findFirst({
+    where: { userId, agentId, role: { in: ['owner', 'editor'] } },
+  });
+  return !!row;
+}
+
 /** Backfill CatalogAgent rows for every Agent missing a listing (e.g. after migrate). */
 export async function syncAllAgentsToCatalog(opts?: { baseUrl?: string }): Promise<number> {
   const agents = await prisma.agent.findMany();

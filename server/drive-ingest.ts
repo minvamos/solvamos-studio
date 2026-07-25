@@ -219,6 +219,19 @@ export async function ingestDriveSourceForAgent(opts: {
   return corpus;
 }
 
+export function deleteLocalRagCorpus(agentId: string): boolean {
+  try {
+    const p = corpusPath(agentId);
+    if (fs.existsSync(p)) {
+      fs.unlinkSync(p);
+      return true;
+    }
+  } catch (err) {
+    console.warn('[drive-ingest] delete corpus', err);
+  }
+  return false;
+}
+
 export function loadLocalRagCorpus(agentId: string): LocalRagCorpus | null {
   try {
     const p = corpusPath(agentId);

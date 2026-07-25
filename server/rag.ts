@@ -7,6 +7,7 @@ import { retrieveFromLocalCorpus, loadLocalRagCorpus } from './drive-ingest.js';
 import {
   createVertexSearchDataStore,
   createAiApplicationBundle,
+  deleteAiApplicationBundle,
   importCorpusToVertexDataStore,
 } from './vertex-search.js';
 import { generateAnswer } from './vertex-generate.js';
@@ -363,6 +364,14 @@ export async function ensureAiApplication(opts: {
   gcsUri?: string;
 }) {
   return createAiApplicationBundle(opts);
+}
+
+/** Delete AI Applications engine/app + data store for an agent. */
+export async function destroyAiApplication(opts: {
+  dataStoreId?: string;
+  engineId?: string;
+}) {
+  return deleteAiApplicationBundle(opts);
 }
 
 export async function syncLocalCorpusToVertex(
