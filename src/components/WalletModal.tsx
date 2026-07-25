@@ -24,17 +24,17 @@ type Props = {
   onRemove: (id: string) => Promise<void>;
 };
 
+type PhantomProvider = {
+  isPhantom?: boolean;
+  publicKey?: { toString: () => string } | null;
+  connect: () => Promise<{ publicKey: { toString: () => string } }>;
+};
+
 declare global {
   interface Window {
-    solana?: {
-      isPhantom?: boolean;
-      connect: () => Promise<{ publicKey: { toString: () => string } }>;
-    };
+    solana?: PhantomProvider;
     phantom?: {
-      solana?: {
-        isPhantom?: boolean;
-        connect: () => Promise<{ publicKey: { toString: () => string } }>;
-      };
+      solana?: PhantomProvider;
     };
     solflare?: {
       connect: () => Promise<void>;
@@ -45,6 +45,19 @@ declare global {
 
 function short(addr: string) {
   return `${addr.slice(0, 4)}…${addr.slice(-4)}`;
+}
+
+/**
+ * Prefer window.phantom.solana (current Phantom API).
+ * window.solana is legacy and often a broken/competing shim that throws
+ * "Unexpected error" with no popup — only use it when phantom.* is absent.
+ */
+function getPhantomProvider(): PhantomProvider | null {
+  const official = window.phantom?.solana;
+  if (official?.isPhantom) return official;
+  const legacy = window.solana;
+  if (legacy?.isPhantom && !window.phantom?.solana) return legacy;
+  return null;
 }
 
 export default function WalletModal({
@@ -75,25 +88,23 @@ export default function WalletModal({
     }
   };
 
-  /** Restore the original single-call path that worked before retry/disconnect hardening. */
   const connectPhantom = async () => {
     setLocalError(null);
     setPhantomBusy(true);
     try {
-      const provider =
-        window.solana?.isPhantom
-          ? window.solana
-          : window.phantom?.solana?.isPhantom
-            ? window.phantom.solana
-            : null;
-      if (!provider?.isPhantom) {
+      const provider = getPhantomProvider();
+      if (!provider) {
         setLocalError(
-          'Phantom이 없습니다. https://phantom.app 설치 후 다시 시도하거나 주소를 직접 입력하세요.'
+          'Phantom이 없습니다. https://phantom.app 설치·잠금 해제 후 이 탭을 새로고침하거나, 아래 칸에 주소를 직접 입력하세요.'
         );
         return;
       }
       const res = await provider.connect();
-      const addr = res.publicKey.toString();
+      const addr = res?.publicKey?.toString?.();
+      if (!addr) {
+        setLocalError('Phantom에서 주소를 받지 못했습니다. 잠금 해제 후 다시 시도하세요.');
+        return;
+      }
       await onAdd(addr, 'Phantom', 'phantom');
     } catch (err: any) {
       const code = err?.code;
@@ -103,7 +114,11 @@ export default function WalletModal({
       } else if (/login required|unauthorized|401/i.test(msg)) {
         setLocalError('지갑 등록에는 로그인이 필요합니다. 먼저 로그인한 뒤 다시 시도하세요.');
       } else if (/invalid solana address/i.test(msg)) {
-        setLocalError('받은 주소가 유효하지 않습니다. 주소를 직접 입력해 등록하세요.');
+        setLocalError('받은 주소가 유효하지 않습니다. 아래 칸에 주소를 직접 등록하세요.');
+      } else if (/unexpected error/i.test(msg)) {
+        setLocalError(
+          'Phantom 연결 실패(Unexpected error). 다른 지갑 확장(Backpack·Solflare·Brave Wallet 등)을 끈 뒤 탭을 새로고침하고 다시 시도하세요. 또는 아래 칸에 주소를 직접 등록하세요.'
+        );
       } else {
         setLocalError(msg || 'Phantom 연결 실패');
       }
@@ -114,13 +129,18 @@ export default function WalletModal({
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-      <button
-        type="button"
+      {/* div backdrop — <button> overlay can interfere with extension popups */}
+      <div
         className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-        aria-label="닫기"
+        aria-hidden
         onClick={onClose}
       />
-      <div className="relative w-full max-w-lg rounded-2xl border border-outline-variant/30 bg-surface-container-lowest shadow-2xl overflow-hidden">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Solana 지갑"
+        className="relative w-full max-w-lg rounded-2xl border border-outline-variant/30 bg-surface-container-lowest shadow-2xl overflow-hidden"
+      >
         <div className="flex items-center justify-between px-5 py-4 border-b border-outline-variant/20">
           <div className="flex items-center gap-2">
             <Wallet className="w-5 h-5 text-solana-green" />
