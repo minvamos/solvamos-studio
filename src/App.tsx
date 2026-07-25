@@ -12,6 +12,8 @@ import AgentsPage from './pages/AgentsPage';
 import SettlementsPage from './pages/SettlementsPage';
 import MyPage from './pages/MyPage';
 import DevAgentLabPage from './pages/DevAgentLabPage';
+import DevEvidencePage from './pages/DevEvidencePage';
+import DevLogsPage from './pages/DevLogsPage';
 import WalletModal, { type WalletRow } from './components/WalletModal';
 import CreateAgentProgress, { CREATE_STEPS, EDIT_STEPS } from './components/CreateAgentProgress';
 import { formatAgentChatMessage } from './lib/formatAgentMessage';
@@ -1309,6 +1311,10 @@ export default function App() {
           onBack={() => navigateTab('studio')}
         />
       )}
+      {activeTab === 'evidence' && (
+        <DevEvidencePage agents={agents} authFetch={authFetch} />
+      )}
+      {activeTab === 'logs' && <DevLogsPage authFetch={authFetch} />}
       {activeTab === 'settlements' && (
         <SettlementsPage settlements={settlements} agents={agents} />
       )}

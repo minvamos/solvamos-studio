@@ -308,16 +308,29 @@ export async function registerAgentOnPayShCatalog(
     baseUrl?: string;
     description?: string;
     publishMode?: string;
+    /** When true, remote publish failure throws (agent create/update hard-fail). */
+    requireRemote?: boolean;
   }
 ): Promise<PayShCatalogEntry> {
   const entry = buildLocalEntry(agent, opts);
+  const site = catalogSite();
   try {
+    if (!site && opts?.requireRemote) {
+      throw new Error('CATALOG_SITE_URL / catalog site not configured — cannot publish remotely');
+    }
+    if (!site) {
+      catalog[agent.id] = entry;
+      return entry;
+    }
     const published = await publishToRemote(entry);
     catalog[agent.id] = published;
     lastFetchAt = 0; // invalidate so next list refreshes
     return published;
   } catch (err: any) {
-    console.warn('[catalog-client] publish failed, keeping local mirror', err?.message || err);
+    console.warn('[catalog-client] publish failed', err?.message || err);
+    if (opts?.requireRemote) {
+      throw err instanceof Error ? err : new Error(String(err?.message || err));
+    }
     catalog[agent.id] = entry;
     return entry;
   }

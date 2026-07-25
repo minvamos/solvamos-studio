@@ -71,9 +71,17 @@ import {
   restartManagedPayGateway,
   stopManagedPayGateway,
 } from './server/pay-gateway-manager.js';
+import { installConsoleCapture, serverLog, listDevLogs, clearDevLogs, devLogStats } from './server/dev-log.js';
+import {
+  listInvokeEvidence,
+  getInvokeEvidence,
+  clearInvokeEvidence,
+  evidenceStats,
+} from './server/invoke-evidence.js';
 
 dotenv.config();
 assertProductionSafety();
+installConsoleCapture();
 
 const app = express();
 app.use(express.json({ limit: '20mb' }));
@@ -128,17 +136,12 @@ app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
     if (req.path.startsWith('/api') || req.path === '/healthz') {
-      console.log(
-        JSON.stringify({
-          severity: 'INFO',
-          httpRequest: {
-            requestMethod: req.method,
-            requestUrl: req.originalUrl,
-            status: res.statusCode,
-            latency: `${(Date.now() - start) / 1000}s`,
-          },
-        })
-      );
+      const level =
+        res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info';
+      serverLog(level, 'http', `${req.method} ${req.originalUrl} → ${res.statusCode}`, {
+        latencyMs: Date.now() - start,
+        status: res.statusCode,
+      });
     }
   });
   next();
@@ -147,6 +150,51 @@ app.use((req, res, next) => {
 loadPayShCatalog();
 registerPlatformAuthRoutes(app);
 registerDriveAuthRoutes(app);
+
+/** Developer: ring-buffer server logs (create/invoke/GCP errors, etc.) */
+app.get('/api/dev/logs', requireGoogleSession, (req, res) => {
+  const level = String(req.query.level || 'all') as any;
+  const tag = req.query.tag ? String(req.query.tag) : undefined;
+  const q = req.query.q ? String(req.query.q) : undefined;
+  const limit = req.query.limit ? Number(req.query.limit) : 300;
+  res.json({
+    status: 'success',
+    stats: devLogStats(),
+    logs: listDevLogs({ level, tag, q, limit }),
+  });
+});
+
+app.delete('/api/dev/logs', requireGoogleSession, (_req, res) => {
+  const cleared = clearDevLogs();
+  res.json({ status: 'success', cleared });
+});
+
+/** Developer: invoke evidence (citations, referenced sites, tools) */
+app.get('/api/dev/evidence', requireGoogleSession, (req, res) => {
+  const agentId = req.query.agentId ? String(req.query.agentId) : undefined;
+  const q = req.query.q ? String(req.query.q) : undefined;
+  const limit = req.query.limit ? Number(req.query.limit) : 100;
+  res.json({
+    status: 'success',
+    stats: evidenceStats(),
+    evidence: listInvokeEvidence({ agentId, q, limit }),
+  });
+});
+
+app.get('/api/dev/evidence/:id', requireGoogleSession, (req, res) => {
+  const row = getInvokeEvidence(req.params.id);
+  if (!row) {
+    res.status(404).json({ status: 'error', message: 'Evidence not found' });
+    return;
+  }
+  res.json({ status: 'success', evidence: row });
+});
+
+app.delete('/api/dev/evidence', requireGoogleSession, (req, res) => {
+  const agentId = req.query.agentId ? String(req.query.agentId) : undefined;
+  const cleared = clearInvokeEvidence(agentId);
+  res.json({ status: 'success', cleared });
+});
 
 /** Cloud Run / GCLB health */
 app.get('/healthz', (_req, res) => {
@@ -605,29 +653,52 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
           ? perCallPriceUsdc
           : 0;
 
-    const pipeline: { step: string; status: 'ok' | 'skip' | 'warn'; detail: string }[] = [];
-    pipeline.push({
-      step: 'tenant_bind',
-      status: 'ok',
-      detail: `tenant=${tenantId} project=${config.gcpProject || 'n/a'} (shared GCP as customer)`,
-    });
+    const pipeline: { step: string; status: 'ok' | 'error'; detail: string }[] = [];
+    const failCreate = (step: string, detail: string): never => {
+      serverLog('error', 'create', `${step} failed — aborting agent create`, { agentId, detail });
+      pipeline.push({ step, status: 'error', detail });
+      throw new Error(`[${step}] ${detail}`);
+    };
+    const okStep = (step: string, detail: string) => {
+      serverLog('info', 'create', `${step}: ${detail}`, { agentId });
+      pipeline.push({ step, status: 'ok', detail });
+    };
+
+    okStep(
+      'tenant_bind',
+      `tenant=${tenantId} project=${config.gcpProject || 'n/a'} (shared GCP as customer)`
+    );
+
+    if (resolvedSource === 'google_drive' && !googleDriveFolderId) {
+      failCreate('drive_source', 'Google Drive 소스를 선택했다면 폴더/파일을 반드시 지정하세요.');
+    }
+    if (resolvedSource === 'local_upload' && !hasLocalFiles) {
+      failCreate('local_upload', '로컬 업로드 소스를 선택했다면 파일을 1개 이상 첨부하세요.');
+    }
+    if (resolvedSource === 'website_url' && !websiteUri) {
+      failCreate('website_url', '웹사이트 소스를 선택했다면 URL을 입력하세요.');
+    }
 
     // Persist vault before DB row so create never leaves CREATING orphans on vault failure
     const gcpStorage = await savePrivateKeyToGCP(agentId, secretKeyBase64);
-    pipeline.push({
-      step: 'agent_vault',
-      status: gcpStorage.mock ? 'warn' : 'ok',
-      detail: `Dedicated agent vault ${publicKey.slice(0, 4)}…${publicKey.slice(-4)} (separate from user wallet ${
+    okStep(
+      'agent_vault',
+      `Dedicated agent vault ${publicKey.slice(0, 4)}…${publicKey.slice(-4)} (user wallet ${
         userPrimary?.address ? userPrimary.address.slice(0, 4) + '…' : 'none'
-      })`,
-    });
-    pipeline.push({
-      step: 'vault_persist',
-      status: gcpStorage.mock ? 'warn' : 'ok',
-      detail: gcpStorage.mock
-        ? `Dev local vault fallback: ${gcpStorage.path}`
-        : `Secret Manager: ${gcpStorage.path}`,
-    });
+      })`
+    );
+    if (gcpStorage.mock) {
+      // Intentional local-only path — still recorded loudly in server logs.
+      serverLog(
+        'warn',
+        'create',
+        'Vault stored via LOCAL MOCK (ALLOW_LOCAL_VAULT_FALLBACK). Production must use Secret Manager.',
+        { agentId, path: gcpStorage.path }
+      );
+      okStep('vault_persist', `LOCAL MOCK vault: ${gcpStorage.path}`);
+    } else {
+      okStep('vault_persist', `Secret Manager: ${gcpStorage.path}`);
+    }
 
     // Persist agent row early so RagDocument FK / catalog can attach
     await putAgent({
@@ -652,7 +723,7 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       fee: parsedFeeEarly,
       perCallPriceUsdc: parsedFeeEarly,
     });
-    pipeline.push({ step: 'agent_record_draft', status: 'ok', detail: agentId });
+    okStep('agent_record_draft', agentId);
 
     let vertexDataStoreId: string | undefined;
     let vertexEngineId: string | undefined;
@@ -663,6 +734,11 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
     // Website URL forces PUBLIC_WEBSITE app type so site/* indexing can attach.
     const provisionAppType =
       resolvedSource === 'website_url' || websiteUri ? 'website' : aiAppType || 'search_docs';
+    serverLog('info', 'create', 'Provisioning AI Applications bundle', {
+      agentId,
+      provisionAppType,
+      resolvedSource,
+    });
     const aiApp = await ensureAiApplication({
       displayName: agentName || agentId,
       appType: provisionAppType,
@@ -673,150 +749,90 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
     });
     vertexDataStoreId = aiApp.dataStoreId;
     vertexEngineId = aiApp.engineId;
-    indexingStatus =
-      aiApp.status === 'pending' || aiApp.status === 'error' || !aiApp.engineId
-        ? 'INDEXING'
-        : 'ACTIVE';
-    pipeline.push({
-      step: 'ai_applications',
-      status: aiApp.status === 'created' || aiApp.status === 'existing' ? 'ok' : 'warn',
-      detail: `${aiApp.message || aiApp.dataStoreId}${
-        aiApp.engineId ? ` engine=${aiApp.engineId}` : ' (NO ENGINE — Gemini-only fallback)'
-      }${aiApp.sourceNote ? ` · ${aiApp.sourceNote}` : ''}`,
-    });
 
-    // Default: refuse to create agents without a real AI Applications engine/app.
-    // Set ALLOW_AI_APP_SOFT_FAIL=true only for local Gemini-only demos.
-    const allowSoftFail =
-      process.env.ALLOW_AI_APP_SOFT_FAIL === 'true' ||
-      process.env.ALLOW_AI_APP_SOFT_FAIL === '1';
-    if ((!aiApp.engineId || aiApp.status === 'error') && !allowSoftFail) {
-      // Draft agent has no vertex ids yet — explicitly tear down any orphan store/app.
+    if (!aiApp.engineId || aiApp.status === 'error' || aiApp.status === 'pending') {
       if (aiApp.dataStoreId) {
         await destroyAiApplication({
           dataStoreId: aiApp.dataStoreId,
           engineId: aiApp.engineId,
         }).catch((err: any) =>
-          console.warn('[create] orphan AI App cleanup', err?.message || err)
+          serverLog('warn', 'create', `orphan AI App cleanup: ${err?.message || err}`)
         );
       }
-      throw new Error(
-        `AI Applications 앱 생성 실패 — 에이전트를 만들지 않습니다. ${
+      failCreate(
+        'ai_applications',
+        `AI Applications 앱/엔진 생성 실패: ${
           aiApp.message || 'Discovery Engine engine/app missing'
         }. GOOGLE_CLOUD_PROJECT·ADC·discoveryengine.googleapis.com·Discovery Engine Admin IAM을 확인하세요.`
       );
     }
+    indexingStatus = 'ACTIVE';
+    okStep(
+      'ai_applications',
+      `${aiApp.message || aiApp.dataStoreId} engine=${aiApp.engineId}${
+        aiApp.sourceNote ? ` · ${aiApp.sourceNote}` : ''
+      }`
+    );
 
     if (needsDrive && sid) {
-      try {
-        const corpus = await ingestDriveSourceForAgent({
-          sessionId: sid,
-          agentId,
-          driveSourceId: String(googleDriveFolderId),
-        });
-        driveIngest = { docs: corpus.docs.length };
-        indexingStatus = corpus.docs.length > 0 ? 'ACTIVE' : indexingStatus;
-        pipeline.push({
-          step: 'drive_rag_ingest',
-          status: corpus.docs.length > 0 ? 'ok' : 'warn',
-          detail:
-            corpus.docs.length > 0
-              ? `Ingested ${corpus.docs.length} Drive doc(s)`
-              : 'No text-extractable files (Docs/Sheets/txt/md/json/pdf).',
-        });
-
-        if (vertexDataStoreId && corpus.docs.length > 0 && aiApp.status !== 'error') {
-          try {
-            const sync = await syncLocalCorpusToVertex(agentId, vertexDataStoreId);
-            pipeline.push({
-              step: 'vertex_import',
-              status: sync.imported > 0 ? 'ok' : 'warn',
-              detail: sync.message,
-            });
-            if (sync.imported > 0) indexingStatus = 'ACTIVE';
-          } catch (err: any) {
-            pipeline.push({
-              step: 'vertex_import',
-              status: 'warn',
-              detail: err?.message || 'Vertex import failed — local corpus still usable',
-            });
-          }
-        }
-      } catch (err: any) {
-        pipeline.push({
-          step: 'drive_rag_ingest',
-          status: 'warn',
-          detail: err?.message || 'Drive ingest failed — Google 연동/권한을 확인하세요',
-        });
-        indexingStatus = 'INDEXING';
+      const corpus = await ingestDriveSourceForAgent({
+        sessionId: sid,
+        agentId,
+        driveSourceId: String(googleDriveFolderId),
+      });
+      driveIngest = { docs: corpus.docs.length };
+      if (corpus.docs.length === 0) {
+        failCreate(
+          'drive_rag_ingest',
+          'Drive에서 추출 가능한 문서가 없습니다 (Docs/Sheets/txt/md/json/pdf).'
+        );
       }
+      okStep('drive_rag_ingest', `Ingested ${corpus.docs.length} Drive doc(s)`);
+
+      if (!vertexDataStoreId) {
+        failCreate('vertex_import', 'vertexDataStoreId missing after AI Applications provision');
+      }
+      const sync = await syncLocalCorpusToVertex(agentId, vertexDataStoreId);
+      if (sync.imported <= 0) {
+        failCreate('vertex_import', sync.message || 'Vertex import imported 0 documents');
+      }
+      okStep('vertex_import', sync.message);
+      indexingStatus = 'ACTIVE';
     } else if (needsLocal) {
-      try {
-        const corpus = await ingestLocalUploadsForAgent({
-          agentId,
-          files: localFileList,
-        });
-        driveIngest = {
-          docs: corpus.docs.length,
-          message: corpus.skipped?.length
-            ? `skipped: ${corpus.skipped.slice(0, 3).join('; ')}`
-            : undefined,
-        };
-        indexingStatus = corpus.docs.length > 0 ? 'ACTIVE' : indexingStatus;
-        pipeline.push({
-          step: 'local_upload_ingest',
-          status: corpus.docs.length > 0 ? 'ok' : 'warn',
-          detail:
-            corpus.docs.length > 0
-              ? `Ingested ${corpus.docs.length} local file(s)`
-              : `No text extracted. ${corpus.skipped?.join(' · ') || 'Use txt/md/json/csv/html/pdf'}`,
-        });
-
-        if (vertexDataStoreId && corpus.docs.length > 0 && aiApp.status !== 'error') {
-          try {
-            const sync = await syncLocalCorpusToVertex(agentId, vertexDataStoreId);
-            pipeline.push({
-              step: 'vertex_import',
-              status: sync.imported > 0 ? 'ok' : 'warn',
-              detail: sync.message,
-            });
-            if (sync.imported > 0) indexingStatus = 'ACTIVE';
-          } catch (err: any) {
-            pipeline.push({
-              step: 'vertex_import',
-              status: 'warn',
-              detail: err?.message || 'Vertex import failed — local corpus still usable',
-            });
-          }
-        }
-      } catch (err: any) {
-        pipeline.push({
-          step: 'local_upload_ingest',
-          status: 'warn',
-          detail: err?.message || 'Local upload ingest failed',
-        });
-        indexingStatus = 'INDEXING';
+      const corpus = await ingestLocalUploadsForAgent({
+        agentId,
+        files: localFileList,
+      });
+      driveIngest = {
+        docs: corpus.docs.length,
+        message: corpus.skipped?.length
+          ? `skipped: ${corpus.skipped.slice(0, 3).join('; ')}`
+          : undefined,
+      };
+      if (corpus.docs.length === 0) {
+        failCreate(
+          'local_upload_ingest',
+          `로컬 파일에서 텍스트를 추출하지 못했습니다. ${
+            corpus.skipped?.join(' · ') || 'Use txt/md/json/csv/html/pdf'
+          }`
+        );
       }
-    } else if (resolvedSource === 'local_upload') {
-      pipeline.push({
-        step: 'local_upload',
-        status: 'skip',
-        detail: 'local_upload selected but no files — empty datastore + app only (add files later)',
-      });
-    } else if (resolvedSource !== 'google_drive') {
-      pipeline.push({
-        step: 'data_source',
-        status: 'ok',
-        detail:
-          aiApp.sourceNote ||
-          `Source=${resolvedSource} — app+datastore ready`,
-      });
+      okStep('local_upload_ingest', `Ingested ${corpus.docs.length} local file(s)`);
+
+      if (!vertexDataStoreId) {
+        failCreate('vertex_import', 'vertexDataStoreId missing after AI Applications provision');
+      }
+      const sync = await syncLocalCorpusToVertex(agentId, vertexDataStoreId);
+      if (sync.imported <= 0) {
+        failCreate('vertex_import', sync.message || 'Vertex import imported 0 documents');
+      }
+      okStep('vertex_import', sync.message);
+      indexingStatus = 'ACTIVE';
     } else {
-      pipeline.push({
-        step: 'drive_rag',
-        status: 'skip',
-        detail: 'google_drive selected but no folder/file — empty datastore + app only',
-      });
+      okStep(
+        'data_source',
+        aiApp.sourceNote || `Source=${resolvedSource} — app+datastore ready (no corpus ingest)`
+      );
     }
 
     const parsedFee = parsedFeeEarly;
@@ -850,23 +866,32 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       ownerUserId: me.user?.id,
       ownerEmail: me.user?.email,
     });
-    pipeline.push({ step: 'agent_record', status: 'ok', detail: agentId });
+    okStep('agent_record', agentId);
 
     const tenant = tenantId ? await getTenant(String(tenantId)) : undefined;
     const runtimeBase =
       (tenant?.cloudRunUri && String(tenant.cloudRunUri).replace(/\/$/, '')) ||
       `${req.protocol}://${req.get('host')}`;
 
-    const listing = await registerAgentOnPayShCatalog(newAgent, {
-      baseUrl: runtimeBase,
-      description: req.body.description,
-    });
+    let listing;
+    try {
+      listing = await registerAgentOnPayShCatalog(newAgent, {
+        baseUrl: runtimeBase,
+        description: req.body.description,
+        // Catalog URL이 설정된 환경에서는 원격 게시 실패 = 생성 실패
+        requireRemote: !!config.catalogSiteUrl,
+      });
+    } catch (err: any) {
+      failCreate('paysh_catalog', err?.message || 'Catalog register failed');
+    }
     const publicBase = publicBaseFromReq(req);
     const payShCatalog = enrichCatalogListing(listing, publicBase);
-    pipeline.push({
-      step: 'paysh_catalog',
-      status: 'ok',
-      detail: `${payShCatalog.catalogId} · ${payShCatalog.catalogPageUrl}`,
+    okStep('paysh_catalog', `${payShCatalog.catalogId} · ${payShCatalog.catalogPageUrl}`);
+
+    serverLog('info', 'create', `Agent create succeeded ${agentId}`, {
+      engineId: vertexEngineId,
+      dataStoreId: vertexDataStoreId,
+      pipeline,
     });
 
     res.status(201).json({
@@ -900,6 +925,9 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       }). User wallet is separate.`,
     });
   } catch (err: any) {
+    serverLog('error', 'create', `Agent create failed: ${err?.message || err}`, {
+      agentId: createdAgentId,
+    });
     if (createdAgentId) {
       // Full teardown (vault / partial AI App / catalog / DB) on create failure
       await destroyAgent(createdAgentId).catch(async () => {
@@ -1028,6 +1056,11 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
 
     // Missing store (legacy agents) or Drive source change → ensure AI Applications bundle
     if (!vertexDataStoreId || (folderChanged && nextFolder) || hasLocalFiles) {
+      serverLog('info', 'update', 'Ensuring AI Applications bundle', {
+        agentId: existing.id,
+        folderChanged,
+        hasLocalFiles,
+      });
       const aiApp = await ensureAiApplication({
         displayName: nextName || existing.id,
         appType: nextAiAppType,
@@ -1036,10 +1069,17 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
         websiteUri: nextWebsite,
         gcsUri: nextGcs,
       });
-      if (aiApp.status !== 'error') {
-        vertexDataStoreId = aiApp.dataStoreId;
-        vertexEngineId = aiApp.engineId || vertexEngineId;
+      if (aiApp.status === 'error' || !aiApp.engineId) {
+        serverLog('error', 'update', 'AI Applications ensure failed', {
+          agentId: existing.id,
+          message: aiApp.message,
+        });
+        throw new Error(
+          `[ai_applications] ${aiApp.message || 'AI Applications engine/app missing on update'}`
+        );
       }
+      vertexDataStoreId = aiApp.dataStoreId;
+      vertexEngineId = aiApp.engineId || vertexEngineId;
     }
 
     if (folderChanged && nextFolder) {
@@ -1052,40 +1092,58 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
         });
         return;
       }
-      try {
-        const corpus = await ingestDriveSourceForAgent({
-          sessionId: sid,
-          agentId: existing.id,
-          driveSourceId: String(nextFolder),
-        });
-        driveIngest = { docs: corpus.docs.length };
-        if (vertexDataStoreId && corpus.docs.length > 0) {
-          await syncLocalCorpusToVertex(existing.id, vertexDataStoreId).catch(() => null);
-        }
-        indexingStatus = corpus.docs.length > 0 ? 'ACTIVE' : 'INDEXING';
-      } catch {
-        indexingStatus = 'INDEXING';
+      const corpus = await ingestDriveSourceForAgent({
+        sessionId: sid,
+        agentId: existing.id,
+        driveSourceId: String(nextFolder),
+      });
+      driveIngest = { docs: corpus.docs.length };
+      if (corpus.docs.length === 0) {
+        throw new Error('[drive_rag_ingest] Drive에서 추출 가능한 문서가 없습니다.');
       }
+      if (!vertexDataStoreId) {
+        throw new Error('[vertex_import] vertexDataStoreId missing');
+      }
+      const sync = await syncLocalCorpusToVertex(existing.id, vertexDataStoreId);
+      if (sync.imported <= 0) {
+        throw new Error(`[vertex_import] ${sync.message || 'imported 0 documents'}`);
+      }
+      indexingStatus = 'ACTIVE';
+      serverLog('info', 'update', 'Drive re-ingest ok', {
+        agentId: existing.id,
+        docs: corpus.docs.length,
+        imported: sync.imported,
+      });
     } else if (hasLocalFiles) {
-      try {
-        const corpus = await ingestLocalUploadsForAgent({
-          agentId: existing.id,
-          files: localFileList,
-          append: true,
-        });
-        driveIngest = {
-          docs: corpus.docs.length,
-          message: corpus.skipped?.length
-            ? `skipped: ${corpus.skipped.slice(0, 3).join('; ')}`
-            : undefined,
-        };
-        if (vertexDataStoreId && corpus.docs.length > 0) {
-          await syncLocalCorpusToVertex(existing.id, vertexDataStoreId).catch(() => null);
-        }
-        indexingStatus = corpus.docs.length > 0 ? 'ACTIVE' : 'INDEXING';
-      } catch {
-        indexingStatus = 'INDEXING';
+      const corpus = await ingestLocalUploadsForAgent({
+        agentId: existing.id,
+        files: localFileList,
+        append: true,
+      });
+      driveIngest = {
+        docs: corpus.docs.length,
+        message: corpus.skipped?.length
+          ? `skipped: ${corpus.skipped.slice(0, 3).join('; ')}`
+          : undefined,
+      };
+      if (corpus.docs.length === 0) {
+        throw new Error(
+          `[local_upload_ingest] ${corpus.skipped?.join(' · ') || 'No text extracted from uploads'}`
+        );
       }
+      if (!vertexDataStoreId) {
+        throw new Error('[vertex_import] vertexDataStoreId missing');
+      }
+      const sync = await syncLocalCorpusToVertex(existing.id, vertexDataStoreId);
+      if (sync.imported <= 0) {
+        throw new Error(`[vertex_import] ${sync.message || 'imported 0 documents'}`);
+      }
+      indexingStatus = 'ACTIVE';
+      serverLog('info', 'update', 'Local upload ingest ok', {
+        agentId: existing.id,
+        docs: corpus.docs.length,
+        imported: sync.imported,
+      });
     }
 
     const updated: AgentRecord = {
@@ -1120,8 +1178,11 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
     const listing = await registerAgentOnPayShCatalog(updated, {
       baseUrl: runtimeBase,
       description,
+      requireRemote: !!config.catalogSiteUrl,
     });
     const payShCatalog = enrichCatalogListing(listing, publicBaseFromReq(req));
+
+    serverLog('info', 'update', `Agent update succeeded ${updated.id}`);
 
     res.json({
       status: 'success',
@@ -1134,6 +1195,7 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
       message: 'Agent updated (same id/vault; catalog metadata synced)',
     });
   } catch (err: any) {
+    serverLog('error', 'update', `Agent update failed: ${err?.message || err}`);
     res.status(500).json({ status: 'error', message: err.message });
   }
 });
