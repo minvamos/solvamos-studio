@@ -151,8 +151,8 @@ loadPayShCatalog();
 registerPlatformAuthRoutes(app);
 registerDriveAuthRoutes(app);
 
-/** Developer: ring-buffer server logs (create/invoke/GCP errors, etc.) */
-app.get('/api/dev/logs', requireGoogleSession, (req, res) => {
+/** Developer: ring-buffer server logs — open for now (no auth). */
+app.get('/api/dev/logs', (req, res) => {
   const level = String(req.query.level || 'all') as any;
   const tag = req.query.tag ? String(req.query.tag) : undefined;
   const q = req.query.q ? String(req.query.q) : undefined;
@@ -164,7 +164,7 @@ app.get('/api/dev/logs', requireGoogleSession, (req, res) => {
   });
 });
 
-app.delete('/api/dev/logs', requireGoogleSession, (_req, res) => {
+app.delete('/api/dev/logs', (_req, res) => {
   const cleared = clearDevLogs();
   res.json({ status: 'success', cleared });
 });
