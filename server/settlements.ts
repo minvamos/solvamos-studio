@@ -84,18 +84,31 @@ export async function recordSettlement(input: {
 }
 
 export async function listSettlementsForUser(userId: string): Promise<SettlementRecord[]> {
-  const owned = await prisma.agentOwnership.findMany({
-    where: { userId },
-    select: { agentId: true },
-  });
-  const agentIds = owned.map((o) => o.agentId);
-  if (agentIds.length === 0) return [];
-  const rows = await prisma.paymentSettlement.findMany({
-    where: {
-      OR: [{ ownerUserId: userId }, { agentId: { in: agentIds } }],
-    },
-    orderBy: { createdAt: 'desc' },
-    take: 200,
-  });
-  return rows.map(mapRow);
+  try {
+    const owned = await prisma.agentOwnership.findMany({
+      where: { userId },
+      select: { agentId: true },
+    });
+    const agentIds = owned.map((o) => o.agentId);
+    if (agentIds.length === 0) return [];
+    const rows = await prisma.paymentSettlement.findMany({
+      where: {
+        OR: [{ ownerUserId: userId }, { agentId: { in: agentIds } }],
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+    });
+    return rows.map(mapRow);
+  } catch (err: any) {
+    // Table not migrated yet — return empty rather than 500 the whole Studio shell.
+    const msg = String(err?.message || err);
+    if (
+      err?.code === 'P2021' ||
+      /PaymentSettlement.*does not exist|relation .*PaymentSettlement.*does not exist/i.test(msg)
+    ) {
+      console.warn('[settlements] PaymentSettlement table missing — run prisma migrate deploy');
+      return [];
+    }
+    throw err;
+  }
 }
