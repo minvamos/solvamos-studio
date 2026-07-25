@@ -13,6 +13,8 @@
 
 ## 논리 ER
 
+상세 속성 포함 Mermaid ERD: [`DATABASE_ERD.md`](./DATABASE_ERD.md)
+
 ```mermaid
 erDiagram
   User ||--o{ Session : has
