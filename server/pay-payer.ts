@@ -15,12 +15,15 @@ import {
   Connection,
   Keypair,
   PublicKey,
+  SystemProgram,
   Transaction,
   sendAndConfirmTransaction,
 } from '@solana/web3.js';
 import {
   createAssociatedTokenAccountIdempotentInstruction,
+  createCloseAccountInstruction,
   createTransferInstruction,
+  getAccount,
   getAssociatedTokenAddressSync,
 } from '@solana/spl-token';
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
@@ -94,6 +97,260 @@ export async function loadSettlementKeypair(): Promise<Keypair | null> {
 /** Reset settlement key cache (tests / secret rotation). */
 export function resetSettlementKeypairCache() {
   cachedSettlementKeypair = undefined;
+}
+
+export type EnsureAtaResult = {
+  ok: boolean;
+  ata?: string;
+  created?: boolean;
+  signature?: string;
+  error?: string;
+  /** Settlement key missing — cannot pay rent */
+  skipped?: boolean;
+};
+
+/**
+ * Ensure the owner has a USDC ATA so pay.sh MPP splits can settle immediately.
+ * Platform settlement/operator wallet pays rent (idempotent).
+ */
+export async function ensureUsdcAtaForOwner(ownerWallet: string): Promise<EnsureAtaResult> {
+  const payer = await loadSettlementKeypair();
+  if (!payer) {
+    return {
+      ok: false,
+      skipped: true,
+      error: 'Settlement wallet key unavailable (set PAY_SETTLEMENT_SECRET_PATH)',
+    };
+  }
+  try {
+    const connection = new Connection(config.solanaRpcUrl, 'confirmed');
+    const mint = new PublicKey(config.usdcMint);
+    const owner = new PublicKey(ownerWallet);
+    const ata = getAssociatedTokenAddressSync(mint, owner);
+    const info = await connection.getAccountInfo(ata, 'confirmed');
+    if (info) {
+      return { ok: true, ata: ata.toBase58(), created: false };
+    }
+    const bal = await connection.getBalance(payer.publicKey, 'confirmed');
+    if (bal < 50_000) {
+      return {
+        ok: false,
+        error: `Settlement wallet has insufficient SOL for ATA rent (bal=${bal} lamports)`,
+      };
+    }
+    const tx = new Transaction().add(
+      createAssociatedTokenAccountIdempotentInstruction(payer.publicKey, ata, owner, mint)
+    );
+    const signature = await sendAndConfirmTransaction(connection, tx, [payer], {
+      commitment: 'confirmed',
+    });
+    return { ok: true, ata: ata.toBase58(), created: true, signature };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err).slice(0, 300) };
+  }
+}
+
+export type VaultReclaimResult = {
+  ok: boolean;
+  skipped?: boolean;
+  usdcTransferred?: number;
+  usdcDestination?: string;
+  usdcDestinationKind?: 'owner_primary' | 'platform_treasury' | 'none';
+  ataClosed?: boolean;
+  rentReclaimedTo?: string;
+  solTransferred?: number;
+  solDestination?: string;
+  signatures?: string[];
+  error?: string;
+  details: string[];
+};
+
+function isPubkey(s: string | null | undefined): s is string {
+  if (!s) return false;
+  try {
+    return new PublicKey(s).toBytes().length === 32;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Agent delete sweep (must run BEFORE vault secret is deleted):
+ *   1) USDC balance → owner's primary wallet (fallback: platform treasury)
+ *   2) Close USDC ATA → rent lamports back to operator (who paid create rent)
+ *   3) Leftover native SOL on vault → same funds destination
+ *
+ * Operator is fee-payer so the empty vault can still sign authority ops.
+ */
+export async function reclaimAgentVaultOnDelete(opts: {
+  agent: AgentRecord;
+  ownerWallet?: string | null;
+}): Promise<VaultReclaimResult> {
+  const details: string[] = [];
+  const { agent, ownerWallet } = opts;
+
+  if (!agent.publicKey || !agent.secretManagerPath) {
+    return { ok: true, skipped: true, details: ['no vault pubkey/secret — skip reclaim'] };
+  }
+
+  const operator = await loadSettlementKeypair();
+  const vault = await loadAgentKeypair(agent);
+  if (!vault) {
+    return {
+      ok: false,
+      error: `Vault key unavailable for agent ${agent.id}`,
+      details,
+    };
+  }
+
+  try {
+    const connection = new Connection(config.solanaRpcUrl, 'confirmed');
+    const mint = new PublicKey(config.usdcMint);
+    const agentAta = getAssociatedTokenAddressSync(mint, vault.publicKey);
+    const ataInfo = await connection.getAccountInfo(agentAta, 'confirmed');
+    const vaultLamports = await connection.getBalance(vault.publicKey, 'confirmed');
+
+    let tokenAmount = 0n;
+    if (ataInfo) {
+      try {
+        const acc = await getAccount(connection, agentAta, 'confirmed');
+        tokenAmount = acc.amount;
+      } catch (err: any) {
+        details.push(`ATA read failed: ${String(err?.message || err).slice(0, 120)}`);
+      }
+    }
+
+    const needsChainWork = !!ataInfo || tokenAmount > 0n || vaultLamports > 0;
+    if (!needsChainWork) {
+      return {
+        ok: true,
+        skipped: true,
+        ataClosed: false,
+        details: ['no ATA / USDC / SOL on vault — nothing to reclaim'],
+      };
+    }
+
+    if (!operator) {
+      return {
+        ok: false,
+        error: 'Settlement wallet key unavailable (set PAY_SETTLEMENT_SECRET_PATH) — cannot reclaim',
+        details,
+      };
+    }
+
+    const ownerDest = isPubkey(ownerWallet) ? ownerWallet : null;
+    const treasuryDest = isPubkey(config.platformTreasuryPubkey)
+      ? config.platformTreasuryPubkey
+      : null;
+    const fundsDest = ownerDest || treasuryDest;
+    const destKind: VaultReclaimResult['usdcDestinationKind'] = ownerDest
+      ? 'owner_primary'
+      : fundsDest
+        ? 'platform_treasury'
+        : 'none';
+
+    if (tokenAmount > 0n && !fundsDest) {
+      return {
+        ok: false,
+        error: 'Vault has USDC but owner has no registered wallet (and no treasury fallback)',
+        details,
+      };
+    }
+
+    const signatures: string[] = [];
+    let usdcTransferred = 0;
+    let ataClosed = false;
+    let solTransferred = 0;
+    let solDestination: string | undefined;
+    let usdcDestination: string | undefined;
+
+    if (ataInfo) {
+      const tx = new Transaction();
+      if (tokenAmount > 0n && fundsDest) {
+        const destPk = new PublicKey(fundsDest);
+        const destAta = getAssociatedTokenAddressSync(mint, destPk);
+        tx.add(
+          createAssociatedTokenAccountIdempotentInstruction(
+            operator.publicKey,
+            destAta,
+            destPk,
+            mint
+          )
+        );
+        tx.add(
+          createTransferInstruction(agentAta, destAta, vault.publicKey, tokenAmount)
+        );
+        usdcTransferred = Number(tokenAmount) / 10 ** USDC_DECIMALS;
+        usdcDestination = fundsDest;
+        details.push(
+          `USDC ${usdcTransferred} → ${fundsDest.slice(0, 4)}…${fundsDest.slice(-4)} (${destKind})`
+        );
+      } else if (tokenAmount > 0n) {
+        return {
+          ok: false,
+          error: 'Cannot transfer USDC — no destination wallet',
+          details,
+        };
+      }
+
+      // Rent returns to operator (platform paid ATA create).
+      tx.add(
+        createCloseAccountInstruction(agentAta, operator.publicKey, vault.publicKey)
+      );
+      details.push(
+        `close ATA → rent to operator ${operator.publicKey.toBase58().slice(0, 4)}…`
+      );
+
+      const sig = await sendAndConfirmTransaction(connection, tx, [operator, vault], {
+        commitment: 'confirmed',
+      });
+      signatures.push(sig);
+      ataClosed = true;
+    } else {
+      details.push('no USDC ATA to close');
+    }
+
+    const lamportsLeft = await connection.getBalance(vault.publicKey, 'confirmed');
+    if (lamportsLeft > 0) {
+      const solDest = fundsDest || operator.publicKey.toBase58();
+      const txSol = new Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey: vault.publicKey,
+          toPubkey: new PublicKey(solDest),
+          lamports: lamportsLeft,
+        })
+      );
+      // Operator pays fees so vault can empty completely.
+      const sigSol = await sendAndConfirmTransaction(connection, txSol, [operator, vault], {
+        commitment: 'confirmed',
+      });
+      signatures.push(sigSol);
+      solTransferred = lamportsLeft / 1e9;
+      solDestination = solDest;
+      details.push(
+        `SOL ${solTransferred} → ${solDest.slice(0, 4)}…${solDest.slice(-4)}`
+      );
+    }
+
+    return {
+      ok: true,
+      usdcTransferred,
+      usdcDestination,
+      usdcDestinationKind: destKind,
+      ataClosed,
+      rentReclaimedTo: ataClosed ? operator.publicKey.toBase58() : undefined,
+      solTransferred,
+      solDestination,
+      signatures,
+      details,
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      error: String(err?.message || err).slice(0, 300),
+      details,
+    };
+  }
 }
 
 function toUnits(amountUsdc: number): bigint {

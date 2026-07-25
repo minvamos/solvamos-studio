@@ -270,16 +270,52 @@ export type DestroyAgentResult = {
   vault: { deleted: boolean; detail: string };
   corpusDeleted: boolean;
   catalogUnlisted: boolean;
+  reclaim?: import('./pay-payer.js').VaultReclaimResult;
 };
 
-/** Full teardown: AI App + datastore, vault secret, corpus, catalog, DB. */
-export async function destroyAgent(id: string): Promise<DestroyAgentResult> {
+/**
+ * Full teardown: vault reclaim → AI App + datastore, vault secret, corpus, catalog, DB.
+ * @param opts.softReclaim  create-failure cleanup — log reclaim errors but continue teardown
+ */
+export async function destroyAgent(
+  id: string,
+  opts?: { softReclaim?: boolean }
+): Promise<DestroyAgentResult> {
   const agent = await getAgent(id);
   const { destroyAiApplication } = await import('./rag.js');
   const { deletePrivateKeyFromGCP } = await import('./vault.js');
   const { deleteLocalRagCorpus } = await import('./drive-ingest.js');
   const { unlistFromCatalog } = await import('./paysh-catalog.js');
   const { unlistCatalogAgent, deleteCatalogAgentRow } = await import('./catalog-db.js');
+  const { reclaimAgentVaultOnDelete } = await import('./pay-payer.js');
+  const { getPrimaryWallet } = await import('./wallets.js');
+
+  // On-chain sweep BEFORE deleting the vault secret (signing key required).
+  let reclaim: DestroyAgentResult['reclaim'];
+  if (agent) {
+    const ownership = await prisma.agentOwnership.findFirst({
+      where: { agentId: id, role: 'owner' },
+    });
+    const catalog = await prisma.catalogAgent.findUnique({ where: { agentId: id } }).catch(() => null);
+    const ownerUserId = ownership?.userId ?? catalog?.ownerUserId ?? null;
+    const primary = ownerUserId ? await getPrimaryWallet(ownerUserId) : undefined;
+    reclaim = await reclaimAgentVaultOnDelete({
+      agent,
+      ownerWallet: primary?.address,
+    });
+    if (!reclaim.ok && !reclaim.skipped) {
+      if (opts?.softReclaim) {
+        console.warn(
+          `[vault_reclaim] soft-continue agent=${id}: ${reclaim.error || 'failed'}`,
+          reclaim.details
+        );
+      } else {
+        throw new Error(
+          `[vault_reclaim] ${reclaim.error || 'failed'} — agent not deleted (register a wallet or retry)`
+        );
+      }
+    }
+  }
 
   const aiApp = agent
     ? await destroyAiApplication({
@@ -309,6 +345,7 @@ export async function destroyAgent(id: string): Promise<DestroyAgentResult> {
     vault,
     corpusDeleted,
     catalogUnlisted: true,
+    reclaim,
   };
 }
 

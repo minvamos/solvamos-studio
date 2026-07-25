@@ -4,6 +4,10 @@
  * pay server validates ATAs at boot and exits if any split recipient lacks one.
  * Operator key pays rent; ATA owner = seller vault / treasury pubkey.
  *
+ * After create we poll until the ATA is visible on the same RPC — otherwise
+ * pay's immediate validation races public Devnet lag and crashes with
+ * "Missing stable token account for payout recipient".
+ *
  * Env:
  *   PAY_OPERATOR_KEY_FILE  Solana id.json (64-byte secret)
  *   PROVIDER_RUNTIME       rendered provider.yml (recipients.account lines)
@@ -28,12 +32,18 @@ import {
 const DEVNET_USDC = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
 const MAINNET_USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const VISIBLE_ATTEMPTS = 20;
+const VISIBLE_DELAY_MS = 500;
 
 function defaultMint(network) {
   if (process.env.USDC_MINT) return process.env.USDC_MINT;
   const n = String(network || 'devnet').toLowerCase();
   if (n === 'mainnet' || n === 'mainnet-beta') return MAINNET_USDC;
   return DEVNET_USDC;
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 function loadOperator() {
@@ -61,9 +71,22 @@ function collectOwners() {
   return [...owners];
 }
 
+async function waitUntilVisible(connection, ata, label) {
+  for (let i = 1; i <= VISIBLE_ATTEMPTS; i++) {
+    const info = await connection.getAccountInfo(ata, 'confirmed');
+    if (info) return true;
+    await sleep(VISIBLE_DELAY_MS);
+  }
+  // One more try at finalized — some RPC nodes lag on confirmed.
+  const finalized = await connection.getAccountInfo(ata, 'finalized');
+  if (finalized) return true;
+  console.error(`[ensure-atas] ATA not visible after wait owner=${label} ata=${ata.toBase58()}`);
+  return false;
+}
+
 async function ensureAta(connection, payer, mint, owner) {
   const ata = getAssociatedTokenAddressSync(mint, owner);
-  const info = await connection.getAccountInfo(ata);
+  const info = await connection.getAccountInfo(ata, 'confirmed');
   if (info) {
     return { owner: owner.toBase58(), ata: ata.toBase58(), created: false };
   }
@@ -72,8 +95,24 @@ async function ensureAta(connection, payer, mint, owner) {
   );
   const sig = await sendAndConfirmTransaction(connection, tx, [payer], {
     commitment: 'confirmed',
+    maxRetries: 5,
   });
+  const visible = await waitUntilVisible(connection, ata, owner.toBase58().slice(0, 8));
+  if (!visible) {
+    throw new Error(`ATA created (sig=${sig}) but not visible on RPC yet`);
+  }
   return { owner: owner.toBase58(), ata: ata.toBase58(), created: true, signature: sig };
+}
+
+async function verifyAllVisible(connection, mint, owners) {
+  const missing = [];
+  for (const ownerStr of owners) {
+    const owner = new PublicKey(ownerStr);
+    const ata = getAssociatedTokenAddressSync(mint, owner);
+    const info = await connection.getAccountInfo(ata, 'confirmed');
+    if (!info) missing.push(ownerStr);
+  }
+  return missing;
 }
 
 const rpc = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
@@ -120,5 +159,11 @@ for (const ownerStr of owners) {
   }
 }
 
-console.log(`[ensure-atas] done created=${created} existed=${existed} failed=${failed}`);
+const missing = await verifyAllVisible(connection, mint, owners);
+if (missing.length) {
+  console.error(`[ensure-atas] preflight still missing ${missing.length} ATA(s):`, missing.join(', '));
+  process.exit(1);
+}
+
+console.log(`[ensure-atas] done created=${created} existed=${existed} failed=${failed} verified=${owners.length}`);
 if (failed > 0) process.exit(1);

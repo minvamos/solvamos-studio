@@ -249,6 +249,9 @@ if [ -n "${PAY_OPERATOR_KEY_FILE:-}" ] && [ -f "${PAY_OPERATOR_KEY_FILE:-}" ]; t
     echo "[pay-gateway] Top up operator wallet with devnet SOL, then redeploy."
     exit 1
   fi
+  # Extra settle time so pay's RPC read does not race Devnet propagation
+  # (seen: create confirmed → pay validate → Missing stable token account).
+  sleep 2
 else
   echo "[pay-gateway] WARN: no PAY_OPERATOR_KEY_FILE — skipping ATA ensure (pay may fail if ATAs missing)"
 fi

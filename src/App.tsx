@@ -9,6 +9,7 @@ import Landing from './Landing';
 import AppShell, { AppTab } from './AppShell';
 import StudioPage from './pages/StudioPage';
 import AgentsPage from './pages/AgentsPage';
+import AgentDetailPage, { type DetailTab } from './pages/AgentDetailPage';
 import SettlementsPage from './pages/SettlementsPage';
 import MyPage from './pages/MyPage';
 import DevAgentLabPage from './pages/DevAgentLabPage';
@@ -41,7 +42,12 @@ export default function App() {
   const [settlements, setSettlements] = useState<Settlement[]>([]);
 
   const [builderStep, setBuilderStep] = useState<1 | 2 | 3>(1);
+  /** Studio hub vs create/edit form (URL ?agent= only for edit). */
+  const [studioView, setStudioView] = useState<'landing' | 'builder'>('landing');
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
+  /** My-agents detail (`/agents?agent=`). */
+  const [detailAgentId, setDetailAgentId] = useState<string | null>(null);
+  const [detailTab, setDetailTab] = useState<DetailTab>('overview');
   const [deletingAgentId, setDeletingAgentId] = useState<string | null>(null);
   /** Drive folder id when edit started — only send folder on PATCH if user changed it */
   const [editBaselineFolderId, setEditBaselineFolderId] = useState<string>('');
@@ -81,7 +87,9 @@ export default function App() {
   const [isVerifyingPayment, setIsVerifyingPayment] = useState(false);
   const [customSignature, setCustomSignature] = useState('');
   /** Studio: off by default (direct Vertex). Turn on to demo pay.sh peer hops. */
-  const [enableA2A, setEnableA2A] = useState(false);
+  // Default ON: owner-test is free for calling your agent, but A2A peer hops
+  // should still run so creators can verify catalog escalation.
+  const [enableA2A, setEnableA2A] = useState(true);
 
   const [driveSessionId, setDriveSessionId] = useState<string>(
     () => localStorage.getItem('solvamos_drive_session') || ''
@@ -107,14 +115,73 @@ export default function App() {
   const [walletError, setWalletError] = useState<string | null>(null);
 
   const chatScrollRef = useRef<HTMLDivElement>(null);
+  /** Avoid re-hydrating edit form on every agents poll when URL has ?agent=. */
+  const hydratedEditIdRef = useRef<string | null>(null);
 
   const navigateTab = (
     tab: AppTab,
-    options?: { replace?: boolean; agentId?: string | null }
+    options?: {
+      replace?: boolean;
+      agentId?: string | null;
+      openBuilder?: boolean;
+      detailTab?: DetailTab;
+    }
   ) => {
     setView('studio');
     setActiveTab(tab);
-    writeAppRoute(tab, options);
+
+    if (tab === 'studio') {
+      setDetailAgentId(null);
+      if (options?.agentId) {
+        setStudioView('builder');
+        writeAppRoute(tab, { replace: options.replace, agentId: options.agentId });
+        return;
+      }
+      if (options?.openBuilder) {
+        setStudioView('builder');
+        writeAppRoute(tab, { replace: options.replace, agentId: null });
+        return;
+      }
+      // Nav click / hub: never reopen a cached edit form
+      setStudioView('landing');
+      setEditingAgentId(null);
+      hydratedEditIdRef.current = null;
+      setCreationResult(null);
+      setBuilderStep(1);
+      writeAppRoute(tab, { replace: options?.replace, agentId: null });
+      return;
+    }
+
+    if (tab === 'list') {
+      const id = options?.agentId ?? null;
+      setDetailAgentId(id);
+      if (options?.detailTab) setDetailTab(options.detailTab);
+      if (!id) setDetailTab('overview');
+      writeAppRoute(tab, { replace: options?.replace, agentId: id });
+      return;
+    }
+
+    writeAppRoute(tab, { replace: options?.replace, agentId: options?.agentId ?? null });
+  };
+
+  const hydrateEditForm = (agent: Agent) => {
+    setEditBaselineFolderId(agent.googleDriveFolderId || '');
+    setCreationResult(null);
+    setBuilderStep(1);
+    setOptions({
+      role: (agent.role as PromptOptions['role']) || 'support',
+      customRole: agent.customRole,
+      tone: (agent.tone as PromptOptions['tone']) || 'professional',
+      securityLevel: (agent.securityLevel as PromptOptions['securityLevel']) || 'strict',
+      fee: agent.fee ?? agent.perCallPriceUsdc ?? 0,
+      aiAppType: (agent.aiAppType as PromptOptions['aiAppType']) || 'search_docs',
+      dataSourceType: (agent.dataSourceType as PromptOptions['dataSourceType']) || 'local_upload',
+      websiteUri: agent.websiteUri,
+      gcsUri: agent.gcsUri,
+    });
+    setAgentName(agent.agentName || agent.customRole || '');
+    setSelectedFolderId(agent.googleDriveFolderId || '');
+    setLocalFiles([]);
   };
 
   const authFetch = (url: string, init?: RequestInit) => {
@@ -547,14 +614,41 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const initial = parseAppRoute();
-    if (initial.agentId) {
-      const routedAgent = agents.find((candidate) => candidate.id === initial.agentId);
-      if (routedAgent) {
-        setActiveAgent(routedAgent);
-        setEditingAgentId(routedAgent.id);
+    const applyAgentFromRoute = (route: ReturnType<typeof parseAppRoute>, isPop: boolean) => {
+      if (route.tab === 'studio' && route.agentId) {
+        const agent = agents.find((candidate) => candidate.id === route.agentId);
+        if (agent) {
+          setActiveAgent(agent);
+          setEditingAgentId(agent.id);
+          setStudioView('builder');
+          setDetailAgentId(null);
+          if (hydratedEditIdRef.current !== agent.id) {
+            hydrateEditForm(agent);
+            hydratedEditIdRef.current = agent.id;
+          }
+        }
+        return;
       }
-    }
+      if (route.tab === 'list' && route.agentId) {
+        const agent = agents.find((candidate) => candidate.id === route.agentId);
+        if (agent) {
+          setActiveAgent(agent);
+          setDetailAgentId(agent.id);
+          setEditingAgentId(null);
+        }
+        return;
+      }
+      if (!isPop) return;
+      if (route.tab === 'studio') {
+        setStudioView('landing');
+        setEditingAgentId(null);
+        setDetailAgentId(null);
+      } else if (route.tab === 'list') {
+        setDetailAgentId(null);
+      }
+    };
+
+    applyAgentFromRoute(parseAppRoute(), false);
 
     const onPopState = () => {
       if (window.location.pathname === '/catalog' || window.location.pathname.startsWith('/catalog/')) {
@@ -572,17 +666,11 @@ export default function App() {
       }
       setView('studio');
       setActiveTab(route.tab);
-      if (route.agentId) {
-        const agent = agents.find((candidate) => candidate.id === route.agentId);
-        if (agent) {
-          setActiveAgent(agent);
-          setEditingAgentId(agent.id);
-        }
-      }
+      applyAgentFromRoute(route, true);
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
-  }, [agents]);
+  }, [agents, serverStatus?.catalogMarketplaceUrl, serverStatus?.catalogPageUrl]);
 
   useEffect(() => {
     const { role, tone, securityLevel, customRole } = options;
@@ -623,32 +711,31 @@ export default function App() {
   const beginEditAgent = (agent: Agent) => {
     setActiveAgent(agent);
     setEditingAgentId(agent.id);
-    setEditBaselineFolderId(agent.googleDriveFolderId || '');
-    setCreationResult(null);
-    setBuilderStep(1);
-    setOptions({
-      role: (agent.role as PromptOptions['role']) || 'support',
-      customRole: agent.customRole,
-      tone: (agent.tone as PromptOptions['tone']) || 'professional',
-      securityLevel: (agent.securityLevel as PromptOptions['securityLevel']) || 'strict',
-      fee: agent.fee ?? agent.perCallPriceUsdc ?? 0,
-      aiAppType: (agent.aiAppType as PromptOptions['aiAppType']) || 'search_docs',
-      dataSourceType: (agent.dataSourceType as PromptOptions['dataSourceType']) || 'local_upload',
-      websiteUri: agent.websiteUri,
-      gcsUri: agent.gcsUri,
-    });
-    setAgentName(agent.agentName || agent.customRole || '');
-    setSelectedFolderId(agent.googleDriveFolderId || '');
-    setLocalFiles([]);
+    setDetailAgentId(null);
+    setStudioView('builder');
+    hydrateEditForm(agent);
+    hydratedEditIdRef.current = agent.id;
     navigateTab('studio', { agentId: agent.id });
+  };
+
+  const openAgentDetail = (agent: Agent, tab: DetailTab = 'overview') => {
+    setActiveAgent(agent);
+    setDetailAgentId(agent.id);
+    setDetailTab(tab);
+    setEditingAgentId(null);
+    setStudioView('landing');
+    navigateTab('list', { agentId: agent.id, detailTab: tab });
   };
 
   const startNewAgent = () => {
     setEditingAgentId(null);
+    hydratedEditIdRef.current = null;
     setEditBaselineFolderId('');
     setActiveAgent(null);
+    setDetailAgentId(null);
     setCreationResult(null);
     setBuilderStep(1);
+    setStudioView('builder');
     setOptions({
       role: 'support',
       tone: 'professional',
@@ -663,7 +750,7 @@ export default function App() {
     setSelectedFolderId('');
     setSelectedDriveName(null);
     setLocalFiles([]);
-    navigateTab('studio');
+    navigateTab('studio', { openBuilder: true });
   };
 
   const handleCreateAgent = async () => {
@@ -769,12 +856,22 @@ export default function App() {
           return [saved, ...without];
         });
         setActiveAgent(saved);
-        // 저장 후에도 편집 모드 유지 → 다시 누르면 PATCH (신규 게시 방지)
-        setEditingAgentId(saved.id);
         setEditBaselineFolderId(saved.googleDriveFolderId || '');
         setLocalFiles([]);
         setBuilderStep(3);
-        navigateTab('studio', { replace: true, agentId: saved.id });
+        if (isEdit) {
+          // 편집 저장 후에도 편집 모드 유지 → 다시 누르면 PATCH
+          setEditingAgentId(saved.id);
+          setStudioView('builder');
+          navigateTab('studio', { replace: true, agentId: saved.id });
+        } else {
+          // 신규 생성 → 상세 페이지로 이동 (테스트 대화 탭 포함)
+          setEditingAgentId(null);
+          setStudioView('landing');
+          setDetailAgentId(saved.id);
+          setDetailTab('overview');
+          navigateTab('list', { replace: true, agentId: saved.id });
+        }
         await new Promise((r) => setTimeout(r, 450));
       } else {
         alert(`Error ${isEdit ? 'updating' : 'creating'} agent: ${data.message}`);
@@ -796,7 +893,7 @@ export default function App() {
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if ((!inputText.trim() && chatAttachments.length === 0) || !activeAgent || !editingAgentId) {
+    if ((!inputText.trim() && chatAttachments.length === 0) || !activeAgent) {
       return;
     }
 
@@ -1170,17 +1267,20 @@ export default function App() {
     >
       {activeTab === 'studio' && (
         <StudioPage
+          studioView={studioView}
+          agentCount={agents.length}
           options={options}
           setOptions={setOptions}
           agentName={agentName}
           setAgentName={setAgentName}
-          livePromptPreview={livePromptPreview}
           isLoading={isLoading}
           builderStep={builderStep}
           creationResult={creationResult}
           editingAgentId={editingAgentId}
           onCreate={handleCreateAgent}
           onStartNewAgent={startNewAgent}
+          onOpenAgentsList={() => navigateTab('list')}
+          onBackToLanding={() => navigateTab('studio')}
           driveEmail={driveEmail}
           primaryWalletAddress={primaryWallet?.address || null}
           primaryWalletLabel={primaryWallet?.label || null}
@@ -1202,29 +1302,44 @@ export default function App() {
           tenantIdInput={tenantIdInput}
           setTenantIdInput={setTenantIdInput}
           activeAgent={activeAgent}
+          copiedId={copiedId}
+          onCopy={handleCopyText}
+          serverStatus={serverStatus}
+        />
+      )}
+      {activeTab === 'list' && detailAgentId && activeAgent?.id === detailAgentId ? (
+        <AgentDetailPage
+          agent={activeAgent}
+          initialTab={detailTab}
+          marketplaceUrl={
+            serverStatus?.catalogMarketplaceUrl ||
+            serverStatus?.catalogPageUrl ||
+            CATALOG_MARKETPLACE
+          }
+          onBack={() => navigateTab('list')}
+          onEdit={beginEditAgent}
           chatHistory={chatHistory}
           inputText={inputText}
           setInputText={setInputText}
           onSendMessage={handleSendMessage}
           pendingPayment={pendingPayment}
           paymentLogs={paymentLogs}
-          isVerifyingPayment={isVerifyingPayment}
-          customSignature={customSignature}
-          setCustomSignature={setCustomSignature}
           onAcknowledgeAndSign={handleAcknowledgeAndSign}
           chatScrollRef={chatScrollRef}
-          copiedId={copiedId}
-          onCopy={handleCopyText}
-          serverStatus={serverStatus}
           enableA2A={enableA2A}
           setEnableA2A={setEnableA2A}
           chatAttachments={chatAttachments}
           onChatAttachmentsChange={setChatAttachments}
           enableWebSearch={enableWebSearch}
           setEnableWebSearch={setEnableWebSearch}
+          paymentNetwork={serverStatus?.paymentNetwork}
+          primaryWalletAddress={primaryWallet?.address || null}
+          primaryWalletLabel={primaryWallet?.label || null}
+          copiedId={copiedId}
+          onCopy={handleCopyText}
         />
-      )}
-      {activeTab === 'list' && (
+      ) : null}
+      {activeTab === 'list' && !(detailAgentId && activeAgent?.id === detailAgentId) && (
         <AgentsPage
           agents={agents}
           marketplaceUrl={
@@ -1232,9 +1347,7 @@ export default function App() {
             serverStatus?.catalogPageUrl ||
             CATALOG_MARKETPLACE
           }
-          onSelect={(agent) => {
-            beginEditAgent(agent);
-          }}
+          onSelect={(agent) => openAgentDetail(agent, 'overview')}
           onEdit={beginEditAgent}
           deletingAgentId={deletingAgentId}
           onToggleStatus={async (agent) => {
@@ -1285,6 +1398,10 @@ export default function App() {
                 if (activeAgent?.id === agent.id) {
                   setActiveAgent(null);
                   setEditingAgentId(null);
+                }
+                if (detailAgentId === agent.id) {
+                  setDetailAgentId(null);
+                  navigateTab('list', { replace: true });
                 }
                 const gcpNote = (data.aiApp?.details || []).slice(0, 2).join(' · ');
                 alert(

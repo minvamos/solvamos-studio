@@ -17,7 +17,11 @@ import {
   getSettlementBySignature,
 } from './server/settlements.js';
 import { verifyPayment } from './server/payment.js';
-import { payoutGatewaySale, getWalletBalances } from './server/pay-payer.js';
+import {
+  payoutGatewaySale,
+  getWalletBalances,
+  ensureUsdcAtaForOwner,
+} from './server/pay-payer.js';
 import { parseCallChainHeader } from './server/spend-policy.js';
 import { payApiRouter } from './server/payapi.js';
 import { ensureAiApplication, destroyAiApplication, syncLocalCorpusToVertex } from './server/rag.js';
@@ -741,6 +745,30 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       okStep('vault_persist', `Secret Manager: ${gcpStorage.path}`);
     }
 
+    // USDC ATA must exist before pay-gateway can accept MPP splits for this vault.
+    // Operator/settlement wallet pays rent so payment works immediately (no boot wait).
+    const ataEnsure = await ensureUsdcAtaForOwner(publicKey);
+    if (ataEnsure.ok) {
+      okStep(
+        'usdc_ata',
+        ataEnsure.created
+          ? `created ${ataEnsure.ata}${ataEnsure.signature ? ` sig=${ataEnsure.signature.slice(0, 12)}…` : ''}`
+          : `exists ${ataEnsure.ata}`
+      );
+    } else if (parsedFeeEarly > 0) {
+      failCreate('usdc_ata', ataEnsure.error || 'USDC ATA create failed');
+    } else {
+      serverLog('warn', 'create', `USDC ATA skipped/failed (free agent): ${ataEnsure.error}`, {
+        agentId,
+        publicKey,
+      });
+      pipeline.push({
+        step: 'usdc_ata',
+        status: 'error',
+        detail: ataEnsure.error || 'skipped',
+      });
+    }
+
     // Persist agent row early so RagDocument FK / catalog can attach
     await putAgent({
       id: agentId,
@@ -994,8 +1022,9 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       agentId: createdAgentId,
     });
     if (createdAgentId) {
-      // Full teardown (vault / partial AI App / catalog / DB) on create failure
-      await destroyAgent(createdAgentId).catch(async () => {
+      // Full teardown (vault / partial AI App / catalog / DB) on create failure.
+      // softReclaim: don't block cleanup if ATA close fails in localdev.
+      await destroyAgent(createdAgentId, { softReclaim: true }).catch(async () => {
         await deleteAgent(createdAgentId);
       });
     }
@@ -1026,7 +1055,8 @@ app.delete('/api/agents/:id', requireGoogleSession, async (req, res) => {
     const result = await destroyAgent(agentId);
     res.json({
       status: 'success',
-      message: 'Agent deleted (AI Applications app/datastore, vault, catalog, DB)',
+      message:
+        'Agent deleted (vault USDC→owner wallet, ATA rent→operator, AI App, vault secret, catalog, DB)',
       ...result,
     });
   } catch (err: any) {
@@ -1220,6 +1250,20 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
         });
       }
       indexingStatus = 'ACTIVE';
+    }
+
+    if (nextFee > 0 && existing.publicKey) {
+      const ataEnsure = await ensureUsdcAtaForOwner(existing.publicKey);
+      if (!ataEnsure.ok) {
+        throw new Error(
+          `[usdc_ata] ${ataEnsure.error || 'USDC ATA required before paid listing'}`
+        );
+      }
+      serverLog('info', 'update', 'USDC ATA ready for paid agent', {
+        agentId: existing.id,
+        created: ataEnsure.created,
+        ata: ataEnsure.ata,
+      });
     }
 
     const updated: AgentRecord = {

@@ -265,7 +265,7 @@ export default function AgentsPage({
                       type="button"
                       onClick={() => onSelect(agent)}
                       className="p-2 rounded-lg bg-surface-container-high hover:bg-surface-container-highest text-on-surface-variant hover:text-on-surface"
-                      title="테스트"
+                      title="상세 / 테스트"
                     >
                       <BarChart3 className="w-4 h-4" />
                     </button>

@@ -106,10 +106,14 @@ export async function runAgentInvoke(
         : [...input.callChain, agent.id]
       : [agent.id];
 
+  // Owner-test only skips the paywall for invoking *this* agent.
+  // Peer escalation (Catalog A2A) stays on by default so creators can verify
+  // "my agent asks other agents" — set enableA2A:false to disable. Paid peers
+  // still spend from the caller agent vault (not free).
   const result = await orchestrateA2ATurn({
     agent,
     userPrompt: input.prompt,
-    enablePeers: studio ? input.enableA2A === true : input.enableA2A !== false,
+    enablePeers: input.enableA2A !== false,
     history: input.history,
     attachments: input.attachments,
     webSearch: input.webSearch === true,
