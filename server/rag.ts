@@ -468,9 +468,41 @@ export async function generateGroundedAnswer(opts: {
     });
     if (appAnswer.ok && appAnswer.answer) {
       const { formatAgentChatMessage } = await import('./format-reply.js');
+      const answer = formatAgentChatMessage(appAnswer.answer);
+      // Engine often returns a fixed KO/EN "couldn't summarize" for greetings / OOD
+      // while still setting relatedQuestions — do not treat that as a strong answer.
+      const engineRefusal =
+        /요약을 생성할 수 없|검색어에 대한 요약|요약할 수 없|could not generate.*(summary|answer)|unable to generate.*(summary|answer)/i.test(
+          answer
+        );
+      const noGrounding =
+        engineRefusal && !(appAnswer.citations && appAnswer.citations.length);
+      // relatedQuestions are follow-up chips, not a greeting reply — use Gemini chat.
+      if (noGrounding) {
+        const gen = await generateAnswer({
+          systemPrompt: opts.systemPrompt,
+          userPrompt: opts.userPrompt,
+          contextBlock: '',
+          geminiApiKey: opts.geminiApiKey || config.geminiApiKey,
+          history: opts.history,
+        });
+        return {
+          answer: formatAgentChatMessage(gen.text),
+          confidence: 0.7,
+          citations: [],
+          mode: 'gemini_only',
+          generationBackend: gen.backend,
+          engineId: opts.engineId,
+          session: appAnswer.session,
+          relatedQuestions: appAnswer.relatedQuestions,
+          retrievalError:
+            'Engine Answer non-summary fallback → Gemini conversational reply',
+          toolsUsed: ['engine_answer_skipped', 'gemini_chat'],
+        };
+      }
       return {
-        answer: formatAgentChatMessage(appAnswer.answer),
-        confidence: 0.95,
+        answer,
+        confidence: engineRefusal ? 0.25 : 0.95,
         citations: appAnswer.citations,
         mode: 'ai_application',
         generationBackend: 'discovery_engine_answer',
@@ -478,6 +510,9 @@ export async function generateGroundedAnswer(opts: {
         session: appAnswer.session,
         relatedQuestions: appAnswer.relatedQuestions,
         toolsUsed: ['engine_answer', 'multimodal_corpus'],
+        retrievalError: engineRefusal
+          ? 'Engine Answer returned non-summary fallback (likely greeting/OOD)'
+          : undefined,
       };
     }
     // Engine exists but answer failed (empty index / LLM addon) — surface clearly; do NOT

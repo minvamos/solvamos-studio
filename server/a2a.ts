@@ -90,12 +90,20 @@ function splitPeersByFee(peers: PayShCatalogEntry[]): {
   return { free, paid };
 }
 
+/** Discovery Engine Answer fallback when it cannot ground a summary (often greetings / OOD). */
+function isEngineRefusalAnswer(text: string): boolean {
+  return /요약을 생성할 수 없|검색어에 대한 요약|요약할 수 없|could not generate.*(summary|answer)|unable to generate.*(summary|answer)|no summary/i.test(
+    text
+  );
+}
+
 function looksUncertain(text: string): boolean {
   const t = text.toLowerCase().trim();
   // Short greetings are fine — do not treat as failed answers
   if (/^(hi|hello|hey|안녕|안녕하세요|테스트)[!~.]*$/i.test(t)) return false;
+  if (isEngineRefusalAnswer(text)) return true;
   return (
-    /죄송|모르|알 수 없|정보가 없|확인할 수 없|insufficient|i don't know|i do not know|cannot find|no (relevant )?information|unable to answer|생성 불가|자료가 없/.test(
+    /죄송|모르|알 수 없|정보가 없|확인할 수 없|insufficient|i don't know|i do not know|cannot find|no (relevant )?information|unable to answer|생성 불가|생성할 수 없|자료가 없/.test(
       t
     ) || text.trim().length < 40
   );
@@ -108,7 +116,9 @@ export function isSelfSufficient(rag: RagResult, userPrompt: string): boolean {
   if (explicitPeerAsk) return false;
 
   if (rag.mode === 'demo' && (rag.confidence || 0) < 0.7) return false;
-  // Engine Answer (incl. greetings) that looks fine — do not escalate to peers
+  // Engine "couldn't summarize" is not a real answer — escalate / Gemini path may help
+  if (isEngineRefusalAnswer(rag.answer || '')) return false;
+  // Engine Answer that looks fine — do not escalate to peers
   if (
     rag.mode === 'ai_application' &&
     (rag.confidence || 0) >= 0.7 &&
