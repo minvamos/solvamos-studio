@@ -55,4 +55,6 @@ ENV npm_config_cache=/tmp/pay-home/.npm
 ENV PAY_CLI_PATH=/usr/local/bin/pay
 EXPOSE 8080
 
-CMD ["node", "dist/server.cjs"]
+# Apply pending Prisma migrations before boot (fail-closed: a failed migration
+# keeps the previous Cloud Run revision serving instead of running mismatched code).
+CMD ["sh", "-c", "npx prisma migrate deploy && node dist/server.cjs"]

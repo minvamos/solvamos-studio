@@ -383,6 +383,12 @@ jobs:
           if [ -n "${GOOGLE_CLIENT_ID_VAR}" ]; then
             UPDATE_ENV="${UPDATE_ENV},GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID_VAR}"
           fi
+          # Gateway sale payout: Studio forwards seller share from the operator
+          # settlement wallet (gateway PAY_RECIPIENT) to each agent vault.
+          if gcloud secrets describe pay-operator-key --project="${PROJECT_ID}" >/dev/null 2>&1; then
+            UPDATE_ENV="${UPDATE_ENV},PAY_SETTLEMENT_SECRET_PATH=projects/${PROJECT_ID}/secrets/pay-operator-key/versions/latest"
+          fi
+          UPDATE_ENV="${UPDATE_ENV},PLATFORM_TREASURY_PUBKEY=AoUNKE8uQ8y1FEtU6YSFCsopK9veP6jZ6EGNoULjdwva"
 
           SECRET_FLAGS=()
           if gcloud secrets describe google-client-secret --project="${PROJECT_ID}" >/dev/null 2>&1; then
@@ -441,7 +447,7 @@ jobs:
             --min-instances=0 \
             --max=1 \
             --max-instances=1 \
-            --update-env-vars="PAY_ORIGIN_URL=${URL},PAY_GATEWAY_URL=${GATEWAY_URL},PAY_RECIPIENT=AoUNKE8uQ8y1FEtU6YSFCsopK9veP6jZ6EGNoULjdwva,SOLANA_RPC_URL=https://api.devnet.solana.com,PAYMENT_NETWORK=devnet,PAY_SANDBOX=0,PAY_OPERATOR_KEY_FILE=/secrets/pay-operator/id.json" \
+            --update-env-vars="PAY_ORIGIN_URL=${URL},PAY_GATEWAY_URL=${GATEWAY_URL},PAY_RECIPIENT=3RiCTGYBF1Yy3BFPG4RfcfrnSWQTHEzSazzZ5ajXUr9H,SOLANA_RPC_URL=https://api.devnet.solana.com,PAYMENT_NETWORK=devnet,PAY_SANDBOX=0,PAY_OPERATOR_KEY_FILE=/secrets/pay-operator/id.json" \
             --remove-env-vars="PAYSH_SANDBOX_RPC" \
             --update-secrets="PAY_INTERNAL_SECRET=pay-internal-secret:latest,/secrets/pay-operator/id.json=pay-operator-key:latest"
 

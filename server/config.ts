@@ -173,8 +173,10 @@ export const config = {
     /\/$/,
     ''
   ),
-  /** Shared secret gateway → origin (header X-Pay-Internal-Secret) */
-  payInternalSecret: process.env.PAY_INTERNAL_SECRET || '',
+  /** Shared secret gateway → origin (header X-Pay-Internal-Secret).
+   * Trimmed: HTTP header values cannot carry newlines, so a trailing \n in the
+   * Secret Manager value would otherwise never match the injected header. */
+  payInternalSecret: (process.env.PAY_INTERNAL_SECRET || '').trim(),
   /** Prefer pay.sh gateway URLs in catalog / Agent Card */
   usePayGateway: bool('USE_PAY_GATEWAY', true),
   /**

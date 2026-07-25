@@ -24,6 +24,8 @@ export type InvokeInput = {
   attachments?: { name: string; mimeType: string; dataBase64: string }[];
   webSearch?: boolean;
   answerSession?: string;
+  /** Upstream A2A call chain (X-A2A-Chain) — loop / depth prevention */
+  callChain?: string[];
 };
 
 export type InvokeSuccess = {
@@ -97,6 +99,13 @@ export async function runAgentInvoke(
   const feeAmount = agentFeeUsdc(agent);
   const studio = input.studioOwnerTest === true;
 
+  const chain =
+    input.callChain && input.callChain.length > 0
+      ? input.callChain.includes(agent.id)
+        ? input.callChain
+        : [...input.callChain, agent.id]
+      : [agent.id];
+
   const result = await orchestrateA2ATurn({
     agent,
     userPrompt: input.prompt,
@@ -105,6 +114,7 @@ export async function runAgentInvoke(
     attachments: input.attachments,
     webSearch: input.webSearch === true,
     answerSession: input.answerSession,
+    callChain: chain,
   });
   await bumpInvoke(input.agentId);
 

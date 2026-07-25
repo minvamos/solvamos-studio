@@ -132,6 +132,10 @@ model Agent {
   secretManagerPath   String?
   status              String   @default("ACTIVE")
   feeUsdc             Float    @default(0.001)
+  /// A2A spend policy — max USDC this agent may pay per single peer call (null = platform default)
+  maxSpendPerCallUsdc Float?
+  /// A2A spend policy — max USDC this agent may pay per UTC day (null = platform default)
+  dailyBudgetUsdc     Float?
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
@@ -246,12 +250,15 @@ model PaymentSettlement {
   status          String   @default("success")
   blockHeight     Int?
   network         String?
-  /// onchain | sandbox | legacy_mock
+  /// onchain | sandbox | legacy_mock | a2a_onchain | gateway_payout
   proofKind       String?
   ownerUserId     String?
+  /// Buyer agent when this settlement came from an A2A peer payment
+  payerAgentId    String?
   createdAt       DateTime @default(now())
 
   @@index([agentId])
   @@index([ownerUserId])
+  @@index([payerAgentId])
   @@index([createdAt])
 }

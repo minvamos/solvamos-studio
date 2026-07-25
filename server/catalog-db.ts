@@ -68,21 +68,38 @@ export async function upsertCatalogAgentFromRecord(
     opts.description ||
     `${title} — SolVamos RAG agent (${agent.role}/${agent.tone}) metered via ${protocol}.`;
 
+  // Machine-readable endpoint list must mirror the ACTUAL public invoke path:
+  // paid → gateway /v1 path, free → Studio origin /api path.
+  const endpointPath =
+    fee > 0 && gatewayOk
+      ? `/v1/agents/${agent.id}/invoke`
+      : `/api/agents/${agent.id}/invoke`;
+  const settlement =
+    fee > 0
+      ? {
+          seller_share: 1 - config.platformFeeShare,
+          platform_share: config.platformFeeShare,
+          seller_wallet: agent.publicKey,
+          treasury_wallet: config.platformTreasuryPubkey,
+        }
+      : undefined;
   const endpoints = invokeUrl
     ? [
         {
           method: 'GET',
-          path: `/api/agents/${agent.id}/invoke`,
+          path: endpointPath,
           description: 'Invoke with ?prompt=…',
           price_usdc: fee,
           payment_protocol: protocol,
+          ...(settlement ? { settlement } : {}),
         },
         {
           method: 'POST',
-          path: `/api/agents/${agent.id}/invoke`,
+          path: endpointPath,
           description: 'Invoke with JSON { "prompt": "…" }',
           price_usdc: fee,
           payment_protocol: protocol,
+          ...(settlement ? { settlement } : {}),
         },
       ]
     : [];

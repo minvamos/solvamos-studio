@@ -31,6 +31,10 @@ export interface AgentRecord {
   status?: 'CREATING' | 'INDEXING' | 'ACTIVE' | 'PAUSED' | 'ERROR' | string;
   fee?: number;
   perCallPriceUsdc?: number;
+  /** A2A spend policy — per-call cap (USDC). null → platform default */
+  maxSpendPerCallUsdc?: number;
+  /** A2A spend policy — daily budget (USDC, UTC day). null → platform default */
+  dailyBudgetUsdc?: number;
 }
 
 function toRecord(a: DbAgent): AgentRecord {
@@ -57,6 +61,8 @@ function toRecord(a: DbAgent): AgentRecord {
     status: a.status,
     fee: a.feeUsdc,
     perCallPriceUsdc: a.feeUsdc,
+    maxSpendPerCallUsdc: (a as any).maxSpendPerCallUsdc ?? undefined,
+    dailyBudgetUsdc: (a as any).dailyBudgetUsdc ?? undefined,
   };
 }
 

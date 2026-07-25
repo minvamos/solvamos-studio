@@ -1,7 +1,7 @@
 /**
  * Stitch: agent_studio_sidebar_layout_2 + dashboard builder content
  */
-import { FormEvent, RefObject } from 'react';
+import { FormEvent, RefObject, useEffect, useState } from 'react';
 import {
   Plus,
   Shield,
@@ -215,6 +215,34 @@ export default function StudioPage(props: Props) {
   const agentVaultShort = activeAgent?.publicKey
     ? `${activeAgent.publicKey.slice(0, 4)}...${activeAgent.publicKey.slice(-4)}`
     : null;
+
+  const [vaultBalance, setVaultBalance] = useState<{
+    sol: number | null;
+    usdc: number | null;
+  } | null>(null);
+  useEffect(() => {
+    const agentId = activeAgent?.id;
+    if (!agentId) {
+      setVaultBalance(null);
+      return;
+    }
+    let cancelled = false;
+    fetch(`/api/agents/${encodeURIComponent(agentId)}/balance`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((json) => {
+        if (cancelled || !json) return;
+        setVaultBalance({
+          sol: typeof json.currentSolBalance === 'number' ? json.currentSolBalance : null,
+          usdc: typeof json.currentUsdcBalance === 'number' ? json.currentUsdcBalance : null,
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setVaultBalance(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeAgent?.id]);
 
   return (
     <div className="flex flex-col lg:flex-row gap-gutter">
@@ -1093,6 +1121,35 @@ export default function StudioPage(props: Props) {
                       <Copy className="w-3 h-3" />
                     )}
                   </button>
+                </div>
+                <div className="flex justify-between items-center gap-2">
+                  <span className="text-xs text-on-surface-variant">
+                    잔고{' '}
+                    {vaultBalance
+                      ? `${vaultBalance.sol != null ? vaultBalance.sol.toFixed(4) : '—'} SOL · ${vaultBalance.usdc != null ? vaultBalance.usdc.toFixed(4) : '—'} USDC`
+                      : '조회 중…'}
+                  </span>
+                  <span className="text-[10px] text-outline">
+                    충전: 위 주소로{' '}
+                    <a
+                      href="https://faucet.solana.com"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="underline"
+                    >
+                      SOL
+                    </a>
+                    {' / '}
+                    <a
+                      href="https://faucet.circle.com"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="underline"
+                    >
+                      USDC
+                    </a>{' '}
+                    전송
+                  </span>
                 </div>
               </>
             )}

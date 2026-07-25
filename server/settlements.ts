@@ -59,6 +59,8 @@ export async function recordSettlement(input: {
   network?: string;
   proofKind?: string;
   ownerUserId?: string | null;
+  /** Buyer agent when the payment came from an A2A peer call */
+  payerAgentId?: string | null;
 }): Promise<SettlementRecord> {
   const row = await prisma.paymentSettlement.upsert({
     where: { signature: input.signature },
@@ -72,6 +74,7 @@ export async function recordSettlement(input: {
       network: input.network || null,
       proofKind: input.proofKind || null,
       ownerUserId: input.ownerUserId || null,
+      payerAgentId: input.payerAgentId || null,
     },
     update: {
       status: input.status || 'success',

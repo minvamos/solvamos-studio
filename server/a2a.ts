@@ -13,7 +13,9 @@ import { generateGroundedAnswer, type RagResult } from './rag.js';
 import { verifyPayment } from './payment.js';
 import { getCatalogEntry, listCatalogForA2A, type PayShCatalogEntry } from './paysh-catalog.js';
 import { compileSystemPrompt } from './prompt.js';
-import { gatewayInvokeUrl, payCurl } from './pay-client.js';
+import { gatewayInvokeUrl, payCurl, plainPostJson } from './pay-client.js';
+import { payPeerFromAgentVault } from './pay-payer.js';
+import { checkCallChain, checkSpendAllowance } from './spend-policy.js';
 
 export type A2APeerHop = {
   fromAgentId: string;
@@ -273,15 +275,17 @@ Max ${MAX_PEER_CALLS} calls. Empty calls is OK.`,
   };
 }
 
-/** Invoke peer; fee>0 pays via official pay.sh CLI → gateway (no PAYSH_A2A_ synthesis). */
+/** Invoke peer; fee>0 pays from the caller's agent vault (devnet 90/10 split) or pay CLI (localnet). */
 export async function paidPeerInvoke(
   caller: AgentRecord,
   targetId: string,
-  question: string
+  question: string,
+  opts?: { callChain?: string[] }
 ): Promise<A2APeerHop> {
   const target = await getAgent(targetId);
   const listing = getCatalogEntry(targetId);
   const toName = listing?.name || target?.agentName || targetId;
+  const callChain = opts?.callChain?.length ? opts.callChain : [caller.id];
 
   if (!target) {
     return {
@@ -341,7 +345,102 @@ export async function paidPeerInvoke(
     };
   }
 
-  // --- Paid peer: real pay.sh gateway (preferred) ---
+  // --- Paid peer: policy + loop guards first (all paid paths) ---
+  const chainCheck = checkCallChain(callChain, targetId);
+  if (!chainCheck.allowed) {
+    return {
+      fromAgentId: caller.id,
+      toAgentId: targetId,
+      toName,
+      question,
+      feeUsdc: fee,
+      paymentProof: '',
+      paymentVerified: false,
+      error: chainCheck.reason,
+      catalogId: listing.catalogId,
+      tier,
+    };
+  }
+  const spendCheck = await checkSpendAllowance(caller, fee);
+  if (!spendCheck.allowed) {
+    return {
+      fromAgentId: caller.id,
+      toAgentId: targetId,
+      toName,
+      question,
+      feeUsdc: fee,
+      paymentProof: '',
+      paymentVerified: false,
+      error: `Spend policy blocked payment: ${spendCheck.reason}`,
+      catalogId: listing.catalogId,
+      tier,
+    };
+  }
+
+  // --- Paid peer on devnet: buyer vault pays 90/10 split, then origin invoke with proof ---
+  if (config.paymentNetwork === 'devnet') {
+    const payment = await payPeerFromAgentVault(caller, target.publicKey, fee);
+    if (!payment.ok || !payment.signature) {
+      return {
+        fromAgentId: caller.id,
+        toAgentId: targetId,
+        toName,
+        question,
+        feeUsdc: fee,
+        paymentProof: '',
+        paymentVerified: false,
+        error: payment.error || 'A2A vault payment failed',
+        catalogId: listing.catalogId,
+        tier,
+      };
+    }
+
+    const originUrl =
+      listing.originInvokeUrl ||
+      `${(config.appUrl || 'http://localhost:3000').replace(/\/$/, '')}/api/agents/${targetId}/invoke`;
+    const res = await plainPostJson(
+      originUrl,
+      {
+        prompt: `[A2A paid query from agent ${caller.id}]\n${question}`,
+        enableA2A: false,
+      },
+      {
+        'X-Payment-Proof': payment.signature,
+        'X-A2A-From': caller.id,
+        'X-A2A-Chain': [...callChain, targetId].join(','),
+      }
+    );
+    if (!res.ok) {
+      return {
+        fromAgentId: caller.id,
+        toAgentId: targetId,
+        toName,
+        question,
+        feeUsdc: fee,
+        paymentProof: payment.signature,
+        paymentVerified: false,
+        error:
+          res.json?.message || res.error || `origin invoke with proof failed (${res.status})`,
+        catalogId: listing.catalogId,
+        tier,
+      };
+    }
+    const answer = res.json?.answer || res.json?.data || res.body;
+    return {
+      fromAgentId: caller.id,
+      toAgentId: targetId,
+      toName,
+      question,
+      feeUsdc: fee,
+      paymentProof: payment.signature,
+      paymentVerified: true,
+      answer: String(answer),
+      catalogId: listing.catalogId,
+      tier,
+    };
+  }
+
+  // --- Paid peer on localnet: pay.sh sandbox gateway via pay CLI ---
   if (config.usePayGateway) {
     const url = listing.invokeUrl || gatewayInvokeUrl(targetId);
     // Cloud Run / production cannot reach loopback pay gateway.
@@ -370,7 +469,7 @@ export async function paidPeerInvoke(
         prompt: `[A2A paid query from agent ${caller.id}]\n${question}`,
         enableA2A: false,
       },
-      // localnet → --sandbox; devnet → Devnet on-chain (no --sandbox)
+      // localnet → --sandbox
     });
     if (!paid.ok) {
       return {
@@ -485,8 +584,12 @@ export async function orchestrateA2ATurn(opts: {
   attachments?: { name: string; mimeType: string; dataBase64: string }[];
   webSearch?: boolean;
   answerSession?: string;
+  /** Upstream A2A call chain (loop prevention). Defaults to [agent.id]. */
+  callChain?: string[];
 }): Promise<A2AOrchestrationResult> {
   const enablePeers = opts.enablePeers === true; // default OFF unless explicitly enabled
+  const callChain =
+    opts.callChain && opts.callChain.length > 0 ? opts.callChain : [opts.agent.id];
   const peers = enablePeers ? catalogForPeers(opts.agent.id) : [];
   const { free: freePeers, paid: paidPeers } = splitPeersByFee(peers);
   const peerHops: A2APeerHop[] = [];
@@ -580,7 +683,7 @@ export async function orchestrateA2ATurn(opts: {
     });
     notes.push(plan.note);
     for (const call of plan.calls) {
-      const hop = await paidPeerInvoke(opts.agent, call.agentId, call.question);
+      const hop = await paidPeerInvoke(opts.agent, call.agentId, call.question, { callChain });
       peerHops.push(hop);
     }
     if (peerHops.some((h) => h.tier === 'free' && !h.error)) {
@@ -602,7 +705,7 @@ export async function orchestrateA2ATurn(opts: {
       notes.push('paid peers available but planner declined (save USDC)');
     }
     for (const call of plan.calls) {
-      const hop = await paidPeerInvoke(opts.agent, call.agentId, call.question);
+      const hop = await paidPeerInvoke(opts.agent, call.agentId, call.question, { callChain });
       peerHops.push(hop);
     }
     if (peerHops.some((h) => h.tier === 'paid' && !h.error)) {

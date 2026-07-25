@@ -10,7 +10,11 @@ import dotenv from 'dotenv';
 
 import { compileSystemPrompt } from './server/prompt.js';
 import { savePrivateKeyToGCP, createAgentVaultKeypair } from './server/vault.js';
-import { listSettlementsForUser } from './server/settlements.js';
+import { listSettlementsForUser, recordSettlement } from './server/settlements.js';
+import { verifyPayment } from './server/payment.js';
+import { payoutGatewaySale, getWalletBalances } from './server/pay-payer.js';
+import { parseCallChainHeader } from './server/spend-policy.js';
+import { payApiRouter } from './server/payapi.js';
 import { ensureAiApplication, destroyAiApplication, syncLocalCorpusToVertex } from './server/rag.js';
 import { aiApplicationsCatalog, getDataSourceType } from './server/ai-applications.js';
 import { ingestDriveSourceForAgent } from './server/drive-ingest.js';
@@ -131,6 +135,10 @@ app.use((_req, res, next) => {
   }
   next();
 });
+
+// Devnet buyer support: pay CLI balance shim + pay.sh API passthrough.
+// Usage: PAY_API_URL=https://<studio-host>/payapi pay fetch "<gateway url>"
+app.use('/payapi', payApiRouter);
 
 app.use((req, res, next) => {
   const start = Date.now();
@@ -1253,14 +1261,27 @@ app.get('/api/agents/:id/balance', async (req, res) => {
     return;
   }
   const listing = getCatalogEntry(agent.id);
+  const balances =
+    config.paymentNetwork === 'devnet'
+      ? await getWalletBalances(agent.publicKey)
+      : { sol: null, usdc: null, error: 'on-chain balance only on devnet' };
   res.json({
     status: 'success',
     agentId: agent.id,
     solanaPubkey: agent.publicKey,
     payShConnected: !!listing && listing.status === 'listed',
     payShCatalogId: listing?.catalogId || null,
-    currentUsdcBalance: null,
-    note: 'Listed on SolVamos catalog for A2A; paid calls settle via x402/MPP gateway',
+    network: config.paymentNetwork,
+    usdcMint: config.usdcMint,
+    currentSolBalance: balances.sol,
+    currentUsdcBalance: balances.usdc,
+    balanceError: balances.error || null,
+    topUp: {
+      address: agent.publicKey,
+      note: '에이전트 vault로 devnet SOL(수수료)과 USDC(A2A 결제)를 충전하세요.',
+      solFaucet: 'https://faucet.solana.com',
+      usdcFaucet: 'https://faucet.circle.com',
+    },
   });
 });
 
@@ -1585,6 +1606,8 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
       isStudioOwnerTest = true;
     }
 
+    const callChain = parseCallChainHeader(req.headers['x-a2a-chain']);
+
     const finish = async (paymentLogs: string[]) => {
       const out = await runAgentInvoke(
         {
@@ -1597,6 +1620,7 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
           attachments: chatAttachments,
           webSearch: webSearch === true,
           answerSession: typeof answerSession === 'string' ? answerSession : undefined,
+          callChain,
         },
         paymentLogs
       );
@@ -1616,7 +1640,49 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
       return;
     }
 
-    // Paid commercial path: gateway ONLY (A). Studio origin never settles X-PAYMENT-PROOF.
+    // Paid + on-chain proof (A2A vault split payment): verify 90/10 split and settle.
+    const paymentProof =
+      (typeof req.headers['x-payment-proof'] === 'string' && req.headers['x-payment-proof']) ||
+      (typeof req.body?.paymentProof === 'string' && req.body.paymentProof) ||
+      '';
+    if (paymentProof) {
+      const audit = await verifyPayment(paymentProof, agent.publicKey, feeAmount);
+      if (!audit.verified) {
+        res.status(402).json({
+          status: 'payment_required',
+          message: audit.error || 'Payment proof verification failed',
+          paymentLogs: audit.logs,
+          network: networkLabel(),
+        });
+        return;
+      }
+      const payerAgentId =
+        typeof req.headers['x-a2a-from'] === 'string'
+          ? req.headers['x-a2a-from'].slice(0, 80)
+          : null;
+      try {
+        await recordSettlement({
+          signature: paymentProof,
+          agentId: agent.id,
+          recipientWallet: agent.publicKey,
+          amountUsdc: feeAmount,
+          status: 'success',
+          blockHeight: audit.slot ?? null,
+          network: audit.network,
+          proofKind: audit.proofKind === 'onchain' ? 'a2a_onchain' : audit.proofKind,
+          payerAgentId,
+        });
+      } catch (err: any) {
+        console.warn('[settlement] record failed (invoke continues):', err?.message || err);
+      }
+      await finish([
+        `[A2A Paid] proof ${paymentProof.slice(0, 20)}… verified (${(1 - config.platformFeeShare) * 100}% → agent vault, ${config.platformFeeShare * 100}% → treasury) — paywall passed`,
+        ...audit.logs,
+      ]);
+      return;
+    }
+
+    // Paid commercial path without proof: gateway ONLY (A).
     const gw =
       (listing?.invokeUrl && !/\/api\/agents\//.test(listing.invokeUrl)
         ? listing.invokeUrl
@@ -1646,7 +1712,7 @@ app.post('/api/agents/:id/invoke', async (req, res) => {
       invokeUrl: gw,
       message:
         config.paymentNetwork === 'devnet'
-          ? `HTTP 402 (x402/MPP): pay fetch "${gw}?prompt=hello" (Devnet USDC, no --sandbox). Do not call Studio /api/agents/.../invoke with X-PAYMENT-PROOF.`
+          ? `HTTP 402 (x402/MPP): PAY_API_URL=${config.appUrl}/payapi pay fetch "${gw}?prompt=hello" (Devnet USDC; the pay CLI's hosted balance check is mainnet-only, so point PAY_API_URL at this shim).`
           : `HTTP 402 (x402/MPP): pay --sandbox fetch "${gw}?prompt=hello" (localnet). Gateway proxies to Studio after settlement.`,
     });
     return;
@@ -1736,12 +1802,63 @@ async function handleInternalInvoke(req: express.Request, res: express.Response)
         attachments,
         webSearch: body.webSearch === true || req.query.webSearch === 'true',
         answerSession: typeof body.answerSession === 'string' ? body.answerSession : undefined,
+        callChain: parseCallChainHeader(req.headers['x-a2a-chain']),
       },
       ['[pay.sh gateway] settled — origin internal invoke (paywall skipped)']
     );
     res.status(out.httpStatus).json(out.body);
+
+    // External gateway sale: forward seller share → agent vault, platform share
+    // → treasury, and record the payout in the settlements ledger (async).
+    if (out.httpStatus === 200) {
+      void settleExternalGatewaySale(agentId);
+    }
   } catch (err: any) {
     res.status(500).json({ status: 'error', message: err.message });
+  }
+}
+
+/** Payout + ledger for a gateway-settled external sale (fire-and-forget). */
+async function settleExternalGatewaySale(agentId: string) {
+  try {
+    const agent = await getAgent(agentId);
+    if (!agent) return;
+    const fee = agentFeeUsdc(agent);
+    if (!(fee > 0)) return;
+    if (config.paymentNetwork !== 'devnet') {
+      console.log('[gateway-payout] skipped — network is not devnet');
+      return;
+    }
+    const payout = await payoutGatewaySale(agent.publicKey, fee);
+    if (payout.ok && payout.signature) {
+      await recordSettlement({
+        signature: payout.signature,
+        agentId: agent.id,
+        recipientWallet: agent.publicKey,
+        amountUsdc: fee,
+        status: 'success',
+        network: config.paymentNetwork,
+        proofKind: 'gateway_payout',
+      });
+      serverLog('info', 'payment', `gateway sale payout agent=${agent.id} fee=${fee}`, {
+        signature: payout.signature,
+        sellerShareUsdc: payout.sellerShareUsdc,
+        platformShareUsdc: payout.platformShareUsdc,
+      });
+    } else {
+      await recordSettlement({
+        signature: `GATEWAY_PAYOUT_FAIL_${agent.id}_${Date.now()}`,
+        agentId: agent.id,
+        recipientWallet: agent.publicKey,
+        amountUsdc: fee,
+        status: 'failed',
+        network: config.paymentNetwork,
+        proofKind: 'gateway_payout',
+      });
+      console.warn('[gateway-payout] failed:', payout.error);
+    }
+  } catch (err: any) {
+    console.warn('[gateway-payout] error:', err?.message || err);
   }
 }
 

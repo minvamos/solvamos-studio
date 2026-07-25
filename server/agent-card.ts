@@ -58,10 +58,21 @@ export function buildAgentCard(agent: AgentRecord) {
         feeUsdc: fee,
         token: 'USDC',
         network: config.paymentNetwork,
+        usdcMint: config.usdcMint,
         recipientWallet: agent.publicKey,
         catalogId: listing?.catalogId,
         protocol: fee > 0 ? 'x402 / MPP' : 'free',
         gateway: 'pay.sh-compatible',
+        // On-chain revenue split enforced by verifyPayment (A2A direct path)
+        settlement:
+          fee > 0
+            ? {
+                sellerShare: 1 - config.platformFeeShare,
+                platformShare: config.platformFeeShare,
+                sellerWallet: agent.publicKey,
+                treasuryWallet: config.platformTreasuryPubkey,
+              }
+            : undefined,
       },
     },
   };
