@@ -15,6 +15,7 @@ import {
   Check,
   ExternalLink,
   Activity,
+  Trash2,
 } from 'lucide-react';
 import { Agent } from '../types';
 
@@ -24,6 +25,8 @@ type Props = {
   onSelect: (agent: Agent) => void;
   onEdit: (agent: Agent) => void;
   onToggleStatus?: (agent: Agent) => void;
+  onDelete?: (agent: Agent) => void | Promise<void>;
+  deletingAgentId?: string | null;
 };
 
 type Filter = 'all' | 'active' | 'inactive';
@@ -35,6 +38,8 @@ export default function AgentsPage({
   onSelect,
   onEdit,
   onToggleStatus,
+  onDelete,
+  deletingAgentId,
 }: Props) {
   const [filter, setFilter] = useState<Filter>('all');
   const [sort, setSort] = useState<SortKey>('calls');
@@ -281,6 +286,16 @@ export default function AgentsPage({
                     >
                       {inactive ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
                       {inactive ? 'Activate' : 'Pause'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onDelete?.(agent)}
+                      disabled={!onDelete || deletingAgentId === agent.id}
+                      className="px-3 py-2 rounded-lg border border-red-500/30 text-sm text-red-400 hover:bg-red-500/10 flex items-center gap-1 disabled:opacity-50"
+                      title="에이전트 삭제 (AI App·데이터스토어 포함)"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      {deletingAgentId === agent.id ? '삭제 중…' : '삭제'}
                     </button>
                   </div>
                 </div>

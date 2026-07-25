@@ -11,7 +11,7 @@ import dotenv from 'dotenv';
 import { compileSystemPrompt } from './server/prompt.js';
 import { savePrivateKeyToGCP, createAgentVaultKeypair } from './server/vault.js';
 import { listSettlementsForUser } from './server/settlements.js';
-import { ensureAiApplication, syncLocalCorpusToVertex } from './server/rag.js';
+import { ensureAiApplication, destroyAiApplication, syncLocalCorpusToVertex } from './server/rag.js';
 import { aiApplicationsCatalog, getDataSourceType } from './server/ai-applications.js';
 import { ingestDriveSourceForAgent } from './server/drive-ingest.js';
 import { ingestLocalUploadsForAgent } from './server/local-ingest.js';
@@ -34,8 +34,10 @@ import {
   getAgent,
   putAgent,
   deleteAgent,
+  destroyAgent,
   type AgentRecord,
 } from './server/agents-store.js';
+import { userCanManageAgent } from './server/catalog-db.js';
 import {
   loadPayShCatalog,
   listCatalog,
@@ -683,6 +685,28 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       }${aiApp.sourceNote ? ` · ${aiApp.sourceNote}` : ''}`,
     });
 
+    // Default: refuse to create agents without a real AI Applications engine/app.
+    // Set ALLOW_AI_APP_SOFT_FAIL=true only for local Gemini-only demos.
+    const allowSoftFail =
+      process.env.ALLOW_AI_APP_SOFT_FAIL === 'true' ||
+      process.env.ALLOW_AI_APP_SOFT_FAIL === '1';
+    if ((!aiApp.engineId || aiApp.status === 'error') && !allowSoftFail) {
+      // Draft agent has no vertex ids yet — explicitly tear down any orphan store/app.
+      if (aiApp.dataStoreId) {
+        await destroyAiApplication({
+          dataStoreId: aiApp.dataStoreId,
+          engineId: aiApp.engineId,
+        }).catch((err: any) =>
+          console.warn('[create] orphan AI App cleanup', err?.message || err)
+        );
+      }
+      throw new Error(
+        `AI Applications 앱 생성 실패 — 에이전트를 만들지 않습니다. ${
+          aiApp.message || 'Discovery Engine engine/app missing'
+        }. GOOGLE_CLOUD_PROJECT·ADC·discoveryengine.googleapis.com·Discovery Engine Admin IAM을 확인하세요.`
+      );
+    }
+
     if (needsDrive && sid) {
       try {
         const corpus = await ingestDriveSourceForAgent({
@@ -877,8 +901,47 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
     });
   } catch (err: any) {
     if (createdAgentId) {
-      await deleteAgent(createdAgentId);
+      // Full teardown (vault / partial AI App / catalog / DB) on create failure
+      await destroyAgent(createdAgentId).catch(async () => {
+        await deleteAgent(createdAgentId);
+      });
     }
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+app.delete('/api/agents/:id', requireGoogleSession, async (req, res) => {
+  try {
+    const agentId = req.params.id;
+    const existing = await getAgent(agentId);
+    if (!existing) {
+      res.status(404).json({ status: 'error', message: 'Agent not found' });
+      return;
+    }
+
+    const me = await getMeFromRequest(req);
+    const allowed = await userCanManageAgent(me.user?.id, agentId);
+    // Allow delete when ownership row is missing (legacy) only for the signed-in user
+    // who can already list the agent via session — still require a user id.
+    if (!me.user?.id) {
+      res.status(401).json({ status: 'error', message: '로그인이 필요합니다.' });
+      return;
+    }
+    if (!allowed) {
+      const ownershipCount = await prisma.agentOwnership.count({ where: { agentId } });
+      if (ownershipCount > 0) {
+        res.status(403).json({ status: 'error', message: '이 에이전트를 삭제할 권한이 없습니다.' });
+        return;
+      }
+    }
+
+    const result = await destroyAgent(agentId);
+    res.json({
+      status: 'success',
+      message: 'Agent deleted (AI Applications app/datastore, vault, catalog, DB)',
+      ...result,
+    });
+  } catch (err: any) {
     res.status(500).json({ status: 'error', message: err.message });
   }
 });

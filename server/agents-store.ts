@@ -245,9 +245,64 @@ export async function bumpInvoke(id: string): Promise<void> {
 }
 
 export async function deleteAgent(id: string): Promise<void> {
-  const { unlistCatalogAgent } = await import('./catalog-db.js');
+  const { unlistCatalogAgent, deleteCatalogAgentRow } = await import('./catalog-db.js');
   await unlistCatalogAgent(id);
+  await deleteCatalogAgentRow(id);
   await prisma.agent.delete({ where: { id } }).catch(() => undefined);
+}
+
+export type DestroyAgentResult = {
+  agentId: string;
+  dbDeleted: boolean;
+  aiApp: {
+    engineDeleted: boolean;
+    dataStoreDeleted: boolean;
+    skippedSharedLab: boolean;
+    details: string[];
+  };
+  vault: { deleted: boolean; detail: string };
+  corpusDeleted: boolean;
+  catalogUnlisted: boolean;
+};
+
+/** Full teardown: AI App + datastore, vault secret, corpus, catalog, DB. */
+export async function destroyAgent(id: string): Promise<DestroyAgentResult> {
+  const agent = await getAgent(id);
+  const { destroyAiApplication } = await import('./rag.js');
+  const { deletePrivateKeyFromGCP } = await import('./vault.js');
+  const { deleteLocalRagCorpus } = await import('./drive-ingest.js');
+  const { unlistFromCatalog } = await import('./paysh-catalog.js');
+  const { unlistCatalogAgent, deleteCatalogAgentRow } = await import('./catalog-db.js');
+
+  const aiApp = agent
+    ? await destroyAiApplication({
+        dataStoreId: agent.vertexDataStoreId,
+        engineId: agent.vertexEngineId,
+      })
+    : {
+        engineDeleted: false,
+        dataStoreDeleted: false,
+        skippedSharedLab: false,
+        details: ['Agent not found — skipped GCP delete'],
+      };
+
+  const vault = await deletePrivateKeyFromGCP(agent?.secretManagerPath);
+  const corpusDeleted = deleteLocalRagCorpus(id);
+
+  await unlistFromCatalog(id).catch(() => undefined);
+  await unlistCatalogAgent(id);
+  await deleteCatalogAgentRow(id);
+
+  const del = await prisma.agent.delete({ where: { id } }).catch(() => null);
+
+  return {
+    agentId: id,
+    dbDeleted: !!del,
+    aiApp,
+    vault,
+    corpusDeleted,
+    catalogUnlisted: true,
+  };
 }
 
 export type AgentPatch = {
