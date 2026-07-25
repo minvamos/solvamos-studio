@@ -669,14 +669,19 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       `tenant=${tenantId} project=${config.gcpProject || 'n/a'} (shared GCP as customer)`
     );
 
+    // Empty datastore is allowed — customers may create an agent first and add knowledge later.
     if (resolvedSource === 'google_drive' && !googleDriveFolderId) {
-      failCreate('drive_source', 'Google Drive 소스를 선택했다면 폴더/파일을 반드시 지정하세요.');
+      serverLog('info', 'create', 'google_drive with no folder — empty datastore + app', {
+        agentId,
+      });
     }
     if (resolvedSource === 'local_upload' && !hasLocalFiles) {
-      failCreate('local_upload', '로컬 업로드 소스를 선택했다면 파일을 1개 이상 첨부하세요.');
+      serverLog('info', 'create', 'local_upload with no files — empty datastore + app', {
+        agentId,
+      });
     }
     if (resolvedSource === 'website_url' && !websiteUri) {
-      failCreate('website_url', '웹사이트 소스를 선택했다면 URL을 입력하세요.');
+      serverLog('info', 'create', 'website_url with no URI — empty datastore + app', { agentId });
     }
 
     // Persist vault before DB row so create never leaves CREATING orphans on vault failure
@@ -775,34 +780,52 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
     );
 
     if (needsDrive && sid) {
-      const corpus = await ingestDriveSourceForAgent({
-        sessionId: sid,
-        agentId,
-        driveSourceId: String(googleDriveFolderId),
-      });
-      driveIngest = { docs: corpus.docs.length };
-      if (corpus.docs.length === 0) {
+      let corpus;
+      try {
+        corpus = await ingestDriveSourceForAgent({
+          sessionId: sid,
+          agentId,
+          driveSourceId: String(googleDriveFolderId),
+        });
+      } catch (err: any) {
         failCreate(
           'drive_rag_ingest',
-          'Drive에서 추출 가능한 문서가 없습니다 (Docs/Sheets/txt/md/json/pdf).'
+          err?.message || 'Drive ingest failed — Google 연동/권한을 확인하세요'
         );
       }
-      okStep('drive_rag_ingest', `Ingested ${corpus.docs.length} Drive doc(s)`);
-
-      if (!vertexDataStoreId) {
-        failCreate('vertex_import', 'vertexDataStoreId missing after AI Applications provision');
+      driveIngest = { docs: corpus.docs.length };
+      if (corpus.docs.length === 0) {
+        okStep(
+          'drive_rag_ingest',
+          'Drive 문서 0건 — 빈 데이터스토어로 생성 (나중에 지식 추가 가능)'
+        );
+      } else {
+        okStep('drive_rag_ingest', `Ingested ${corpus.docs.length} Drive doc(s)`);
+        if (!vertexDataStoreId) {
+          failCreate('vertex_import', 'vertexDataStoreId missing after AI Applications provision');
+        }
+        let sync;
+        try {
+          sync = await syncLocalCorpusToVertex(agentId, vertexDataStoreId);
+        } catch (err: any) {
+          failCreate('vertex_import', err?.message || 'Vertex import failed');
+        }
+        if (sync.imported <= 0) {
+          failCreate('vertex_import', sync.message || 'Vertex import imported 0 documents');
+        }
+        okStep('vertex_import', sync.message);
       }
-      const sync = await syncLocalCorpusToVertex(agentId, vertexDataStoreId);
-      if (sync.imported <= 0) {
-        failCreate('vertex_import', sync.message || 'Vertex import imported 0 documents');
-      }
-      okStep('vertex_import', sync.message);
       indexingStatus = 'ACTIVE';
     } else if (needsLocal) {
-      const corpus = await ingestLocalUploadsForAgent({
-        agentId,
-        files: localFileList,
-      });
+      let corpus;
+      try {
+        corpus = await ingestLocalUploadsForAgent({
+          agentId,
+          files: localFileList,
+        });
+      } catch (err: any) {
+        failCreate('local_upload_ingest', err?.message || 'Local upload ingest failed');
+      }
       driveIngest = {
         docs: corpus.docs.length,
         message: corpus.skipped?.length
@@ -810,28 +833,34 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
           : undefined,
       };
       if (corpus.docs.length === 0) {
-        failCreate(
+        okStep(
           'local_upload_ingest',
-          `로컬 파일에서 텍스트를 추출하지 못했습니다. ${
-            corpus.skipped?.join(' · ') || 'Use txt/md/json/csv/html/pdf'
+          `추출 문서 0건 — 빈 데이터스토어로 생성${
+            corpus.skipped?.length ? ` (${corpus.skipped.slice(0, 2).join('; ')})` : ''
           }`
         );
+      } else {
+        okStep('local_upload_ingest', `Ingested ${corpus.docs.length} local file(s)`);
+        if (!vertexDataStoreId) {
+          failCreate('vertex_import', 'vertexDataStoreId missing after AI Applications provision');
+        }
+        let sync;
+        try {
+          sync = await syncLocalCorpusToVertex(agentId, vertexDataStoreId);
+        } catch (err: any) {
+          failCreate('vertex_import', err?.message || 'Vertex import failed');
+        }
+        if (sync.imported <= 0) {
+          failCreate('vertex_import', sync.message || 'Vertex import imported 0 documents');
+        }
+        okStep('vertex_import', sync.message);
       }
-      okStep('local_upload_ingest', `Ingested ${corpus.docs.length} local file(s)`);
-
-      if (!vertexDataStoreId) {
-        failCreate('vertex_import', 'vertexDataStoreId missing after AI Applications provision');
-      }
-      const sync = await syncLocalCorpusToVertex(agentId, vertexDataStoreId);
-      if (sync.imported <= 0) {
-        failCreate('vertex_import', sync.message || 'Vertex import imported 0 documents');
-      }
-      okStep('vertex_import', sync.message);
       indexingStatus = 'ACTIVE';
     } else {
       okStep(
         'data_source',
-        aiApp.sourceNote || `Source=${resolvedSource} — app+datastore ready (no corpus ingest)`
+        aiApp.sourceNote ||
+          `Source=${resolvedSource} — empty datastore + app ready (add knowledge later)`
       );
     }
 
@@ -1099,21 +1128,25 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
       });
       driveIngest = { docs: corpus.docs.length };
       if (corpus.docs.length === 0) {
-        throw new Error('[drive_rag_ingest] Drive에서 추출 가능한 문서가 없습니다.');
-      }
-      if (!vertexDataStoreId) {
-        throw new Error('[vertex_import] vertexDataStoreId missing');
-      }
-      const sync = await syncLocalCorpusToVertex(existing.id, vertexDataStoreId);
-      if (sync.imported <= 0) {
-        throw new Error(`[vertex_import] ${sync.message || 'imported 0 documents'}`);
+        // Empty folder is OK — keep empty datastore
+        serverLog('info', 'update', 'Drive re-ingest: 0 docs — empty datastore kept', {
+          agentId: existing.id,
+        });
+      } else {
+        if (!vertexDataStoreId) {
+          throw new Error('[vertex_import] vertexDataStoreId missing');
+        }
+        const sync = await syncLocalCorpusToVertex(existing.id, vertexDataStoreId);
+        if (sync.imported <= 0) {
+          throw new Error(`[vertex_import] ${sync.message || 'imported 0 documents'}`);
+        }
+        serverLog('info', 'update', 'Drive re-ingest ok', {
+          agentId: existing.id,
+          docs: corpus.docs.length,
+          imported: sync.imported,
+        });
       }
       indexingStatus = 'ACTIVE';
-      serverLog('info', 'update', 'Drive re-ingest ok', {
-        agentId: existing.id,
-        docs: corpus.docs.length,
-        imported: sync.imported,
-      });
     } else if (hasLocalFiles) {
       const corpus = await ingestLocalUploadsForAgent({
         agentId: existing.id,
@@ -1127,23 +1160,25 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
           : undefined,
       };
       if (corpus.docs.length === 0) {
-        throw new Error(
-          `[local_upload_ingest] ${corpus.skipped?.join(' · ') || 'No text extracted from uploads'}`
-        );
-      }
-      if (!vertexDataStoreId) {
-        throw new Error('[vertex_import] vertexDataStoreId missing');
-      }
-      const sync = await syncLocalCorpusToVertex(existing.id, vertexDataStoreId);
-      if (sync.imported <= 0) {
-        throw new Error(`[vertex_import] ${sync.message || 'imported 0 documents'}`);
+        serverLog('info', 'update', 'Local upload: 0 extractable docs — empty datastore kept', {
+          agentId: existing.id,
+          skipped: corpus.skipped?.slice(0, 3),
+        });
+      } else {
+        if (!vertexDataStoreId) {
+          throw new Error('[vertex_import] vertexDataStoreId missing');
+        }
+        const sync = await syncLocalCorpusToVertex(existing.id, vertexDataStoreId);
+        if (sync.imported <= 0) {
+          throw new Error(`[vertex_import] ${sync.message || 'imported 0 documents'}`);
+        }
+        serverLog('info', 'update', 'Local upload ingest ok', {
+          agentId: existing.id,
+          docs: corpus.docs.length,
+          imported: sync.imported,
+        });
       }
       indexingStatus = 'ACTIVE';
-      serverLog('info', 'update', 'Local upload ingest ok', {
-        agentId: existing.id,
-        docs: corpus.docs.length,
-        imported: sync.imported,
-      });
     }
 
     const updated: AgentRecord = {
