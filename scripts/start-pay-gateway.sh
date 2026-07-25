@@ -66,7 +66,8 @@ function endpointBlock(agentId, method, price, alias) {
   return [
     `  - method: ${method}`,
     `    path: 'v1/agents/${agentId}/invoke'`,
-    `    description: 'Paid SolVamos agent invoke (${agentId}) — catalog fee, ${sellerPercent}/${100 - sellerPercent} split.'`,
+    // ASCII-only: Unicode in description breaks WWW-Authenticate via GFE.
+    `    description: 'Paid SolVamos agent invoke (${agentId}) - catalog fee, ${sellerPercent}/${100 - sellerPercent} split.'`,
     '    metering:',
     '      schemes:',
     '        - mpp-charge',
