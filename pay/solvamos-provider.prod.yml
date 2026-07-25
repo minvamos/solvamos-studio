@@ -43,15 +43,35 @@ endpoints:
 
   # __PER_AGENT_ENDPOINTS__ (catalog feeUsdc + 90/10 splits; more-specific paths win)
 
-  # Unknown / unlisted agent IDs: do NOT meter or proxy (avoids free internal invoke).
+  # Unlisted agent IDs: still return HTTP 402 (CI/smoke + clients), but do NOT
+  # proxy to Studio after payment (avoids free internal invoke / fake agent IDs).
+  # Listed agents match the injected concrete paths above and use Catalog feeUsdc.
   - method: GET
     path: 'v1/agents/{agentId}/invoke'
-    description: 'Unlisted agent — no catalog price. Use a listed per-agent path.'
+    description: 'Unlisted agent paywall (no upstream). Prefer a listed per-agent path.'
     routing:
       type: respond
+    metering:
+      schemes:
+        - mpp-charge
+      dimensions:
+        - direction: usage
+          unit: requests
+          scale: 1
+          tiers:
+            - price_usd: 0.001
 
   - method: POST
     path: 'v1/agents/{agentId}/invoke'
-    description: 'Unlisted agent — no catalog price. Use a listed per-agent path.'
+    description: 'Unlisted agent paywall (no upstream). Prefer a listed per-agent path.'
     routing:
       type: respond
+    metering:
+      schemes:
+        - mpp-charge
+      dimensions:
+        - direction: usage
+          unit: requests
+          scale: 1
+          tiers:
+            - price_usd: 0.001

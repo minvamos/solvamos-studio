@@ -470,10 +470,12 @@ jobs:
             fi
             sleep 5
           done
+          # Unlisted agent path must 402 (paywall) and must NOT proxy to Studio.
+          # (Studio would 404 "Agent with ID health-check not found" if proxy leaked.)
           HTTP_CODE=$(curl -sS -o /tmp/pay-402.json -w "%{http_code}" \
             "${GATEWAY_URL}/v1/agents/health-check/invoke?prompt=hello")
           if [ "${HTTP_CODE}" != "402" ]; then
-            echo "::error::Expected gateway HTTP 402, got ${HTTP_CODE}"
+            echo "::error::Expected gateway HTTP 402 for unlisted agent, got ${HTTP_CODE}"
             cat /tmp/pay-402.json
             exit 1
           fi
