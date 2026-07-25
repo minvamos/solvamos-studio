@@ -31,6 +31,9 @@ endpoints:
     routing:
       type: respond
 
+  # __PER_AGENT_ENDPOINTS__ (start-pay-gateway.sh injects per-agent priced
+  # endpoints here from the live catalog; more-specific paths take priority)
+
   - method: GET
     path: 'v1/agents/{agentId}/invoke'
     description: 'Paid SolVamos agent invoke through query parameter prompt.'
