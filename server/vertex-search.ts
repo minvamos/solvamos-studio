@@ -82,12 +82,37 @@ function isSharedLabStore(dataStoreId: string | undefined): boolean {
   return sharedLab && !!configured && dataStoreId === configured;
 }
 
-async function waitOperation(opName: string, timeoutMs = 180_000): Promise<any> {
+/**
+ * Wait for a Discovery Engine LRO.
+ * Create responses often already include `done: true`; completed create-data-store
+ * ops are then immediately unreadable and GET returns 404 — treat that as success
+ * so callers can confirm the resource with a direct GET.
+ */
+async function waitOperation(
+  opName: string,
+  timeoutMs = 180_000,
+  initial?: { done?: boolean; error?: any; response?: any }
+): Promise<any> {
+  if (initial?.done) {
+    if (initial.error) {
+      throw new Error(initial.error.message || JSON.stringify(initial.error));
+    }
+    return initial.response || initial;
+  }
+
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const res = await gcpFetch(opName);
-    const json: any = await res.json();
+    const json: any = await res.json().catch(() => ({}));
     if (!res.ok) {
+      // Completed create/delete ops are frequently evicted → 404.
+      if (res.status === 404) {
+        console.warn(
+          '[vertex-search] operation GET 404 (likely already finished):',
+          opName.slice(0, 160)
+        );
+        return { done: true, assumedComplete: true };
+      }
       throw new Error(`Operation poll failed: ${res.status} ${JSON.stringify(json).slice(0, 300)}`);
     }
     if (json.done) {
@@ -187,7 +212,7 @@ async function ensureEngine(opts: {
     const json: any = await res.json().catch(() => ({}));
     if (res.ok) {
       if (json.name && String(json.name).includes('/operations/')) {
-        await waitOperation(json.name).catch((err) =>
+        await waitOperation(json.name, 180_000, json).catch((err) =>
           console.warn('[vertex-search] engine op wait', err?.message || err)
         );
       }
@@ -232,8 +257,8 @@ async function ensureEngine(opts: {
     });
     const json: any = await res.json().catch(() => ({}));
     if (res.ok || res.status === 409) {
-      if (json.name?.includes('/operations/')) {
-        await waitOperation(json.name).catch(() => null);
+      if (json.name?.includes('/operations/') && !json.done) {
+        await waitOperation(json.name, 180_000, json).catch(() => null);
       }
       return { engineId };
     }
@@ -271,7 +296,7 @@ async function registerWebsiteTarget(dataStoreId: string, websiteUri: string): P
   const json: any = await res.json().catch(() => ({}));
   if (res.ok || res.status === 409) {
     if (json.name?.includes('/operations/')) {
-      await waitOperation(json.name).catch(() => null);
+      await waitOperation(json.name, 180_000, json).catch(() => null);
     }
     // Kick a recrawl so empty stores start indexing (best-effort).
     try {
@@ -284,7 +309,7 @@ async function registerWebsiteTarget(dataStoreId: string, websiteUri: string): P
       );
       const rj: any = await recrawl.json().catch(() => ({}));
       if (rj.name?.includes('/operations/')) {
-        await waitOperation(rj.name, 60_000).catch(() => null);
+        await waitOperation(rj.name, 60_000, rj).catch(() => null);
       }
     } catch (err: any) {
       console.warn('[vertex-search] recrawl', err?.message || err);
@@ -473,17 +498,31 @@ export async function createAiApplicationBundle(opts: {
 
   if (json.name && String(json.name).includes('/operations/')) {
     try {
-      await waitOperation(json.name);
+      // Create often returns done:true; re-GET of that op 404s — waitOperation handles both.
+      await waitOperation(json.name, 180_000, json);
     } catch (err: any) {
-      return {
-        dataStoreId,
-        appType: appMeta.id,
-        dataSourceType: sourceMeta.id,
-        status: 'pending',
-        message: `Data store create started but wait failed: ${err.message}`,
-        operation: json.name,
-      };
+      // Last resort: if the store already exists, continue; otherwise surface pending.
+      const exists = await getDataStore(dataStoreId).catch(() => false);
+      if (!exists) {
+        return {
+          dataStoreId,
+          appType: appMeta.id,
+          dataSourceType: sourceMeta.id,
+          status: 'pending',
+          message: `Data store create started but wait failed: ${err.message}`,
+          operation: json.name,
+        };
+      }
+      console.warn(
+        '[vertex-search] data store op wait failed but GET succeeded — continuing',
+        err?.message || err
+      );
     }
+  }
+
+  // Brief consistency wait before engine create (create LRO can finish before GET is ready).
+  if (!(await getDataStore(dataStoreId).catch(() => false))) {
+    await new Promise((r) => setTimeout(r, 2000));
   }
 
   const eng = await ensureEngine({
@@ -560,13 +599,14 @@ export async function deleteAiApplicationBundle(opts: {
 
   if (engineId) {
     try {
-      const res = await gcpFetch(`${parent}/engines/${engineId}?force=true`, {
+      // Discovery Engine engines.delete has no `force` query param (returns 400).
+      const res = await gcpFetch(`${parent}/engines/${engineId}`, {
         method: 'DELETE',
       });
       const json: any = await res.json().catch(() => ({}));
       if (res.ok || res.status === 404) {
         if (json.name?.includes('/operations/')) {
-          await waitOperation(json.name, 120_000).catch(() => null);
+          await waitOperation(json.name, 120_000, json).catch(() => null);
         }
         engineDeleted = res.status !== 404;
         details.push(
@@ -586,13 +626,14 @@ export async function deleteAiApplicationBundle(opts: {
 
   if (opts.dataStoreId) {
     try {
-      const res = await gcpFetch(`${parent}/dataStores/${opts.dataStoreId}?force=true`, {
+      // Discovery Engine dataStores.delete has no `force` query param (returns 400).
+      const res = await gcpFetch(`${parent}/dataStores/${opts.dataStoreId}`, {
         method: 'DELETE',
       });
       const json: any = await res.json().catch(() => ({}));
       if (res.ok || res.status === 404) {
         if (json.name?.includes('/operations/')) {
-          await waitOperation(json.name, 120_000).catch(() => null);
+          await waitOperation(json.name, 120_000, json).catch(() => null);
         }
         dataStoreDeleted = res.status !== 404;
         details.push(
@@ -694,7 +735,7 @@ export async function importCorpusToVertexDataStore(
     });
     const importJson: any = await importRes.json().catch(() => ({}));
     if (importRes.ok && importJson.name) {
-      await waitOperation(importJson.name, 180_000).catch((err) =>
+      await waitOperation(importJson.name, 180_000, importJson).catch((err) =>
         console.warn('[vertex-search] import op', err?.message || err)
       );
       return {
