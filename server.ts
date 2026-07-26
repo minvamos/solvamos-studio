@@ -689,11 +689,10 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       typeof bodyCustomRole === 'string' && bodyCustomRole.trim()
         ? bodyCustomRole.trim().slice(0, 500)
         : undefined;
-    // Free-text "주요 역할" → custom role; keep preset role ids when provided.
-    const rolePreset = ['support', 'academic', 'weather', 'custom'].includes(String(bodyRole))
+    // Keep preset role ids (support/academic/weather/custom). customRole is optional detail text.
+    const role = ['support', 'academic', 'weather', 'custom'].includes(String(bodyRole))
       ? String(bodyRole)
       : 'custom';
-    const role = customRole ? 'custom' : rolePreset;
     const tone =
       typeof bodyTone === 'string' && bodyTone.trim()
         ? bodyTone.trim().slice(0, 500)
@@ -758,8 +757,8 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       return;
     }
 
-    // Agent vault = dedicated keypair per agent (security boundary)
-    const agentId = `${role}-${tone}-${Math.random().toString(36).substr(2, 6)}`;
+    // Opaque id — role/tone are metadata, not encoded into the identifier
+    const agentId = `agt_${crypto.randomBytes(9).toString('base64url')}`;
     createdAgentId = agentId;
     const vaultKeys = createAgentVaultKeypair();
     const publicKey = vaultKeys.publicKey;

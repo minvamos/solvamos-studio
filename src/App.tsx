@@ -53,8 +53,8 @@ export default function App() {
   const [savingAsEdit, setSavingAsEdit] = useState(false);
   const [options, setOptions] = useState<PromptOptions>({
     role: 'custom',
-    customRole: '',
-    tone: '',
+    customRole: '사내 HR/복지 안내',
+    tone: 'casual',
     securityLevel: 'strict',
     fee: 0,
     runtimeMode: 'specialized',
@@ -754,8 +754,8 @@ export default function App() {
     setStudioView('builder');
     setOptions({
       role: 'custom',
-      customRole: '',
-      tone: '',
+      customRole: '사내 HR/복지 안내',
+      tone: 'casual',
       securityLevel: 'strict',
       fee: 0,
       runtimeMode: 'specialized',
@@ -799,22 +799,23 @@ export default function App() {
       const roleText = String(options.customRole || '').trim();
       const toneText = String(options.tone || '').trim();
       const descriptionText = String(options.description || '').trim();
+      const rolePreset = options.role || 'custom';
       if (!agentName.trim()) {
         window.clearInterval(tick);
         setIsLoading(false);
         setCreateDetail('에이전트 이름을 입력하세요.');
         return;
       }
-      if (!roleText) {
+      if (rolePreset === 'custom' && !roleText) {
         window.clearInterval(tick);
         setIsLoading(false);
-        setCreateDetail('에이전트 주요 역할을 입력하세요.');
+        setCreateDetail('에이전트 주요 역할을 입력하거나 템플릿을 선택하세요.');
         return;
       }
       if (!toneText) {
         window.clearInterval(tick);
         setIsLoading(false);
-        setCreateDetail('답변 톤앤매너를 입력하세요.');
+        setCreateDetail('답변 톤앤매너 템플릿을 고르거나 직접 입력하세요.');
         return;
       }
       if (!descriptionText) {
@@ -826,8 +827,8 @@ export default function App() {
 
       const payload: Record<string, unknown> = {
         ...options,
-        role: 'custom',
-        customRole: roleText,
+        role: rolePreset,
+        customRole: roleText || undefined,
         tone: toneText,
         description: descriptionText,
         tenantId: tenantIdInput || undefined,

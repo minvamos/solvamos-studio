@@ -29,6 +29,24 @@ const AI_APP_TYPES: {
   { id: 'media', label: '미디어', hint: '이미지·미디어 검색' },
 ];
 
+const ROLE_PRESETS: {
+  id: PromptOptions['role'];
+  label: string;
+  fill: string;
+}[] = [
+  { id: 'custom', label: '사내 HR/복지 안내', fill: '사내 HR/복지 안내' },
+  { id: 'support', label: '고객지원/CS', fill: '고객지원 및 CS 응대' },
+  { id: 'academic', label: '기술 지원/가이드', fill: '기술 지원 및 사용 가이드' },
+  { id: 'weather', label: '날씨/정보', fill: '날씨 및 환경 정보 안내' },
+];
+
+const TONE_PRESETS: { id: string; label: string }[] = [
+  { id: 'casual', label: '친절하고 정중하게' },
+  { id: 'professional', label: '명확하고 간결하게' },
+  { id: 'academic', label: '전문적이고 정량적으로' },
+  { id: 'cyberpunk', label: '사이버펑크' },
+];
+
 const DATA_SOURCES: {
   id: NonNullable<PromptOptions['dataSourceType']>;
   label: string;
@@ -534,7 +552,7 @@ export default function StudioPage(props: Props) {
                 에이전트 역할 및 응답 스타일 설정
               </h2>
               <p className="text-sm text-on-surface-variant mt-1">
-                이름·역할·톤·설명을 직접 입력하면 카탈로그 디스커버리와 A2A peer 선택에 그대로
+                템플릿을 고른 뒤 필요하면 문구를 직접 다듬으세요. 설명은 카탈로그·A2A 디스커버리에
                 쓰입니다.
               </p>
             </div>
@@ -554,41 +572,113 @@ export default function StudioPage(props: Props) {
               />
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-on-surface-variant mb-2">
-                [에이전트 주요 역할]
-              </label>
-              <input
-                type="text"
-                value={options.customRole || ''}
-                onChange={(e) =>
-                  setOptions((prev) => ({
-                    ...prev,
-                    role: 'custom',
-                    customRole: e.target.value,
-                  }))
-                }
-                placeholder="예: 유튜브 채널·영상 추천 및 시청 가이드"
-                maxLength={500}
-                className="w-full bg-surface-container-low border border-outline-variant/30 rounded-lg px-4 py-2 text-on-surface input-glow focus:outline-none"
-              />
-              <p className="text-xs text-on-surface-variant mt-1">
-                시스템 프롬프트와 카탈로그 use_case에 들어가는 핵심 역할입니다.
-              </p>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-sm font-medium text-on-surface-variant mb-2">
+                  [에이전트 주요 역할]
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {ROLE_PRESETS.map((r) => {
+                    const active = options.role === r.id;
+                    return (
+                      <button
+                        key={r.id}
+                        type="button"
+                        onClick={() =>
+                          setOptions((prev) => ({
+                            ...prev,
+                            role: r.id,
+                            customRole: r.fill,
+                          }))
+                        }
+                        className={
+                          active
+                            ? 'px-3.5 py-2 rounded-lg border border-google-blue bg-google-blue/10 text-google-blue text-sm font-medium'
+                            : 'px-3.5 py-2 rounded-lg border border-outline-variant/30 bg-surface-container-low text-on-surface-variant hover:border-outline-variant/50 transition-colors text-sm font-medium'
+                        }
+                      >
+                        {r.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-on-surface-variant mb-1.5">
+                  역할 상세 (직접 수정 가능)
+                </label>
+                <input
+                  type="text"
+                  value={options.customRole || ''}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    const matched = ROLE_PRESETS.find((r) => r.fill === value);
+                    setOptions((prev) => ({
+                      ...prev,
+                      role: matched?.id || 'custom',
+                      customRole: value,
+                    }));
+                  }}
+                  placeholder="예: 유튜브 채널·영상 추천 및 시청 가이드"
+                  maxLength={500}
+                  className="w-full bg-surface-container-low border border-outline-variant/30 rounded-lg px-4 py-2 text-on-surface input-glow focus:outline-none"
+                />
+                <p className="text-xs text-on-surface-variant mt-1">
+                  템플릿을 누르면 채워집니다. 문구를 바꾸면 커스텀 역할로 저장됩니다.
+                </p>
+              </div>
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-on-surface-variant mb-2">
-                [답변 톤앤매너]
-              </label>
-              <input
-                type="text"
-                value={options.tone || ''}
-                onChange={(e) => setOptions((prev) => ({ ...prev, tone: e.target.value }))}
-                placeholder="예: 친절하고 짧게, 존댓말, 과장 없이"
-                maxLength={500}
-                className="w-full bg-surface-container-low border border-outline-variant/30 rounded-lg px-4 py-2 text-on-surface input-glow focus:outline-none"
-              />
+            <div className="space-y-3">
+              <div>
+                <label className="block text-sm font-medium text-on-surface-variant mb-2">
+                  [답변 톤앤매너]
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {TONE_PRESETS.map((t) => {
+                    const active = options.tone === t.id;
+                    return (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => setOptions((prev) => ({ ...prev, tone: t.id }))}
+                        className={
+                          active
+                            ? 'px-3.5 py-2 rounded-lg border border-google-blue bg-google-blue/10 text-google-blue text-sm font-medium'
+                            : 'px-3.5 py-2 rounded-lg border border-outline-variant/30 bg-surface-container-low text-on-surface-variant hover:border-outline-variant/50 transition-colors text-sm font-medium'
+                        }
+                      >
+                        {t.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-on-surface-variant mb-1.5">
+                  톤 직접 입력 (선택)
+                </label>
+                <input
+                  type="text"
+                  value={
+                    TONE_PRESETS.some((t) => t.id === options.tone)
+                      ? ''
+                      : options.tone || ''
+                  }
+                  onChange={(e) =>
+                    setOptions((prev) => ({
+                      ...prev,
+                      tone: e.target.value,
+                    }))
+                  }
+                  placeholder="예: 친절하고 짧게, 존댓말, 과장 없이"
+                  maxLength={500}
+                  className="w-full bg-surface-container-low border border-outline-variant/30 rounded-lg px-4 py-2 text-on-surface input-glow focus:outline-none"
+                />
+                <p className="text-xs text-on-surface-variant mt-1">
+                  비워 두면 위에서 고른 템플릿 톤을 씁니다. 직접 입력하면 템플릿 선택을 대체합니다.
+                </p>
+              </div>
             </div>
 
             <div>
@@ -631,7 +721,7 @@ export default function StudioPage(props: Props) {
                 className="w-full bg-surface-container-low border border-outline-variant/30 rounded-lg px-4 py-3 text-sm text-on-surface input-glow focus:outline-none resize-y min-h-[6rem]"
               />
               <p className="text-xs text-on-surface-variant mt-1">
-                역할/톤 프리셋 위에 붙는 자유 지시문입니다. 특화·자율 모두 동일하게 적용됩니다.
+                역할·톤 설정 위에 붙는 자유 지시문입니다. 특화·자율 모두 동일하게 적용됩니다.
               </p>
             </div>
 
