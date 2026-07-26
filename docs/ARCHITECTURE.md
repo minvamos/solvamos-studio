@@ -9,7 +9,7 @@ SolVamos는 사용자가 도메인 지식과 정책을 가진 AI 에이전트를
 
 핵심 경계는 다음과 같다.
 
-- **Studio**: 사용자·테넌트·에이전트·지식·대화·A2A를 관리하는 control/runtime plane
+- **Studio**: 사용자·테넌트·에이전트·지식·대화·peer orchestration을 관리하는 control/runtime plane
 - **Catalog**: 공개 discovery surface. `CatalogAgent`를 읽어 marketplace와 API로 노출
 - **pay-gateway**: 유료 호출의 유일한 상업 결제 진입점
 - **Cloud SQL PostgreSQL**: 플랫폼 메타데이터와 공개 listing의 영속 저장소
@@ -265,16 +265,21 @@ Catalog:
 
 유료 listing은 gateway invoke URL을, 무료 listing은 Studio origin invoke URL을 노출한다.
 
-## 8. A2A
+## 8. Peer orchestration (제품 내부 “A2A”)
 
-A2A는 기본적으로 owner chat에서 꺼져 있다. 켜면 비용 인식 순서로 실행한다.
+> Google A2A Protocol JSON-RPC / `@a2a-js/sdk`는 **사용하지 않는다**.  
+> 공개 실행은 `invoke_url`만. 정책: [`docs/A2A.md`](./A2A.md).
+
+Studio peer orchestration(`server/a2a.ts`)은 Catalog peer를 고르는 **내부 기능**이다. 켜면 비용 인식 순서로 실행한다.
 
 1. 자기 Datastore/Engine으로 먼저 답한다.
 2. 답이 약하면 fee 0인 Catalog peer를 계획·호출한다.
 3. 여전히 부족할 때만 유료 peer를 선택한다.
-4. 유료 peer는 Catalog의 gateway invoke URL을 `pay` CLI로 호출한다.
+4. 유료 peer는 vault 결제 후 origin/gateway invoke로 호출한다 (공개 커머스와 동일 정산 레일).
 5. 성공한 peer 정보만 자기 답변과 합성한다.
 6. 결제·peer 장애는 사용자 답변 전체를 실패시키지 않고 self best-effort로 복구한다.
+
+Discovery용 Agent Card는 `GET /api/agents/:id/agent-card`에 두고, `extensions.solvamos.pay.invokeUrl`로 실행 URL을 가리킨다.
 
 현재 peer planner와 품질 판단은 heuristic + Gemini 기반이며, 예산 상한·사용자 승인·분산 tracing은 아직 없다.
 

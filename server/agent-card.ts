@@ -1,6 +1,11 @@
 /**
- * Minimal Google A2A–style Agent Card for discovery.
- * Paid invoke settles via x402/MPP on the pay.sh-compatible gateway URL.
+ * SolVamos discovery Agent Card (A2A-shaped JSON for machines).
+ *
+ * Commerce always goes through extensions.solvamos.pay.invokeUrl
+ * (gateway x402/MPP when paid). We do NOT expose Google A2A JSON-RPC
+ * message/send — that path conflicts with the payment model.
+ *
+ * See docs/A2A.md
  */
 import { config } from './config.js';
 import type { AgentRecord } from './agents-store.js';
@@ -26,7 +31,8 @@ export function buildAgentCard(agent: AgentRecord) {
     name: `SolVamos — ${name}`,
     description:
       listing?.description ||
-      `SolVamos RAG agent (${agent.role}). Paid invoke via x402/MPP gateway.`,
+      agent.description ||
+      `SolVamos RAG agent (${agent.role}). Call via invokeUrl (x402/MPP when paid).`,
     url: config.usePayGateway ? config.payGatewayUrl : config.appUrl,
     provider: {
       organization: 'SolVamos',
@@ -43,15 +49,14 @@ export function buildAgentCard(agent: AgentRecord) {
       {
         id: 'rag-invoke',
         name: 'Grounded RAG answer',
-        description: 'Ask a question; answer is grounded in the agent AI Application / data store.',
+        description:
+          'Ask a question via HTTP invoke (JSON { prompt } or ?prompt=). Paid agents require x402/MPP on invokeUrl.',
         tags: ['rag', 'ai-applications', 'solvamos', 'x402', 'mpp'],
         examples: ['Summarize our leave policy', 'What does the handbook say about remote work?'],
-        // Commercial endpoint = payment gateway (x402/MPP), not free JSON-RPC
         inputModes: ['application/json'],
         outputModes: ['application/json'],
       },
     ],
-    // SolVamos extensions — discovery + paid invoke
     extensions: {
       'solvamos.pay': {
         invokeUrl,
@@ -63,7 +68,6 @@ export function buildAgentCard(agent: AgentRecord) {
         catalogId: listing?.catalogId,
         protocol: fee > 0 ? 'x402 / MPP' : 'free',
         gateway: 'pay.sh-compatible',
-        // On-chain revenue split enforced by verifyPayment (A2A direct path)
         settlement:
           fee > 0
             ? {
@@ -73,12 +77,6 @@ export function buildAgentCard(agent: AgentRecord) {
                 treasuryWallet: config.platformTreasuryPubkey,
               }
             : undefined,
-      },
-      // Official A2A Protocol v1 surface (@a2a-js/sdk)
-      'solvamos.a2a': {
-        agentCardUrl: `${config.appUrl.replace(/\/$/, '')}/a2a/${encodeURIComponent(agent.id)}/.well-known/agent-card.json`,
-        jsonRpcUrl: `${config.appUrl.replace(/\/$/, '')}/a2a/${encodeURIComponent(agent.id)}`,
-        note: 'Use @a2a-js/sdk ClientFactory against agentCardUrl. Paid commerce still uses invokeUrl (x402/MPP).',
       },
     },
   };

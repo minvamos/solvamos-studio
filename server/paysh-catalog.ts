@@ -267,7 +267,7 @@ function buildLocalEntry(
     description:
       opts?.description ||
       agent.description ||
-      `SolVamos agent (${agent.customRole || agent.role}). A2A discovery + x402/MPP USDC paywall when paid.`,
+      `SolVamos agent (${agent.customRole || agent.role}). Call via invoke_url (x402/MPP when paid).`,
     useCase:
       opts?.description ||
       agent.description ||

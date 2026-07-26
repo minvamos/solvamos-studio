@@ -28,7 +28,6 @@ import {
 } from './server/gateway-settle.js';
 import { parseCallChainHeader } from './server/spend-policy.js';
 import { payApiRouter } from './server/payapi.js';
-import { registerA2ASdkRoutes } from './server/a2a-sdk-server.js';
 import { ensureAiApplication, destroyAiApplication, syncLocalCorpusToVertex } from './server/rag.js';
 import { aiApplicationsCatalog, getDataSourceType } from './server/ai-applications.js';
 import { ingestDriveSourceForAgent } from './server/drive-ingest.js';
@@ -178,8 +177,6 @@ app.use((req, res, next) => {
 loadPayShCatalog();
 registerPlatformAuthRoutes(app);
 registerDriveAuthRoutes(app);
-registerA2ASdkRoutes(app);
-
 /** Developer: ring-buffer server logs — login required (may contain secrets/paths). */
 app.get('/api/dev/logs', requireGoogleSession, (req, res) => {
   const level = String(req.query.level || 'all') as any;

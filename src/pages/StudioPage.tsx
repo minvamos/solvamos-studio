@@ -23,7 +23,7 @@ const AI_APP_TYPES: {
   hint: string;
 }[] = [
   { id: 'search_docs', label: '문서 검색', hint: 'PDF·Docs·텍스트 RAG' },
-  { id: 'chat_rag', label: '대화형 RAG', hint: 'Chat 앱 + 문서 근거' },
+  { id: 'chat_rag', label: '대화형 RAG', hint: 'Search+Answer 자연어 Q&A' },
   { id: 'website', label: '웹사이트', hint: '공개 URL 인덱싱' },
   { id: 'structured', label: '구조화 데이터', hint: 'JSON/BQ/표형' },
   { id: 'media', label: '미디어', hint: '이미지·미디어 검색' },

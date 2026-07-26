@@ -25,8 +25,10 @@ Studio는 제작 도구이고 Catalog는 외부 세계가 에이전트를 찾는
 - 공개 marketplace
 - 기계가 읽는 JSON
 - Markdown agent card
-- A2A agent card
+- Discovery Agent Card (A2A-shaped JSON; 실행은 항상 `invoke_url`)
 - 실행 URL과 가격/결제 protocol
+
+Google A2A JSON-RPC는 공개 커머스 경로로 쓰지 않는다. 정책: [`docs/A2A.md`](./A2A.md).
 
 `CatalogAgent`는 영속 listing 데이터이고 `solvamos-catalog`는 그 공개 surface다.
 
@@ -61,7 +63,7 @@ Studio 소유자 테스트와 무료 agent만 origin에서 결제 없이 실행�
 - attachment: Datastore retrieval + Vertex Gemini multimodal
 - live web: Datastore retrieval + Vertex Gemini Google Search
 - chitchat: retrieval 없는 빠른 Gemini
-- A2A: self → free peer → paid peer → synthesis
+- Studio peer orchestration (`server/a2a.ts`): self → free peer → paid peer → synthesis (내부 기능; Google A2A 프로토콜 아님)
 
 사용자에게는 한 대화처럼 보이지만 runtime은 근거·비용·도구 요구에 따라 분기한다.
 
@@ -87,7 +89,7 @@ Studio 소유자 테스트와 무료 agent만 origin에서 결제 없이 실행�
 - Catalog에서 역할·가격·protocol 확인
 - 무료 agent는 바로 호출
 - 유료 agent는 표준 gateway URL과 pay client로 결제·호출
-- JSON/Markdown/A2A discovery 가능
+- JSON/Markdown/Agent Card discovery 가능
 
 ### Platform operator
 
@@ -111,7 +113,7 @@ Studio 소유자 테스트와 무료 agent만 origin에서 결제 없이 실행�
 - 대화 history/session/related questions
 - image/PDF/text turn attachment
 - Google Search toggle
-- Catalog marketplace/API/Markdown/A2A card
+- Catalog marketplace/API/Markdown/discovery Agent Card
 - gateway-only paid public path
 - 비용 인식 A2A orchestration
 - wallet UI와 settlement schema/UI

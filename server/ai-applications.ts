@@ -57,8 +57,11 @@ export const AI_APP_TYPES: AiAppTypeInfo[] = [
   {
     id: 'chat_rag',
     label: '대화형 RAG (Chat)',
-    description: '문서 근거로 대화하는 Chat 앱. 고객지원·사내 FAQ에 적합.',
-    solutionType: 'SOLUTION_TYPE_CHAT',
+    description:
+      '문서 근거로 대화하는 RAG. Agent Search Answer API(자연어 Q&A)를 쓰도록 Search+LLM 엔진으로 생성합니다.',
+    // Answer API docs target Search engines (…/servingConfigs/default_search:answer).
+    // SOLUTION_TYPE_CHAT is Dialogflow-oriented and is a poor fit for :answer.
+    solutionType: 'SOLUTION_TYPE_SEARCH',
     industryVertical: 'GENERIC',
     contentConfig: 'CONTENT_REQUIRED',
     recommendedSources: ['local_upload', 'google_drive', 'none'],
