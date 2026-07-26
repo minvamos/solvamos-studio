@@ -1524,6 +1524,67 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
   }
 });
 
+async function handleAgentReindex(req: express.Request, res: express.Response) {
+  try {
+    const agent = await getAgent(req.params.id);
+    if (!agent) {
+      res.status(404).json({ status: 'error', message: 'Agent not found' });
+      return;
+    }
+    if (!agent.vertexDataStoreId) {
+      res.status(400).json({
+        status: 'error',
+        message: '이 에이전트에 Data Store가 없습니다. 다시 생성해 주세요.',
+      });
+      return;
+    }
+    const sync = await syncLocalCorpusToVertex(agent.id, agent.vertexDataStoreId);
+    if (sync.imported <= 0) {
+      res.status(400).json({
+        status: 'error',
+        message: sync.message || '재인덱싱할 문서가 없습니다. CSV를 다시 업로드해 주세요.',
+      });
+      return;
+    }
+    serverLog('info', 'reindex', `Reindexed ${agent.id}: ${sync.message}`);
+    res.json({
+      status: 'success',
+      agentId: agent.id,
+      dataStoreId: agent.vertexDataStoreId,
+      imported: sync.imported,
+      message: sync.message,
+    });
+  } catch (err: any) {
+    serverLog('error', 'reindex', err?.message || err);
+    res.status(500).json({ status: 'error', message: err?.message || 'reindex failed' });
+  }
+}
+
+/** Re-push Prisma/local corpus into the agent's Discovery Engine datastore. */
+app.post('/api/agents/:id/reindex', requireGoogleSession, async (req, res) => {
+  const me = await getMeFromRequest(req);
+  if (!me.user?.id) {
+    res.status(401).json({ status: 'error', message: '로그인이 필요합니다.' });
+    return;
+  }
+  if (!(await userCanManageAgent(me.user.id, req.params.id))) {
+    res.status(403).json({ status: 'error', message: '권한이 없습니다.' });
+    return;
+  }
+  return handleAgentReindex(req, res);
+});
+
+/** Ops recovery: same reindex with gateway internal secret (no browser session). */
+app.post('/api/internal/agents/:id/reindex', async (req, res) => {
+  const expected = process.env.PAY_INTERNAL_SECRET || '';
+  const got = String(req.headers['x-pay-internal-secret'] || '');
+  if (!expected || got !== expected) {
+    res.status(401).json({ status: 'error', message: 'unauthorized' });
+    return;
+  }
+  return handleAgentReindex(req, res);
+});
+
 app.post('/api/agents/preview-prompt', (req, res) => {
   const { role, tone, securityLevel, customRole, customInstructions } = req.body;
   const systemPrompt = compileSystemPrompt(

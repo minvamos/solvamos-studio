@@ -735,18 +735,27 @@ export async function importCorpusToVertexDataStore(
   const parent = parentCollection();
   if (!parent) throw new Error('GOOGLE_CLOUD_PROJECT not set');
 
-  const branch = `${parent}/dataStores/${dataStoreId}/branches/default_branch`;
+  // Discovery Engine default branch id is "0". Importing to "default_branch"
+  // can report an LRO while leaving the searchable store empty (0 documents).
+  const branch = `${parent}/dataStores/${dataStoreId}/branches/0`;
 
   const toInlineDoc = (doc: LocalRagCorpus['docs'][number]) => {
     const documentId =
       doc.id.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 63) || `doc_${doc.id.slice(0, 8)}`;
     const isPdf =
       doc.mimeType === 'application/pdf' || doc.name.toLowerCase().endsWith('.pdf');
+    const lowerName = doc.name.toLowerCase();
     const mimeType =
       isPdf && doc.contentBase64
         ? 'application/pdf'
-        : doc.mimeType?.startsWith('text/') || doc.mimeType === 'application/json'
-          ? doc.mimeType || 'text/plain'
+        : doc.mimeType?.startsWith('text/') ||
+            doc.mimeType === 'application/json' ||
+            doc.mimeType === 'application/csv' ||
+            lowerName.endsWith('.csv') ||
+            lowerName.endsWith('.tsv')
+          ? doc.mimeType?.startsWith('text/') || doc.mimeType === 'application/json'
+            ? doc.mimeType
+            : 'text/plain'
           : 'text/plain';
     const rawBytes = doc.contentBase64
       ? doc.contentBase64
@@ -756,7 +765,7 @@ export async function importCorpusToVertexDataStore(
       structData: {
         title: doc.name,
         link: doc.webViewLink || '',
-        source: isPdf ? 'pdf' : 'text',
+        source: isPdf ? 'pdf' : lowerName.endsWith('.csv') ? 'csv' : 'text',
         driveFileId: doc.id,
       },
       content: {
@@ -764,6 +773,14 @@ export async function importCorpusToVertexDataStore(
         rawBytes,
       },
     };
+  };
+
+  const countDocuments = async (): Promise<number> => {
+    const list = await gcpFetch(`${branch}/documents?pageSize=100`);
+    if (!list.ok) return -1;
+    const json: any = await list.json().catch(() => ({}));
+    if (typeof json.totalSize === 'number') return json.totalSize;
+    return Array.isArray(json.documents) ? json.documents.length : 0;
   };
 
   const inlineSource = {
@@ -780,19 +797,30 @@ export async function importCorpusToVertexDataStore(
     });
     const importJson: any = await importRes.json().catch(() => ({}));
     if (importRes.ok && importJson.name) {
-      await waitOperation(importJson.name, 180_000, importJson).catch((err) =>
-        console.warn('[vertex-search] import op', err?.message || err)
+      try {
+        await waitOperation(importJson.name, 180_000, importJson);
+      } catch (err: any) {
+        console.warn('[vertex-search] import op failed', err?.message || err);
+      }
+      // Give serving index a moment, then verify documents actually exist.
+      await new Promise((r) => setTimeout(r, 2000));
+      const n = await countDocuments();
+      if (n > 0) {
+        return {
+          imported: Math.max(n, inlineSource.documents.length),
+          message: `Batch-imported into ${dataStoreId} (visible docs=${n})`,
+        };
+      }
+      console.warn(
+        '[vertex-search] batch import finished but datastore empty — per-doc upsert fallback'
       );
-      return {
-        imported: inlineSource.documents.length,
-        message: `Batch-imported ${inlineSource.documents.length} doc(s) into ${dataStoreId}`,
-      };
+    } else {
+      console.warn(
+        '[vertex-search] batch import fallback',
+        importRes.status,
+        JSON.stringify(importJson).slice(0, 200)
+      );
     }
-    console.warn(
-      '[vertex-search] batch import fallback',
-      importRes.status,
-      JSON.stringify(importJson).slice(0, 200)
-    );
   } catch (err: any) {
     console.warn('[vertex-search] batch import error', err?.message || err);
   }
@@ -822,11 +850,19 @@ export async function importCorpusToVertexDataStore(
     errors.push(`${doc.name}: ${res.status} ${errText.slice(0, 120)}`);
   }
 
+  const visible = await countDocuments();
+  if (imported <= 0 || visible === 0) {
+    throw new Error(
+      `Vertex import produced no searchable documents in ${dataStoreId}` +
+        (errors.length ? ` (${errors.slice(0, 2).join(' | ')})` : '')
+    );
+  }
+
   return {
     imported,
     message:
       errors.length === 0
-        ? `Imported ${imported} doc(s) into ${dataStoreId}`
+        ? `Imported ${imported} doc(s) into ${dataStoreId} (visible=${visible})`
         : `Imported ${imported}; errors: ${errors.slice(0, 3).join(' | ')}`,
   };
 }

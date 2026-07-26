@@ -550,29 +550,56 @@ export async function generateGroundedAnswer(opts: {
       const engineRefusal = isEngineRefusalAnswer(answer);
       const noGrounding =
         engineRefusal && !(appAnswer.citations && appAnswer.citations.length);
-      // relatedQuestions are follow-up chips, not a greeting reply — use Gemini chat.
+      // Engine refusal with no citations usually means empty/unindexed datastore
+      // or OOD query — try search/local corpus before ungrounded Gemini chat.
       if (noGrounding) {
-        const gen = await generateAnswer({
-          systemPrompt: opts.systemPrompt,
-          userPrompt: opts.userPrompt,
-          contextBlock: '',
-          geminiApiKey: opts.geminiApiKey || config.geminiApiKey,
-          history: opts.history,
-        });
+        const retrieval = opts.dataStoreId
+          ? await retrieveFromVertexSearch(opts.userPrompt, opts.dataStoreId)
+          : { ok: false, snippets: [] as string[], citations: [] as RagCitation[], error: 'no datastore' };
+        let snippets = retrieval.ok ? retrieval.snippets : [];
+        let citations = retrieval.ok ? retrieval.citations : [];
+        if (!snippets.length && opts.agentId) {
+          const local = retrieveFromLocalCorpus(opts.agentId, opts.userPrompt);
+          if (local.ok && local.snippets.length) {
+            snippets = local.snippets;
+            citations = local.citations;
+          }
+        }
+        if (snippets.length) {
+          const gen = await generateAnswer({
+            systemPrompt: opts.systemPrompt,
+            userPrompt: opts.userPrompt,
+            contextBlock: `\n\n[GROUNDED CONTEXT]\n${snippets.join('\n---\n')}\n[/GROUNDED CONTEXT]\n`,
+            geminiApiKey: opts.geminiApiKey || config.geminiApiKey,
+            history: opts.history,
+          });
+          return {
+            answer: formatAgentChatMessage(gen.text),
+            confidence: 0.8,
+            citations,
+            mode: citations.length ? 'vertex_search' : 'drive_local',
+            generationBackend: gen.backend,
+            engineId: opts.engineId,
+            session: appAnswer.session,
+            relatedQuestions: appAnswer.relatedQuestions,
+            retrievalError:
+              'Engine Answer refused; answered from search/local corpus snippets',
+            toolsUsed: ['engine_answer_skipped', 'snippet_grounded_gemini'],
+          };
+        }
         return {
-          answer: formatAgentChatMessage(gen.text),
-          // Ungrounded Gemini chat is not a strong self-answer — keep conf low so
-          // A2A peer escalation (and UIs) treat it as weak.
-          confidence: 0.25,
+          answer:
+            '지식베이스에서 관련 문서를 찾지 못했습니다. 문서 인덱싱이 비어 있거나 아직 검색에 반영되지 않았을 수 있습니다. 파일을 다시 업로드하거나 재인덱싱한 뒤 시도해 주세요.',
+          confidence: 0.15,
           citations: [],
-          mode: 'gemini_only',
-          generationBackend: gen.backend,
+          mode: 'ai_application',
+          generationBackend: 'discovery_engine_answer',
           engineId: opts.engineId,
           session: appAnswer.session,
           relatedQuestions: appAnswer.relatedQuestions,
           retrievalError:
-            'Engine Answer non-summary fallback → Gemini conversational reply',
-          toolsUsed: ['engine_answer_skipped', 'gemini_chat'],
+            'Engine Answer refused and datastore/local corpus returned no snippets',
+          toolsUsed: ['engine_answer_skipped', 'empty_knowledge'],
         };
       }
       return {
