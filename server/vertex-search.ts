@@ -745,17 +745,13 @@ export async function importCorpusToVertexDataStore(
     const isPdf =
       doc.mimeType === 'application/pdf' || doc.name.toLowerCase().endsWith('.pdf');
     const lowerName = doc.name.toLowerCase();
+    // Discovery Engine inline import only accepts a small mime allowlist.
+    // Browsers often send CSV as text/csv — that is REJECTED (400). Use text/plain.
     const mimeType =
       isPdf && doc.contentBase64
         ? 'application/pdf'
-        : doc.mimeType?.startsWith('text/') ||
-            doc.mimeType === 'application/json' ||
-            doc.mimeType === 'application/csv' ||
-            lowerName.endsWith('.csv') ||
-            lowerName.endsWith('.tsv')
-          ? doc.mimeType?.startsWith('text/') || doc.mimeType === 'application/json'
-            ? doc.mimeType
-            : 'text/plain'
+        : doc.mimeType === 'application/json' || lowerName.endsWith('.json')
+          ? 'application/json'
           : 'text/plain';
     const rawBytes = doc.contentBase64
       ? doc.contentBase64
