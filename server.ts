@@ -721,12 +721,16 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
     const a2aPeersEnabled = coerceOptionalBool(bodyA2aPeersEnabled) ?? true;
 
     const me = await getMeFromRequest(req);
+    if (!me.user?.id) {
+      res.status(401).json({ status: 'error', message: '로그인이 필요합니다.' });
+      return;
+    }
     const sid = me.sessionId || (await resolveSessionId(req));
     const authSession = sid ? getSession(sid) : undefined;
 
     await ensureSharedCustomerTenant();
     const tenantId =
-      me.user?.tenantId ||
+      me.user.tenantId ||
       bodyTenantId ||
       authSession?.tenantId ||
       sharedTenantId() ||
@@ -734,7 +738,7 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       undefined;
 
     // User wallet = operator only (funding / display). Never agent vault.
-    const userPrimary = me.user?.id ? await getPrimaryWallet(me.user.id) : undefined;
+    const userPrimary = await getPrimaryWallet(me.user.id);
 
     const sourceMeta = getDataSourceType(dataSourceType);
     const localFileList = Array.isArray(localFiles) ? localFiles : [];
@@ -1066,8 +1070,8 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
     };
 
     await putAgent(newAgent, {
-      ownerUserId: me.user?.id,
-      ownerEmail: me.user?.email,
+      ownerUserId: me.user.id,
+      ownerEmail: me.user.email,
     });
     okStep('agent_record', agentId);
 
@@ -1081,6 +1085,8 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       listing = await registerAgentOnPayShCatalog(newAgent, {
         baseUrl: runtimeBase,
         description: descriptionText || undefined,
+        ownerUserId: me.user.id,
+        ownerEmail: me.user.email,
         // Catalog URL이 설정된 환경에서는 원격 게시 실패 = 생성 실패
         requireRemote: !!config.catalogSiteUrl,
       });
@@ -1482,7 +1488,10 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
       secretManagerPath: existing.secretManagerPath,
     };
 
-    await putAgent(updated);
+    await putAgent(updated, {
+      ownerUserId: me.user.id,
+      ownerEmail: me.user.email,
+    });
 
     const tenant = updated.tenantId ? await getTenant(String(updated.tenantId)) : undefined;
     const runtimeBase =
@@ -1491,6 +1500,8 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
     const listing = await registerAgentOnPayShCatalog(updated, {
       baseUrl: runtimeBase,
       description: nextDescription,
+      ownerUserId: me.user.id,
+      ownerEmail: me.user.email,
       requireRemote: !!config.catalogSiteUrl,
     });
     const payShCatalog = enrichCatalogListing(listing, publicBaseFromReq(req));
@@ -1764,6 +1775,8 @@ async function handleCatalogRegister(req: express.Request, res: express.Response
     const listing = await registerAgentOnPayShCatalog(agent, {
       baseUrl: publicBaseFromReq(req),
       description: req.body?.description,
+      ownerUserId: me.user.id,
+      ownerEmail: me.user.email,
     });
     res.json({
       status: 'success',

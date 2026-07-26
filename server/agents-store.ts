@@ -80,11 +80,13 @@ function toRecord(a: DbAgent): AgentRecord {
 
 async function syncListing(agent: AgentRecord, owner?: { userId?: string; email?: string }) {
   try {
+    // Only pass owner fields when known — never wipe CatalogAgent.ownerUserId with null.
     await upsertCatalogAgentFromRecord(agent, {
       baseUrl: config.appUrl,
       description: agent.description,
-      ownerUserId: owner?.userId || null,
-      ownerEmail: owner?.email || null,
+      ...(owner?.userId
+        ? { ownerUserId: owner.userId, ownerEmail: owner.email || null }
+        : {}),
     });
   } catch (err: any) {
     console.warn('[agents-store] catalog sync failed', agent.id, err?.message || err);
