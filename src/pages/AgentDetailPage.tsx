@@ -229,24 +229,39 @@ export default function AgentDetailPage({
               {agent.dataSourceType ? ` · 소스 ${agent.dataSourceType}` : ''}
             </p>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-              <Stat label="호출" value={String(agent.invokeCount || 0)} />
               <Stat
-                label="예상 수익"
-                value={`$${((agent.invokeCount || 0) * fee).toFixed(3)}`}
+                label={fee > 0 ? 'Paid Calls' : 'API Calls'}
+                value={String(agent.invokeCount || 0)}
+              />
+              <Stat
+                label="예상 수익 (seller 90%)"
+                value={`$${(agent.estSellerRevenueUsdc || 0).toFixed(3)}`}
               />
               <Stat
                 label="Vault SOL"
                 value={
-                  vaultBalance?.sol != null ? vaultBalance.sol.toFixed(4) : '—'
+                  vaultBalance?.sol != null
+                    ? vaultBalance.sol.toFixed(4)
+                    : agent.vaultSol != null
+                      ? agent.vaultSol.toFixed(4)
+                      : '—'
                 }
               />
               <Stat
                 label="Vault USDC"
                 value={
-                  vaultBalance?.usdc != null ? vaultBalance.usdc.toFixed(4) : '—'
+                  vaultBalance?.usdc != null
+                    ? vaultBalance.usdc.toFixed(4)
+                    : agent.vaultUsdc != null
+                      ? agent.vaultUsdc.toFixed(4)
+                      : '—'
                 }
               />
             </div>
+            <p className="text-[11px] text-outline">
+              Studio 테스트 호출은 API Calls·수익에 포함되지 않습니다. 수익은 정산된 결제액의
+              seller 지분(기본 90%)만 합산합니다.
+            </p>
             {agent.publicKey && (
               <Row
                 label="Agent vault"

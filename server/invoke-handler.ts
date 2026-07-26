@@ -120,7 +120,10 @@ export async function runAgentInvoke(
     answerSession: input.answerSession,
     callChain: chain,
   });
-  await bumpInvoke(input.agentId);
+  // Owner Studio tests skip the paywall — do not inflate API Calls / Est. Revenue.
+  if (!studio) {
+    await bumpInvoke(input.agentId);
+  }
 
   const generation =
     result.ragMode === 'ai_application' ? 'ai_application_answer' : 'vertex_gemini_rag';

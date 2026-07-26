@@ -14,6 +14,7 @@ import { savePrivateKeyToGCP, createAgentVaultKeypair } from './server/vault.js'
 import {
   listSettlementsForUser,
   recordSettlement,
+  aggregateSettlementsByAgent,
 } from './server/settlements.js';
 import { verifyPayment } from './server/payment.js';
 import {
@@ -93,6 +94,7 @@ import {
   getInvokeEvidence,
   clearInvokeEvidence,
   evidenceStats,
+  countStudioOwnerTestsByAgent,
 } from './server/invoke-evidence.js';
 
 dotenv.config();
@@ -461,8 +463,29 @@ app.get('/api/agents', async (req, res) => {
   await refreshCatalogFromRemote();
   const me = await getMeFromRequest(req);
   const agents = await listAgentsForUser(me.user?.id || null);
+  const agentIds = agents.map((a) => a.id);
+  const sellerShare = Math.min(1, Math.max(0, 1 - config.platformFeeShare));
+  const studioTests = countStudioOwnerTestsByAgent(agentIds);
+  const settlements = await aggregateSettlementsByAgent(agentIds);
+  // Devnet vault balances for list cards (bounded concurrency).
+  const balanceById: Record<string, { sol: number | null; usdc: number | null }> = {};
+  if (config.paymentNetwork === 'devnet' && agents.length > 0) {
+    const chunk = 6;
+    for (let i = 0; i < agents.length; i += chunk) {
+      const slice = agents.slice(i, i + chunk);
+      const rows = await Promise.all(
+        slice.map(async (agent) => {
+          const bal = await getWalletBalances(agent.publicKey);
+          return [agent.id, { sol: bal.sol, usdc: bal.usdc }] as const;
+        })
+      );
+      for (const [id, bal] of rows) balanceById[id] = bal;
+    }
+  }
   res.json({
     status: 'success',
+    platformFeeShare: config.platformFeeShare,
+    sellerShare,
     catalogPageUrl: config.catalogSiteUrl
       ? `${config.catalogSiteUrl}/marketplace`
       : 'https://solvamos-catalog-74094114833.asia-northeast3.run.app/marketplace',
@@ -473,10 +496,28 @@ app.get('/api/agents', async (req, res) => {
       const fee = agentFeeUsdc(agent);
       const listing = getCatalogEntry(agent.id);
       const catalog = listing ? enrichCatalogListing(listing, publicBase) : null;
+      const studioN = studioTests[agent.id] || 0;
+      const paid = settlements[agent.id] || { paidCalls: 0, grossUsdc: 0 };
+      // Paid agents: count verified settlements only (Studio tests never settle).
+      // Free agents: strip Studio owner-tests from the DB counter.
+      const billableInvokeCount =
+        fee > 0
+          ? paid.paidCalls
+          : Math.max(0, (agent.invokeCount || 0) - studioN);
+      // Seller take after platform cut — settlements store full call fee.
+      const estSellerRevenueUsdc = Number((paid.grossUsdc * sellerShare).toFixed(6));
+      const vault = balanceById[agent.id] || { sol: null, usdc: null };
       return {
         ...agent,
         fee,
         perCallPriceUsdc: fee,
+        invokeCount: billableInvokeCount,
+        rawInvokeCount: agent.invokeCount || 0,
+        studioTestCount: studioN,
+        paidCallCount: paid.paidCalls,
+        estSellerRevenueUsdc,
+        vaultSol: vault.sol,
+        vaultUsdc: vault.usdc,
         payShCatalog: catalog,
         catalogPageUrl: catalog?.catalogPageUrl || (config.catalogSiteUrl
           ? `${config.catalogSiteUrl}/a/${encodeURIComponent(agent.id)}`

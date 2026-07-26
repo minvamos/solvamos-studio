@@ -130,6 +130,42 @@ export async function recordSettlement(input: {
   return mapRow(row);
 }
 
+/** Per-agent paid call / gross fee totals from verified settlements (full call fee, not seller share). */
+export async function aggregateSettlementsByAgent(
+  agentIds: string[]
+): Promise<Record<string, { paidCalls: number; grossUsdc: number }>> {
+  const out: Record<string, { paidCalls: number; grossUsdc: number }> = {};
+  for (const id of agentIds) out[id] = { paidCalls: 0, grossUsdc: 0 };
+  if (agentIds.length === 0) return out;
+  try {
+    const rows = await prisma.paymentSettlement.groupBy({
+      by: ['agentId'],
+      where: {
+        agentId: { in: agentIds },
+        status: 'success',
+      },
+      _count: { _all: true },
+      _sum: { amountUsdc: true },
+    });
+    for (const row of rows) {
+      out[row.agentId] = {
+        paidCalls: row._count._all,
+        grossUsdc: Number(row._sum.amountUsdc || 0),
+      };
+    }
+    return out;
+  } catch (err: any) {
+    const msg = String(err?.message || err);
+    if (
+      err?.code === 'P2021' ||
+      /PaymentSettlement.*does not exist|relation .*PaymentSettlement.*does not exist/i.test(msg)
+    ) {
+      return out;
+    }
+    throw err;
+  }
+}
+
 export async function listSettlementsForUser(userId: string): Promise<SettlementRecord[]> {
   try {
     const owned = await prisma.agentOwnership.findMany({

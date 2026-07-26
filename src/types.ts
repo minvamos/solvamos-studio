@@ -15,6 +15,15 @@ export interface Agent {
   systemPrompt: string;
   created: string;
   invokeCount: number;
+  /** Raw DB counter before Studio-test correction (debug). */
+  rawInvokeCount?: number;
+  studioTestCount?: number;
+  /** Verified PaymentSettlement rows for this agent. */
+  paidCallCount?: number;
+  /** Seller share of settled gross fees (after platform cut). */
+  estSellerRevenueUsdc?: number;
+  vaultSol?: number | null;
+  vaultUsdc?: number | null;
   googleDriveFolderId?: string;
   vertexDataStoreId?: string;
   vertexEngineId?: string;

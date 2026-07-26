@@ -187,3 +187,16 @@ export function evidenceStats() {
   for (const r of store) byAgent[r.agentId] = (byAgent[r.agentId] || 0) + 1;
   return { total: store.length, max: MAX, byAgent };
 }
+
+/** Studio owner-test invokes in the evidence buffer (for display correction of invokeCount). */
+export function countStudioOwnerTestsByAgent(agentIds?: string[]): Record<string, number> {
+  hydrate();
+  const want = agentIds && agentIds.length > 0 ? new Set(agentIds) : null;
+  const out: Record<string, number> = {};
+  for (const r of store) {
+    if (!r.studioOwnerTest) continue;
+    if (want && !want.has(r.agentId)) continue;
+    out[r.agentId] = (out[r.agentId] || 0) + 1;
+  }
+  return out;
+}

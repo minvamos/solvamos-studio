@@ -55,10 +55,7 @@ export default function AgentsPage({
   }).length;
   const totalCalls = agents.reduce((sum, a) => sum + (a.invokeCount || 0), 0);
   const paidCount = agents.filter((a) => (a.fee ?? a.perCallPriceUsdc ?? 0) > 0).length;
-  const estRevenue = agents.reduce(
-    (sum, a) => sum + (a.invokeCount || 0) * (a.fee ?? a.perCallPriceUsdc ?? 0),
-    0
-  );
+  const estRevenue = agents.reduce((sum, a) => sum + (a.estSellerRevenueUsdc || 0), 0);
 
   const filtered = useMemo(() => {
     let list = [...agents];
@@ -77,9 +74,7 @@ export default function AgentsPage({
         return (b.fee ?? b.perCallPriceUsdc ?? 0) - (a.fee ?? a.perCallPriceUsdc ?? 0);
       }
       if (sort === 'revenue') {
-        const ra = (a.invokeCount || 0) * (a.fee ?? a.perCallPriceUsdc ?? 0);
-        const rb = (b.invokeCount || 0) * (b.fee ?? b.perCallPriceUsdc ?? 0);
-        return rb - ra;
+        return (b.estSellerRevenueUsdc || 0) - (a.estSellerRevenueUsdc || 0);
       }
       return (b.invokeCount || 0) - (a.invokeCount || 0);
     });
@@ -98,7 +93,8 @@ export default function AgentsPage({
         <div>
           <h2 className="text-3xl font-semibold text-on-surface mb-2">내 에이전트 목록</h2>
           <p className="text-base text-on-surface-variant">
-            호출 수·요금·상태 등 에이전트별 지표를 확인하고 카탈로그 페이지로 이동하세요.
+            Paid Calls·seller 수익(정산×플랫폼 수수료 제외)·Vault 잔액을 확인하고 카탈로그로
+            이동하세요. Studio 테스트는 집계에서 제외됩니다.
           </p>
         </div>
         <a
@@ -120,7 +116,7 @@ export default function AgentsPage({
         />
         <MetricCard
           icon={<Activity className="w-6 h-6 text-google-blue" />}
-          label="Total Calls"
+          label="Total Paid/API Calls"
           value={totalCalls.toLocaleString()}
           accent="border-l-google-blue"
         />
@@ -132,7 +128,7 @@ export default function AgentsPage({
         />
         <MetricCard
           icon={<BarChart3 className="w-6 h-6 text-google-blue" />}
-          label="Est. Revenue"
+          label="Est. Revenue (seller)"
           value={`$${estRevenue.toFixed(3)}`}
           accent="border-l-google-blue"
         />
@@ -183,7 +179,8 @@ export default function AgentsPage({
           const inactive = agent.status === 'inactive' || agent.status === 'PAUSED';
           const title = agent.agentName || agent.customRole || roleLabel(agent.role);
           const fee = agent.fee ?? agent.perCallPriceUsdc ?? 0;
-          const rev = (agent.invokeCount || 0) * fee;
+          const rev = agent.estSellerRevenueUsdc || 0;
+          const vaultUsdc = agent.vaultUsdc;
           const invokeUrl = agent.invokeUrl || agent.payShCatalog?.publicInvokeUrl || '';
           const pageUrl =
             agent.catalogPageUrl ||
@@ -253,12 +250,21 @@ export default function AgentsPage({
 
                 <div className="flex items-center gap-6 flex-wrap">
                   <div className="text-right">
-                    <p className="text-xs text-on-surface-variant">API Calls</p>
+                    <p className="text-xs text-on-surface-variant">
+                      {(agent.fee ?? agent.perCallPriceUsdc ?? 0) > 0 ? 'Paid Calls' : 'API Calls'}
+                    </p>
                     <p className="text-lg font-semibold text-on-surface">{agent.invokeCount || 0}</p>
                   </div>
                   <div className="text-right">
                     <p className="text-xs text-on-surface-variant">Est. Revenue</p>
                     <p className="text-lg font-semibold text-google-blue">${rev.toFixed(3)}</p>
+                    <p className="text-[10px] text-outline">seller share</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-xs text-on-surface-variant">Vault USDC</p>
+                    <p className="text-lg font-semibold text-solana-green">
+                      {typeof vaultUsdc === 'number' ? vaultUsdc.toFixed(3) : '—'}
+                    </p>
                   </div>
                   <div className="flex gap-2">
                     <button
