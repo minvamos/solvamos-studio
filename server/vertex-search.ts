@@ -330,7 +330,7 @@ export type AiApplicationCreateResult = {
   sourceNote?: string;
 };
 
-/** Create Data Store (+ Engine/app unless skipEngine / autonomous). */
+/** Create or reuse Data Store (+ Engine/app unless skipEngine / autonomous). */
 export async function createAiApplicationBundle(opts: {
   displayName: string;
   appType?: string;
@@ -341,6 +341,13 @@ export async function createAiApplicationBundle(opts: {
   /** When true (autonomous mode), provision Data Store only — no Answer Engine. */
   skipEngine?: boolean;
   runtimeMode?: 'specialized' | 'autonomous' | string;
+  /**
+   * Agent update: reuse this Discovery Engine data store id instead of minting a new one.
+   * Create path should omit this so a fresh store is allocated.
+   */
+  dataStoreId?: string;
+  /** Preferred engine id when ensuring an app on an existing store (optional). */
+  engineId?: string;
 }): Promise<AiApplicationCreateResult> {
   // Website URL sources MUST use PUBLIC_WEBSITE — otherwise targetSites never attach
   // and answers fall back to bare Gemini against an empty CONTENT_REQUIRED store.
@@ -354,6 +361,7 @@ export async function createAiApplicationBundle(opts: {
   const hint =
     opts.driveFolderId || opts.websiteUri || opts.gcsUri || appMeta.id || 'app';
   const skipEngine = opts.skipEngine === true || opts.runtimeMode === 'autonomous';
+  const reuseStoreId = opts.dataStoreId?.trim() || '';
 
   if (!project) {
     return {
@@ -397,7 +405,7 @@ export async function createAiApplicationBundle(opts: {
     });
     return {
       dataStoreId: configured,
-      engineId: eng.engineId,
+      engineId: eng.engineId || opts.engineId,
       appType: appMeta.id,
       dataSourceType: sourceMeta.id,
       status: eng.engineId ? 'existing' : 'error',
@@ -419,7 +427,8 @@ export async function createAiApplicationBundle(opts: {
     };
   }
 
-  const dataStoreId = sanitizeId(opts.displayName, hint);
+  // Updates must keep the agent's store id. Only mint a new id on first create.
+  const dataStoreId = reuseStoreId || sanitizeId(opts.displayName, hint);
   const parent = parentCollection()!;
 
   const attachWebsite = async (): Promise<string | undefined> => {

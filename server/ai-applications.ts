@@ -148,6 +148,47 @@ export function getDataSourceType(id: string | undefined): DataSourceTypeInfo {
   return DATA_SOURCE_TYPES.find((t) => t.id === id) || DATA_SOURCE_TYPES[0];
 }
 
+/** Effective Discovery Engine shape for an agent (mirrors createAiApplicationBundle). */
+export type AiAppResourceShape = {
+  appType: AiAppType;
+  contentConfig: AiAppTypeInfo['contentConfig'];
+  industryVertical: AiAppTypeInfo['industryVertical'];
+  solutionType: AiAppTypeInfo['solutionType'];
+};
+
+/**
+ * Resolve the GCP resource shape. website_url (or website app + URI) forces
+ * PUBLIC_WEBSITE — same rule as createAiApplicationBundle.
+ */
+export function resolveAiAppResourceShape(opts: {
+  aiAppType?: string;
+  dataSourceType?: string;
+  websiteUri?: string;
+}): AiAppResourceShape {
+  const wantsWebsite =
+    opts.dataSourceType === 'website_url' ||
+    (!!opts.websiteUri && opts.aiAppType === 'website');
+  const appMeta = getAiAppType(wantsWebsite ? 'website' : opts.aiAppType);
+  return {
+    appType: appMeta.id,
+    contentConfig: appMeta.contentConfig,
+    industryVertical: appMeta.industryVertical,
+    solutionType: appMeta.solutionType,
+  };
+}
+
+/** True when the existing data store / engine can be reused for the next shape. */
+export function aiAppResourcesCompatible(
+  prev: AiAppResourceShape,
+  next: AiAppResourceShape
+): boolean {
+  return (
+    prev.contentConfig === next.contentConfig &&
+    prev.industryVertical === next.industryVertical &&
+    prev.solutionType === next.solutionType
+  );
+}
+
 export function aiApplicationsCatalog() {
   return {
     location: process.env.VERTEX_SEARCH_LOCATION || 'global',

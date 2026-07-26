@@ -428,7 +428,7 @@ export async function ensureDriveDataStore(opts: {
   return createVertexSearchDataStore(opts);
 }
 
-/** Create AI Applications app + data store for any source type (Drive optional). */
+/** Create or reuse AI Applications app + data store for any source type (Drive optional). */
 export async function ensureAiApplication(opts: {
   displayName: string;
   appType?: string;
@@ -438,6 +438,9 @@ export async function ensureAiApplication(opts: {
   gcsUri?: string;
   skipEngine?: boolean;
   runtimeMode?: 'specialized' | 'autonomous' | string;
+  /** Agent update: pass existing store so we never mint a second datastore. */
+  dataStoreId?: string;
+  engineId?: string;
 }) {
   return createAiApplicationBundle(opts);
 }

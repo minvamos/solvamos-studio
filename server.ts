@@ -29,7 +29,12 @@ import {
 import { parseCallChainHeader } from './server/spend-policy.js';
 import { payApiRouter } from './server/payapi.js';
 import { ensureAiApplication, destroyAiApplication, syncLocalCorpusToVertex } from './server/rag.js';
-import { aiApplicationsCatalog, getDataSourceType } from './server/ai-applications.js';
+import {
+  aiApplicationsCatalog,
+  aiAppResourcesCompatible,
+  getDataSourceType,
+  resolveAiAppResourceShape,
+} from './server/ai-applications.js';
 import { ingestDriveSourceForAgent } from './server/drive-ingest.js';
 import { ingestLocalUploadsForAgent } from './server/local-ingest.js';
 import { registerDriveAuthRoutes, isDriveAuthAvailable, isOAuthClientConfigured, requireGoogleSession, resolveSessionId, getSession } from './server/drive-oauth.js';
@@ -1306,14 +1311,56 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
     let vertexEngineId = existing.vertexEngineId;
     let driveIngest: { docs: number; message?: string } | null = null;
     let indexingStatus = nextStatus;
+    let reprovisioned = false;
+    const websiteChanged =
+      websiteUri !== undefined &&
+      String(websiteUri || '') !== String(existing.websiteUri || '');
 
-    // Missing store (legacy agents) or Drive source change → ensure store (+ engine if specialized)
-    if (!vertexDataStoreId || (folderChanged && nextFolder) || hasLocalFiles) {
-      serverLog('info', 'update', 'Ensuring AI Applications / Data Store', {
+    const prevShape = resolveAiAppResourceShape({
+      aiAppType: existing.aiAppType,
+      dataSourceType: existing.dataSourceType,
+      websiteUri: existing.websiteUri,
+    });
+    const nextShape = resolveAiAppResourceShape({
+      aiAppType: nextAiAppType,
+      dataSourceType: resolvedSource,
+      websiteUri: nextWebsite,
+    });
+    const resourcesCompatible = aiAppResourcesCompatible(prevShape, nextShape);
+
+    // Incompatible contentConfig / vertical / solutionType → tear down and mint new resources.
+    // Compatible edits reuse the same data store (never create a second one).
+    if (vertexDataStoreId && !resourcesCompatible) {
+      serverLog('info', 'update', 'AI App shape incompatible — replacing store/engine', {
         agentId: existing.id,
-        folderChanged,
-        hasLocalFiles,
+        from: prevShape,
+        to: nextShape,
+        oldDataStoreId: vertexDataStoreId,
+      });
+      const destroyed = await destroyAiApplication({
+        dataStoreId: vertexDataStoreId,
+        engineId: vertexEngineId,
+      });
+      if (destroyed.skippedSharedLab) {
+        throw new Error(
+          '[ai_applications] Lab shared datastore cannot be replaced for this type/source change'
+        );
+      }
+      serverLog('info', 'update', 'Old AI Applications resources removed', {
+        agentId: existing.id,
+        details: destroyed.details,
+      });
+      vertexDataStoreId = undefined;
+      vertexEngineId = undefined;
+      reprovisioned = true;
+    }
+
+    if (!vertexDataStoreId) {
+      serverLog('info', 'update', 'Creating AI Applications / Data Store', {
+        agentId: existing.id,
         runtimeMode: nextRuntimeMode,
+        reprovisioned,
+        shape: nextShape,
       });
       const aiApp = await ensureAiApplication({
         displayName: nextName || existing.id,
@@ -1344,15 +1391,33 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
         );
       }
       vertexDataStoreId = aiApp.dataStoreId;
-      if (nextRuntimeMode === 'autonomous') {
-        vertexEngineId = undefined;
-      } else {
-        vertexEngineId = aiApp.engineId || vertexEngineId;
-      }
+      vertexEngineId =
+        nextRuntimeMode === 'autonomous' ? undefined : aiApp.engineId || vertexEngineId;
+      reprovisioned = true;
     } else if (nextRuntimeMode === 'autonomous') {
       // Switching to autonomous: keep store, drop engine requirement
       vertexEngineId = undefined;
-    } else if (nextRuntimeMode === 'specialized' && vertexDataStoreId && !vertexEngineId) {
+      if (websiteChanged && nextWebsite) {
+        await ensureAiApplication({
+          displayName: nextName || existing.id,
+          appType: nextAiAppType,
+          dataSourceType: resolvedSource,
+          driveFolderId: nextFolder,
+          websiteUri: nextWebsite,
+          gcsUri: nextGcs,
+          runtimeMode: 'autonomous',
+          skipEngine: true,
+          dataStoreId: vertexDataStoreId,
+        });
+      }
+    } else if (!vertexEngineId || websiteChanged) {
+      // Reuse the same store; only ensure engine / website targets.
+      serverLog('info', 'update', 'Updating existing AI Applications resources', {
+        agentId: existing.id,
+        dataStoreId: vertexDataStoreId,
+        needsEngine: !vertexEngineId,
+        websiteChanged,
+      });
       const aiApp = await ensureAiApplication({
         displayName: nextName || existing.id,
         appType: nextAiAppType,
@@ -1361,17 +1426,29 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
         websiteUri: nextWebsite,
         gcsUri: nextGcs,
         runtimeMode: 'specialized',
+        dataStoreId: vertexDataStoreId,
+        engineId: vertexEngineId,
       });
       if (aiApp.status === 'error' || !aiApp.engineId) {
         throw new Error(
           `[ai_applications] ${aiApp.message || 'Engine required for specialized mode'}`
         );
       }
-      vertexEngineId = aiApp.engineId;
-      vertexDataStoreId = aiApp.dataStoreId || vertexDataStoreId;
+      if (aiApp.dataStoreId && aiApp.dataStoreId !== vertexDataStoreId) {
+        serverLog('warn', 'update', 'ensure returned different dataStoreId — keeping existing', {
+          agentId: existing.id,
+          kept: vertexDataStoreId,
+          returned: aiApp.dataStoreId,
+        });
+      }
+      vertexEngineId = aiApp.engineId || vertexEngineId;
     }
 
-    if (folderChanged && nextFolder) {
+    const shouldReingestDrive =
+      !!nextFolder &&
+      resolvedSource === 'google_drive' &&
+      (folderChanged || reprovisioned);
+    if (shouldReingestDrive) {
       const me = await getMeFromRequest(req);
       const sid = me.sessionId || (await resolveSessionId(req));
       if (!sid) {
@@ -1391,6 +1468,7 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
         // Empty folder is OK — keep empty datastore
         serverLog('info', 'update', 'Drive re-ingest: 0 docs — empty datastore kept', {
           agentId: existing.id,
+          reprovisioned,
         });
       } else {
         if (!vertexDataStoreId) {
@@ -1404,6 +1482,7 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
           agentId: existing.id,
           docs: corpus.docs.length,
           imported: sync.imported,
+          reprovisioned,
         });
       }
       indexingStatus = 'ACTIVE';
@@ -1438,6 +1517,19 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
           imported: sync.imported,
         });
       }
+      indexingStatus = 'ACTIVE';
+    } else if (reprovisioned && nextShape.contentConfig !== 'PUBLIC_WEBSITE') {
+      // Type/source swap with no new uploads — push any existing local corpus into the new store.
+      if (!vertexDataStoreId) {
+        throw new Error('[vertex_import] vertexDataStoreId missing after reprovision');
+      }
+      const sync = await syncLocalCorpusToVertex(existing.id, vertexDataStoreId);
+      driveIngest = { docs: sync.imported, message: sync.message };
+      serverLog('info', 'update', 'Reprovision corpus sync', {
+        agentId: existing.id,
+        imported: sync.imported,
+        message: sync.message,
+      });
       indexingStatus = 'ACTIVE';
     }
 
@@ -1516,7 +1608,11 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
       catalogPageUrl: payShCatalog.catalogPageUrl,
       catalogApiUrl: payShCatalog.catalogApiUrl,
       updated: true,
-      message: 'Agent updated (same id/vault; catalog metadata synced)',
+      reprovisioned,
+      resourcesCompatible,
+      message: reprovisioned
+        ? 'Agent updated — AI Applications store/engine reprovisioned for new type/source (vault/id kept)'
+        : 'Agent updated (same id/vault/datastore; catalog metadata synced)',
     });
   } catch (err: any) {
     serverLog('error', 'update', `Agent update failed: ${err?.message || err}`);

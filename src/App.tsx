@@ -845,13 +845,24 @@ export default function App() {
         payload.localFiles = localFiles;
       }
 
+      const editBaseline =
+        (targetId && agents.find((a) => a.id === targetId)) ||
+        (activeAgent?.id === targetId ? activeAgent : null);
+      const editTypeChanged =
+        isEdit &&
+        !!editBaseline &&
+        ((options.aiAppType || 'search_docs') !== (editBaseline.aiAppType || 'search_docs') ||
+          (options.dataSourceType || 'local_upload') !==
+            (editBaseline.dataSourceType || 'local_upload'));
       setCreateDetail(
         isEdit
-          ? folderChanged
-            ? '메타 저장 · Drive 소스 변경 재수집'
-            : localFiles.length
-              ? `로컬 파일 ${localFiles.length}건 추가 · 메타 저장`
-              : '메타·요금 저장 (vault/ID 유지)'
+          ? editTypeChanged
+            ? '유형/소스 변경 · AI Applications 재프로비저닝…'
+            : folderChanged
+              ? '메타 저장 · Drive 소스 변경 재수집'
+              : localFiles.length
+                ? `로컬 파일 ${localFiles.length}건 추가 · 메타 저장`
+                : '메타·요금 저장 (vault/ID 유지)'
           : localFiles.length
             ? `로컬 파일 ${localFiles.length}건 · ${
                 options.runtimeMode === 'autonomous' ? 'Gemini+DataStore' : 'AI Applications'
