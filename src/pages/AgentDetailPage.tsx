@@ -230,12 +230,17 @@ export default function AgentDetailPage({
             <p className="text-sm text-on-surface-variant leading-relaxed">
               모드{' '}
               {agent.runtimeMode === 'autonomous' ? '자율(Gemini+RAG)' : '특화(AI Applications)'} ·
-              톤 {agent.tone} · 보안 {agent.securityLevel}
+              역할 {agent.customRole || agent.role} · 톤 {agent.tone} · 보안 {agent.securityLevel}
               {agent.runtimeMode !== 'autonomous' && agent.aiAppType
                 ? ` · 앱 ${agent.aiAppType}`
                 : ''}
               {agent.dataSourceType ? ` · 소스 ${agent.dataSourceType}` : ''}
             </p>
+            {agent.description ? (
+              <p className="text-sm text-on-surface leading-relaxed border-t border-outline-variant/20 pt-3">
+                {agent.description}
+              </p>
+            ) : null}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
               <Stat
                 label={fee > 0 ? 'Paid Calls' : 'API Calls'}

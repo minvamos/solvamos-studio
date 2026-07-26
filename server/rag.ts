@@ -508,7 +508,9 @@ export async function generateGroundedAnswer(opts: {
         });
         return {
           answer: formatAgentChatMessage(gen.text),
-          confidence: 0.7,
+          // Ungrounded Gemini chat is not a strong self-answer — keep conf low so
+          // A2A peer escalation (and UIs) treat it as weak.
+          confidence: 0.25,
           citations: [],
           mode: 'gemini_only',
           generationBackend: gen.backend,

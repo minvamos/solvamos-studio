@@ -61,20 +61,6 @@ const DATA_SOURCES: {
   },
 ];
 
-const ROLES: { id: PromptOptions['role']; label: string }[] = [
-  { id: 'custom', label: '🏢 사내 HR/복지 안내' },
-  { id: 'support', label: '🛍️ 고객지원/CS' },
-  { id: 'academic', label: '🔧 기술 지원/가이드' },
-  { id: 'weather', label: '🌤️ 날씨/정보' },
-];
-
-const TONES: { id: PromptOptions['tone']; label: string }[] = [
-  { id: 'casual', label: '😊 친절하고 정중하게' },
-  { id: 'professional', label: '🎯 명확하고 간결하게' },
-  { id: 'academic', label: '📊 전문적이고 정량적으로' },
-  { id: 'cyberpunk', label: '⚡ 사이버펑크' },
-];
-
 type Props = {
   /** landing = hub; builder = create/edit form */
   studioView: 'landing' | 'builder';
@@ -548,7 +534,8 @@ export default function StudioPage(props: Props) {
                 에이전트 역할 및 응답 스타일 설정
               </h2>
               <p className="text-sm text-on-surface-variant mt-1">
-                프롬프트 작성 없이 버튼 클릭만으로 에이전트의 성격을 지정하세요.
+                이름·역할·톤·설명을 직접 입력하면 카탈로그 디스커버리와 A2A peer 선택에 그대로
+                쓰입니다.
               </p>
             </div>
           </div>
@@ -561,76 +548,69 @@ export default function StudioPage(props: Props) {
               <input
                 type="text"
                 value={agentName}
-                onChange={(e) => {
-                  setAgentName(e.target.value);
-                  setOptions((prev) => ({
-                    ...prev,
-                    customRole: e.target.value || undefined,
-                    role: prev.role === 'support' && e.target.value ? 'custom' : prev.role,
-                  }));
-                }}
-                placeholder="사내 복지 안내 AI 비서"
+                onChange={(e) => setAgentName(e.target.value)}
+                placeholder="예: 유튜브 추천 도우미"
                 className="w-full bg-surface-container-low border border-outline-variant/30 rounded-lg px-4 py-2 text-on-surface input-glow focus:outline-none"
               />
             </div>
 
-            <div className="space-y-2">
-              <label className="block text-sm font-medium text-on-surface-variant">
+            <div>
+              <label className="block text-sm font-medium text-on-surface-variant mb-2">
                 [에이전트 주요 역할]
               </label>
-              <div className="flex flex-wrap gap-2">
-                {ROLES.map((r) => {
-                  const active = options.role === r.id;
-                  return (
-                    <button
-                      key={r.id}
-                      type="button"
-                      onClick={() =>
-                        setOptions((prev) => ({
-                          ...prev,
-                          role: r.id,
-                          customRole:
-                            r.id === 'custom'
-                              ? agentName || prev.customRole || '사내 HR/복지 안내'
-                              : prev.customRole,
-                        }))
-                      }
-                      className={
-                        active
-                          ? 'px-4 py-2 rounded-lg border border-google-blue bg-google-blue/10 text-google-blue text-sm font-medium'
-                          : 'px-4 py-2 rounded-lg border border-outline-variant/30 bg-surface-container-low text-on-surface-variant hover:border-outline-variant/50 transition-colors text-sm font-medium'
-                      }
-                    >
-                      {r.label}
-                    </button>
-                  );
-                })}
-              </div>
+              <input
+                type="text"
+                value={options.customRole || ''}
+                onChange={(e) =>
+                  setOptions((prev) => ({
+                    ...prev,
+                    role: 'custom',
+                    customRole: e.target.value,
+                  }))
+                }
+                placeholder="예: 유튜브 채널·영상 추천 및 시청 가이드"
+                maxLength={500}
+                className="w-full bg-surface-container-low border border-outline-variant/30 rounded-lg px-4 py-2 text-on-surface input-glow focus:outline-none"
+              />
+              <p className="text-xs text-on-surface-variant mt-1">
+                시스템 프롬프트와 카탈로그 use_case에 들어가는 핵심 역할입니다.
+              </p>
             </div>
 
-            <div className="space-y-2">
-              <label className="block text-sm font-medium text-on-surface-variant">
+            <div>
+              <label className="block text-sm font-medium text-on-surface-variant mb-2">
                 [답변 톤앤매너]
               </label>
-              <div className="flex flex-wrap gap-2">
-                {TONES.map((t) => {
-                  const active = options.tone === t.id;
-                  return (
-                    <button
-                      key={t.id}
-                      type="button"
-                      onClick={() => setOptions((prev) => ({ ...prev, tone: t.id }))}
-                      className={
-                        active
-                          ? 'px-4 py-2 rounded-lg border border-google-blue bg-google-blue/10 text-google-blue text-sm font-medium'
-                          : 'px-4 py-2 rounded-lg border border-outline-variant/30 bg-surface-container-low text-on-surface-variant hover:border-outline-variant/50 transition-colors text-sm font-medium'
-                      }
-                    >
-                      {t.label}
-                    </button>
-                  );
-                })}
-              </div>
+              <input
+                type="text"
+                value={options.tone || ''}
+                onChange={(e) => setOptions((prev) => ({ ...prev, tone: e.target.value }))}
+                placeholder="예: 친절하고 짧게, 존댓말, 과장 없이"
+                maxLength={500}
+                className="w-full bg-surface-container-low border border-outline-variant/30 rounded-lg px-4 py-2 text-on-surface input-glow focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-on-surface-variant mb-2">
+                Description (카탈로그 소개)
+              </label>
+              <textarea
+                value={options.description || ''}
+                onChange={(e) =>
+                  setOptions((prev) => ({
+                    ...prev,
+                    description: e.target.value,
+                  }))
+                }
+                rows={3}
+                maxLength={2000}
+                placeholder="예: 유튜브 영상·채널을 취향에 맞게 추천하고, 시청 포인트와 관련 키워드를 정리해 줍니다."
+                className="w-full bg-surface-container-low border border-outline-variant/30 rounded-lg px-4 py-3 text-sm text-on-surface input-glow focus:outline-none resize-y min-h-[5rem]"
+              />
+              <p className="text-xs text-on-surface-variant mt-1">
+                마켓플레이스에 보이는 설명이며, A2A가 peer를 고를 때도 이 텍스트를 사용합니다.
+              </p>
             </div>
 
             <div>

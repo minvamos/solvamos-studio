@@ -4,6 +4,9 @@
  *   platformFeeShare USDC → platform treasury
  * in ONE transaction, so `verifyPayment` (server/payment.ts) can audit the split.
  *
+ * A2A call fees: buyer vault pays SOL. Platform sponsors SOL only on vault
+ * reclaim (agent delete) — see `reclaimAgentVaultOnDelete`.
+ *
  * Also used for external pay-gateway sales: the gateway settles the full price
  * to the operator settlement wallet; `payoutGatewaySale` forwards the same
  * split (seller share → agent vault, platform share → treasury).
@@ -359,7 +362,7 @@ function toUnits(amountUsdc: number): bigint {
 
 /**
  * One transaction: payer → seller ((1-share)·amount) + payer → treasury (share·amount).
- * Creates missing ATAs idempotently (payer funds rent).
+ * Creates missing ATAs idempotently (payer funds rent + SOL network fees).
  */
 export async function sendSplitUsdcPayment(opts: {
   payer: Keypair;

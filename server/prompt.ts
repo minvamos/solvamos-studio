@@ -16,26 +16,36 @@ export function compileSystemPrompt(
   let toneInstruction = '';
   let securityInstruction = '';
 
+  const roleText = String(customRole || '').trim();
   switch (role) {
     case 'support':
-      roleInstruction = `You are a Product Technical Support Agent. Help with APIs, usage guides, integrations, and troubleshooting. Use grounded Drive/Vertex docs when present; otherwise still help with clear general guidance.`;
+      roleInstruction = roleText
+        ? `You are a specialist agent for: ${roleText}. Help with APIs, usage guides, integrations, and troubleshooting when relevant.`
+        : `You are a Product Technical Support Agent. Help with APIs, usage guides, integrations, and troubleshooting. Use grounded Drive/Vertex docs when present; otherwise still help with clear general guidance.`;
       break;
     case 'academic':
-      roleInstruction = `You are an Academic and Research Assistant. Prefer grounded papers/docs when present; otherwise reason carefully and note uncertainty.`;
+      roleInstruction = roleText
+        ? `You are a specialist agent for: ${roleText}. Prefer grounded papers/docs when present; otherwise reason carefully and note uncertainty.`
+        : `You are an Academic and Research Assistant. Prefer grounded papers/docs when present; otherwise reason carefully and note uncertainty.`;
       break;
     case 'weather':
-      roleInstruction = `You are a Weather and Environment Assistant. Give practical forecasts and geo insights. If live weather tools are unavailable, explain limitations and still be helpful.`;
+      roleInstruction = roleText
+        ? `You are a specialist agent for: ${roleText}. Give practical forecasts and geo insights when relevant.`
+        : `You are a Weather and Environment Assistant. Give practical forecasts and geo insights. If live weather tools are unavailable, explain limitations and still be helpful.`;
       break;
     case 'custom':
-      roleInstruction = customRole
-        ? `You are a specialist agent for: ${customRole}. Answer in that context, and handle related general questions too.`
+      roleInstruction = roleText
+        ? `You are a specialist agent for: ${roleText}. Answer in that context, and handle related general questions too.`
         : `You are a custom private knowledge agent tailored to the user's context.`;
       break;
     default:
-      roleInstruction = `You are a capable SolVamos B2B assistant for technical and business questions.`;
+      roleInstruction = roleText
+        ? `You are a specialist agent for: ${roleText}.`
+        : `You are a capable SolVamos B2B assistant for technical and business questions.`;
   }
 
-  switch (tone) {
+  const toneText = String(tone || '').trim();
+  switch (toneText) {
     case 'professional':
       toneInstruction = `Be professional, crisp, and direct. Use short paragraphs or bullets when helpful.`;
       break;
@@ -49,7 +59,9 @@ export function compileSystemPrompt(
       toneInstruction = `Use a light tech/cybernetic flavor, but stay precise and useful.`;
       break;
     default:
-      toneInstruction = `Be objective, structured, and helpful.`;
+      toneInstruction = toneText
+        ? `Answer tone and manner: ${toneText.slice(0, 500)}.`
+        : `Be objective, structured, and helpful.`;
   }
 
   switch (securityLevel) {

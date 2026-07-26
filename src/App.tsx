@@ -52,17 +52,19 @@ export default function App() {
   const [editBaselineFolderId, setEditBaselineFolderId] = useState<string>('');
   const [savingAsEdit, setSavingAsEdit] = useState(false);
   const [options, setOptions] = useState<PromptOptions>({
-    role: 'support',
-    tone: 'professional',
+    role: 'custom',
+    customRole: '',
+    tone: '',
     securityLevel: 'strict',
     fee: 0,
     runtimeMode: 'specialized',
+    description: '',
     customInstructions: '',
     a2aPeersEnabled: true,
     aiAppType: 'search_docs',
     dataSourceType: 'local_upload',
   });
-  const [agentName, setAgentName] = useState('사내 복지 안내 AI 비서');
+  const [agentName, setAgentName] = useState('');
   const [livePromptPreview, setLivePromptPreview] = useState('');
   const [creationResult, setCreationResult] = useState<any>(null);
 
@@ -166,13 +168,14 @@ export default function App() {
     setCreationResult(null);
     setBuilderStep(1);
     setOptions({
-      role: (agent.role as PromptOptions['role']) || 'support',
-      customRole: agent.customRole,
-      tone: (agent.tone as PromptOptions['tone']) || 'professional',
+      role: (agent.role as PromptOptions['role']) || 'custom',
+      customRole: agent.customRole || '',
+      tone: agent.tone || '',
       securityLevel: (agent.securityLevel as PromptOptions['securityLevel']) || 'strict',
       fee: agent.fee ?? agent.perCallPriceUsdc ?? 0,
       runtimeMode:
         agent.runtimeMode === 'autonomous' ? 'autonomous' : 'specialized',
+      description: agent.description || '',
       customInstructions: agent.customInstructions || '',
       a2aPeersEnabled: agent.a2aPeersEnabled !== false,
       aiAppType: (agent.aiAppType as PromptOptions['aiAppType']) || 'search_docs',
@@ -180,7 +183,7 @@ export default function App() {
       websiteUri: agent.websiteUri,
       gcsUri: agent.gcsUri,
     });
-    setAgentName(agent.agentName || agent.customRole || '');
+    setAgentName(agent.agentName || '');
     setSelectedFolderId(agent.googleDriveFolderId || '');
     setLocalFiles([]);
   };
@@ -750,11 +753,13 @@ export default function App() {
     setBuilderStep(1);
     setStudioView('builder');
     setOptions({
-      role: 'support',
-      tone: 'professional',
+      role: 'custom',
+      customRole: '',
+      tone: '',
       securityLevel: 'strict',
       fee: 0,
       runtimeMode: 'specialized',
+      description: '',
       customInstructions: '',
       a2aPeersEnabled: true,
       aiAppType: 'search_docs',
@@ -762,7 +767,7 @@ export default function App() {
       websiteUri: undefined,
       gcsUri: undefined,
     });
-    setAgentName('사내 복지 안내 AI 비서');
+    setAgentName('');
     setSelectedFolderId('');
     setSelectedDriveName(null);
     setLocalFiles([]);
@@ -791,14 +796,42 @@ export default function App() {
       const folderChanged =
         isEdit && (selectedFolderId || '') !== (editBaselineFolderId || '');
 
+      const roleText = String(options.customRole || '').trim();
+      const toneText = String(options.tone || '').trim();
+      const descriptionText = String(options.description || '').trim();
+      if (!agentName.trim()) {
+        window.clearInterval(tick);
+        setIsLoading(false);
+        setCreateDetail('에이전트 이름을 입력하세요.');
+        return;
+      }
+      if (!roleText) {
+        window.clearInterval(tick);
+        setIsLoading(false);
+        setCreateDetail('에이전트 주요 역할을 입력하세요.');
+        return;
+      }
+      if (!toneText) {
+        window.clearInterval(tick);
+        setIsLoading(false);
+        setCreateDetail('답변 톤앤매너를 입력하세요.');
+        return;
+      }
+      if (!descriptionText) {
+        window.clearInterval(tick);
+        setIsLoading(false);
+        setCreateDetail('카탈로그용 description을 입력하세요.');
+        return;
+      }
+
       const payload: Record<string, unknown> = {
         ...options,
-        customRole:
-          options.role === 'custom'
-            ? agentName || options.customRole || '사내 HR/복지 안내'
-            : options.customRole,
+        role: 'custom',
+        customRole: roleText,
+        tone: toneText,
+        description: descriptionText,
         tenantId: tenantIdInput || undefined,
-        agentName,
+        agentName: agentName.trim(),
       };
 
       // 생성: 폴더 선택 시 포함. 편집: 폴더를 바꿨을 때만 포함(재수집 방지)

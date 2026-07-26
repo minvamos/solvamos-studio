@@ -27,6 +27,8 @@ export interface AgentRecord {
   dataSourceType?: string;
   /** specialized = AI Applications Answer; autonomous = Gemini + Data Store RAG */
   runtimeMode?: 'specialized' | 'autonomous' | string;
+  /** Catalog-facing description for discovery / A2A peer matching */
+  description?: string;
   /** Free-form instructions appended into compiled systemPrompt */
   customInstructions?: string;
   /** Catalog A2A peer escalation (free then paid) */
@@ -62,6 +64,7 @@ function toRecord(a: DbAgent): AgentRecord {
     aiAppType: (a as any).aiAppType || undefined,
     dataSourceType: (a as any).dataSourceType || undefined,
     runtimeMode: ((a as any).runtimeMode as string) || 'specialized',
+    description: (a as any).description || undefined,
     customInstructions: (a as any).customInstructions || undefined,
     a2aPeersEnabled: (a as any).a2aPeersEnabled !== false,
     websiteUri: (a as any).websiteUri || undefined,
@@ -79,6 +82,7 @@ async function syncListing(agent: AgentRecord, owner?: { userId?: string; email?
   try {
     await upsertCatalogAgentFromRecord(agent, {
       baseUrl: config.appUrl,
+      description: agent.description,
       ownerUserId: owner?.userId || null,
       ownerEmail: owner?.email || null,
     });
@@ -220,6 +224,7 @@ export async function putAgent(
       aiAppType: agent.aiAppType || 'search_docs',
       dataSourceType: agent.dataSourceType || 'none',
       runtimeMode,
+      description: agent.description || null,
       customInstructions: agent.customInstructions || null,
       a2aPeersEnabled: agent.a2aPeersEnabled !== false,
       websiteUri: agent.websiteUri || null,
@@ -244,6 +249,7 @@ export async function putAgent(
       aiAppType: agent.aiAppType || 'search_docs',
       dataSourceType: agent.dataSourceType || 'none',
       runtimeMode,
+      description: agent.description || null,
       customInstructions: agent.customInstructions || null,
       a2aPeersEnabled: agent.a2aPeersEnabled !== false,
       websiteUri: agent.websiteUri || null,

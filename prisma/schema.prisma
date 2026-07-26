@@ -129,6 +129,8 @@ model Agent {
   dataSourceType      String?  @default("none")
   /// specialized = AI Applications Answer API; autonomous = Vertex Gemini + Data Store RAG
   runtimeMode         String?  @default("specialized")
+  /// Catalog-facing description (pay.sh-style discovery text)
+  description         String?  @db.Text
   /// Free-form instructions appended to compiled system prompt
   customInstructions  String?  @db.Text
   websiteUri          String?

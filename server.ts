@@ -665,10 +665,10 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
   let createdAgentId: string | null = null;
   try {
     const {
-      role,
-      tone,
+      role: bodyRole,
+      tone: bodyTone,
       securityLevel,
-      customRole,
+      customRole: bodyCustomRole,
       googleDriveFolderId,
       tenantId: bodyTenantId,
       agentName,
@@ -677,6 +677,7 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       aiAppType,
       dataSourceType,
       runtimeMode: bodyRuntimeMode,
+      description: bodyDescription,
       customInstructions,
       a2aPeersEnabled: bodyA2aPeersEnabled,
       websiteUri,
@@ -684,10 +685,33 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       localFiles,
     } = req.body;
 
-    if (!role || !tone || !securityLevel) {
+    const customRole =
+      typeof bodyCustomRole === 'string' && bodyCustomRole.trim()
+        ? bodyCustomRole.trim().slice(0, 500)
+        : undefined;
+    // Free-text "주요 역할" → custom role; keep preset role ids when provided.
+    const rolePreset = ['support', 'academic', 'weather', 'custom'].includes(String(bodyRole))
+      ? String(bodyRole)
+      : 'custom';
+    const role = customRole ? 'custom' : rolePreset;
+    const tone =
+      typeof bodyTone === 'string' && bodyTone.trim()
+        ? bodyTone.trim().slice(0, 500)
+        : '';
+    const descriptionText =
+      typeof bodyDescription === 'string' ? bodyDescription.trim().slice(0, 2000) : '';
+
+    if (!tone || !securityLevel) {
       res.status(400).json({
         status: 'error',
-        message: 'Missing parameters: role, tone, and securityLevel are required.',
+        message: 'Missing parameters: tone and securityLevel are required.',
+      });
+      return;
+    }
+    if (!customRole && role === 'custom') {
+      res.status(400).json({
+        status: 'error',
+        message: '에이전트 주요 역할을 입력하세요.',
       });
       return;
     }
@@ -850,6 +874,7 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       aiAppType: aiAppType || 'search_docs',
       dataSourceType: resolvedSource,
       runtimeMode,
+      description: descriptionText || undefined,
       customInstructions: customInstructionsText || undefined,
       a2aPeersEnabled,
       websiteUri: websiteUri ? String(websiteUri) : undefined,
@@ -1031,6 +1056,7 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       aiAppType: aiApp.appType,
       dataSourceType: aiApp.dataSourceType,
       runtimeMode,
+      description: descriptionText || undefined,
       customInstructions: customInstructionsText || undefined,
       a2aPeersEnabled,
       websiteUri: websiteUri ? String(websiteUri) : undefined,
@@ -1056,7 +1082,7 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
     try {
       listing = await registerAgentOnPayShCatalog(newAgent, {
         baseUrl: runtimeBase,
-        description: req.body.description,
+        description: descriptionText || undefined,
         // Catalog URL이 설정된 환경에서는 원격 게시 실패 = 생성 실패
         requireRemote: !!config.catalogSiteUrl,
       });
@@ -1189,11 +1215,30 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
       localFiles,
     } = req.body || {};
 
-    const nextRole = role || existing.role;
-    const nextTone = tone || existing.tone;
-    const nextSecurity = securityLevel || existing.securityLevel;
     const nextCustom =
-      customRole !== undefined ? customRole || undefined : existing.customRole;
+      customRole !== undefined
+        ? typeof customRole === 'string' && customRole.trim()
+          ? customRole.trim().slice(0, 500)
+          : undefined
+        : existing.customRole;
+    const nextRole = nextCustom
+      ? 'custom'
+      : role && ['support', 'academic', 'weather', 'custom'].includes(String(role))
+        ? String(role)
+        : existing.role;
+    const nextTone =
+      tone !== undefined
+        ? typeof tone === 'string' && tone.trim()
+          ? tone.trim().slice(0, 500)
+          : existing.tone
+        : existing.tone;
+    const nextSecurity = securityLevel || existing.securityLevel;
+    const nextDescription =
+      description !== undefined
+        ? typeof description === 'string'
+          ? description.trim().slice(0, 2000) || undefined
+          : undefined
+        : existing.description;
     const nextRuntimeMode =
       bodyRuntimeMode === 'autonomous' || bodyRuntimeMode === 'specialized'
         ? bodyRuntimeMode
@@ -1429,6 +1474,7 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
       aiAppType: nextAiAppType,
       dataSourceType: resolvedSource,
       runtimeMode: nextRuntimeMode,
+      description: nextDescription,
       customInstructions: nextCustomInstructions,
       a2aPeersEnabled: nextA2aPeersEnabled,
       websiteUri: nextWebsite,
@@ -1446,7 +1492,7 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
       `${req.protocol}://${req.get('host')}`;
     const listing = await registerAgentOnPayShCatalog(updated, {
       baseUrl: runtimeBase,
-      description,
+      description: nextDescription,
       requireRemote: !!config.catalogSiteUrl,
     });
     const payShCatalog = enrichCatalogListing(listing, publicBaseFromReq(req));
@@ -1505,7 +1551,7 @@ app.get('/api/agents/:id/balance', async (req, res) => {
     balanceError: balances.error || null,
     topUp: {
       address: agent.publicKey,
-      note: '에이전트 vault로 devnet SOL(수수료)과 USDC(A2A 결제)를 충전하세요.',
+      note: '에이전트 vault로 devnet SOL(A2A 호출 수수료)과 USDC(A2A 결제)를 충전하세요. 삭제 시 회수 TX 수수료만 플랫폼이 냅니다.',
       solFaucet: 'https://faucet.solana.com',
       usdcFaucet: 'https://faucet.circle.com',
     },

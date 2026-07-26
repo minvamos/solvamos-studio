@@ -15,6 +15,8 @@ export interface Agent {
   systemPrompt: string;
   created: string;
   invokeCount: number;
+  /** Catalog-facing description for marketplace / A2A discovery */
+  description?: string;
   /** Catalog A2A peer escalation for this agent */
   a2aPeersEnabled?: boolean;
   /** Raw DB counter before Studio-test correction (debug). */
@@ -58,14 +60,19 @@ export interface Agent {
 }
 
 export interface PromptOptions {
+  /** Preset role id; free-text 주요 역할은 customRole에 저장하고 role=custom */
   role: 'support' | 'academic' | 'weather' | 'custom';
+  /** 에이전트 주요 역할 (유저 직접 입력) */
   customRole?: string;
-  tone: 'casual' | 'professional' | 'academic' | 'cyberpunk';
+  /** 답변 톤앤매너 (유저 직접 입력; preset id도 허용) */
+  tone: string;
   securityLevel: 'strict' | 'balanced' | 'permissive';
   /** Per-call USDC fee; 0 = free */
   fee?: number;
   /** specialized = AI Applications; autonomous = Gemini + optional Data Store RAG */
   runtimeMode?: 'specialized' | 'autonomous';
+  /** 카탈로그에 노출되는 에이전트 설명 */
+  description?: string;
   /** Free-form personality / policy instructions */
   customInstructions?: string;
   /** Catalog A2A peer escalation (persisted on agent) */

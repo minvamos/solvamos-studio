@@ -166,6 +166,8 @@ export async function planPeerCalls(
     feeBand?: 'free' | 'paid' | 'any';
     selfSummary?: string;
     selfConfidence?: number;
+    /** True when orchestrator already decided own RAG is insufficient */
+    selfInsufficient?: boolean;
   }
 ): Promise<{ calls: PeerPlan[]; note: string }> {
   if (peers.length === 0) {
@@ -184,19 +186,29 @@ export async function planPeerCalls(
     return { calls: [], note: `no ${band} peers in pay.sh catalog` };
   }
 
-  // Cheapest first within band
+  // Cheapest first within band (tie-break later by LLM / task fit)
   const rankedPool = [...pool].sort((a, b) => (a.feeUsdc ?? 0) - (b.feeUsdc ?? 0));
+  const needsPeer = opts?.selfInsufficient === true;
 
+  // pay.sh-style catalog card: title / description / use_case / role / fee
   const catalogBrief = rankedPool
-    .map(
-      (p) =>
-        `- id=${p.agentId} name="${p.name}" role=${p.role} fee=${p.feeUsdc} USDC tags=${(p.tags || []).join(',')}`
-    )
+    .map((p) => {
+      const useCase = (p.useCase || p.description || '').slice(0, 220);
+      const desc = (p.description || '').slice(0, 220);
+      return `- id=${p.agentId}
+  name="${p.name}"
+  role=${p.role}
+  tone=${p.tone}
+  fee=${p.feeUsdc} USDC
+  description=${JSON.stringify(desc)}
+  use_case=${JSON.stringify(useCase)}
+  tags=${(p.tags || []).join(',')}`;
+    })
     .join('\n');
 
   const selfHint =
     opts?.selfSummary != null
-      ? `\nYour own free RAG draft (confidence=${opts.selfConfidence ?? '?'}):\n"""${String(opts.selfSummary).slice(0, 600)}"""\nOnly call peers if this draft is insufficient.`
+      ? `\nYour own draft (confidence=${opts.selfConfidence ?? '?'}, insufficient=${needsPeer}):\n"""${String(opts.selfSummary).slice(0, 600)}"""\n`
       : '';
 
   if (config.geminiApiKey) {
@@ -204,38 +216,56 @@ export async function planPeerCalls(
       const ai = new GoogleGenAI({ apiKey: config.geminiApiKey });
       const response = await ai.models.generateContent({
         model: config.geminiModel || 'gemini-2.0-flash',
-        contents: `You are the planning head of SolVamos agent "${caller.agentName || caller.id}" (role=${caller.role}).
+        contents: `You select catalog peers for SolVamos agent "${caller.agentName || caller.id}" (role=${caller.customRole || caller.role}).
 
-COST RULES (critical):
-- Prefer free knowledge. Do NOT pay peers when your own draft is enough.
-- Among peers, prefer fee=0. Only pick fee>0 when free peers cannot cover the gap.
-- If this is the paid band and your own draft confidence is low (<0.45) or clearly insufficient, pick ONE cheapest relevant peer (do not return empty just to save money).
-- If your draft already answers well, return {"calls":[]}.
+This mirrors pay.sh search_catalog → LLM pick:
+- Rank by task fit using name, description, and use_case (not just role tags).
+- Prefer exact task ownership over vague overlap.
+- Prefer fee=0 before fee>0 when both can help.
+- Band for this call: ${band}.
+
+RULES:
+${
+  needsPeer
+    ? `- Own draft is ALREADY marked insufficient. You MUST pick 1 relevant peer from this band (cheapest among good fits). Do NOT return empty to save money.`
+    : `- If own draft already answers well, return {"calls":[]}.`
+}
+- Max ${MAX_PEER_CALLS} calls.
+- Copy agentId exactly from the list.
 
 User message:
 """${userPrompt}"""
 ${selfHint}
-
-Catalog peers in this band (${band}):
+Catalog peers (${band}):
 ${catalogBrief}
 
 Return ONLY JSON:
-{"calls":[{"agentId":"...","question":"...","reason":"..."}]}
-Max ${MAX_PEER_CALLS} calls. Empty calls is OK when self draft is sufficient.`,
+{"calls":[{"agentId":"...","question":"...","reason":"..."}]}`,
         config: { temperature: 0.1 },
       });
       const text = response.text || '';
       const match = text.match(/\{[\s\S]*\}/);
       if (match) {
         const parsed = JSON.parse(match[0]);
-        const calls = (parsed.calls || [])
+        let calls = (parsed.calls || [])
           .filter(
             (c: any) => c.agentId && c.question && rankedPool.some((p) => p.agentId === c.agentId)
           )
           .slice(0, MAX_PEER_CALLS);
+        // If LLM still returned empty while orchestrator marked insufficient, force one cheapest peer.
+        if (calls.length === 0 && needsPeer && rankedPool.length > 0) {
+          const p = rankedPool[0];
+          calls = [
+            {
+              agentId: p.agentId,
+              question: userPrompt,
+              reason: `forced after empty LLM plan (${band}, fee=${p.feeUsdc})`,
+            },
+          ];
+        }
         return {
           calls,
-          note: `planned via Gemini (${band} band, cost-aware)`,
+          note: `planned via Gemini catalog match (${band} band)`,
         };
       }
     } catch (err: any) {
@@ -243,62 +273,58 @@ Max ${MAX_PEER_CALLS} calls. Empty calls is OK when self draft is sufficient.`,
     }
   }
 
-  // Heuristic: keyword / role mismatch; paid band also escalates when self RAG was weak
+  // Heuristic fallback: keyword over name/description/use_case/tags (pay.sh search-like)
   const lower = userPrompt.toLowerCase();
+  const tokens = lower
+    .split(/[^a-z0-9가-힣]+/i)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2);
   const calls: PeerPlan[] = [];
-  const ranked = [...rankedPool].sort((a, b) => {
-    const feeDelta = (a.feeUsdc ?? 0) - (b.feeUsdc ?? 0);
-    if (feeDelta !== 0) return feeDelta;
-    const aDiff = a.role === caller.role ? 1 : 0;
-    const bDiff = b.role === caller.role ? 1 : 0;
-    return aDiff - bDiff;
-  });
+  const ranked = [...rankedPool];
 
-  const wantsHelp =
-    /다른|전문|물어|학술|academic|peer|agent|연구|api|날씨|weather|기술|가이드/.test(lower);
-  const selfWeak =
-    typeof opts?.selfConfidence === 'number' && opts.selfConfidence < 0.45;
-
-  for (const p of ranked) {
-    if (calls.length >= MAX_PEER_CALLS) break;
-    const keys = [p.role, p.name, ...(p.tags || [])].map((k) => String(k).toLowerCase());
-    const hit = keys.some((k) => k.length > 2 && lower.includes(k));
-    const cross = caller.role !== p.role && wantsHelp;
-    if (hit || cross) {
-      calls.push({
-        agentId: p.agentId,
-        question: userPrompt,
-        reason: hit
-          ? `keyword match (${band}, fee=${p.feeUsdc})`
-          : `cross-role assist (${band}, fee=${p.feeUsdc})`,
-      });
+  const scorePeer = (p: PayShCatalogEntry): number => {
+    const hay = [p.name, p.role, p.tone, p.description, p.useCase, ...(p.tags || [])]
+      .map((x) => String(x || '').toLowerCase())
+      .join(' ');
+    let score = 0;
+    for (const t of tokens) {
+      if (hay.includes(t)) score += t.length >= 4 ? 2 : 1;
     }
-  }
+    if (caller.role && p.role && caller.role !== p.role) score += 0.25;
+    score -= (p.feeUsdc ?? 0) * 0.01;
+    return score;
+  };
 
-  // Free band: if still empty but self was weak, try one cheapest different-role free peer
-  if (calls.length === 0 && band === 'free' && ranked.length > 0 && (wantsHelp || selfWeak)) {
-    const p = ranked.find((x) => x.role !== caller.role) || ranked[0];
+  const scored = ranked
+    .map((p) => ({ p, score: scorePeer(p) }))
+    .sort((a, b) => b.score - a.score || (a.p.feeUsdc ?? 0) - (b.p.feeUsdc ?? 0));
+
+  for (const { p, score } of scored) {
+    if (calls.length >= MAX_PEER_CALLS) break;
+    if (score <= 0 && !needsPeer) continue;
+    if (score <= 0 && needsPeer && calls.length > 0) continue;
     calls.push({
       agentId: p.agentId,
-      question: `From peer agent ${caller.id}: please help with — ${userPrompt}`,
-      reason: 'free-peer consult after weak self answer',
+      question: userPrompt,
+      reason: score > 0
+        ? `catalog text match score=${score.toFixed(1)} (${band}, fee=${p.feeUsdc})`
+        : `escalate after weak self (${band}, fee=${p.feeUsdc})`,
     });
+    if (needsPeer) break; // one peer is enough when forcing
   }
 
-  // Paid band: A2A was explicitly enabled — if self was weak, spend on one cheapest peer
-  // (toggle OFF skips this entire path; toggle ON means vault may pay).
-  if (calls.length === 0 && band === 'paid' && ranked.length > 0 && selfWeak) {
-    const p = ranked.find((x) => x.role !== caller.role) || ranked[0];
+  if (calls.length === 0 && needsPeer && ranked.length > 0) {
+    const p = ranked[0];
     calls.push({
       agentId: p.agentId,
-      question: `From peer agent ${caller.id}: please help with — ${userPrompt}`,
-      reason: `paid-peer consult after weak self (fee=${p.feeUsdc} USDC)`,
+      question: userPrompt,
+      reason: `cheapest peer after weak self (${band}, fee=${p.feeUsdc})`,
     });
   }
 
   return {
     calls,
-    note: `planned via heuristic (${band} band, cost-aware)`,
+    note: `planned via catalog text heuristic (${band} band)`,
   };
 }
 
@@ -716,6 +742,7 @@ export async function orchestrateA2ATurn(opts: {
       feeBand: 'free',
       selfSummary: selfRag.answer,
       selfConfidence: selfRag.confidence,
+      selfInsufficient: true,
     });
     notes.push(plan.note);
     for (const call of plan.calls) {
@@ -735,6 +762,7 @@ export async function orchestrateA2ATurn(opts: {
       feeBand: 'paid',
       selfSummary: selfRag.answer,
       selfConfidence: selfRag.confidence,
+      selfInsufficient: true,
     });
     notes.push(plan.note);
     if (plan.calls.length === 0) {
