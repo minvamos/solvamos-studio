@@ -40,8 +40,8 @@ type Props = {
   paymentLogs: string[];
   onAcknowledgeAndSign: (useRandomSig?: boolean) => void;
   chatScrollRef: RefObject<HTMLDivElement | null>;
-  enableA2A?: boolean;
-  setEnableA2A?: (v: boolean) => void;
+  /** Saves a2aPeersEnabled on the agent (not a session-only toggle). */
+  onToggleA2APeers?: (enabled: boolean) => void | Promise<void>;
   chatAttachments?: ChatAttachment[];
   onChatAttachmentsChange?: (files: ChatAttachment[]) => void;
   enableWebSearch?: boolean;
@@ -66,8 +66,7 @@ export default function AgentTestChat({
   paymentLogs,
   onAcknowledgeAndSign,
   chatScrollRef,
-  enableA2A,
-  setEnableA2A,
+  onToggleA2APeers,
   chatAttachments = [],
   onChatAttachmentsChange,
   enableWebSearch = false,
@@ -86,6 +85,7 @@ export default function AgentTestChat({
   const agentVaultShort = agent.publicKey
     ? `${agent.publicKey.slice(0, 4)}...${agent.publicKey.slice(-4)}`
     : null;
+  const a2aPeersEnabled = agent.a2aPeersEnabled !== false;
 
   return (
     <div className={`flex flex-col gap-4 ${compact ? 'h-full min-h-0' : ''}`}>
@@ -100,25 +100,24 @@ export default function AgentTestChat({
             <h3 className="font-semibold text-on-surface text-lg">에이전트 실시간 테스트</h3>
           </div>
           <div className="flex items-center gap-3">
-            {setEnableA2A ? (
-              <label
-                className="flex items-center gap-2 text-xs text-on-surface-variant cursor-pointer select-none"
-                title="끄면 내 RAG만. 켜면 카탈로그 피어 호출 — 유료 피어는 agent vault USDC 차감"
-              >
-                <input
-                  type="checkbox"
-                  checked={!!enableA2A}
-                  onChange={(e) => setEnableA2A(e.target.checked)}
-                  className="accent-google-blue"
-                />
-                A2A 피어
-                <span className="text-[10px] text-outline">
-                  {enableA2A
-                    ? `ON · 피어 과금 가능 (${paymentNetwork || 'devnet'})`
-                    : 'OFF · 내 에이전트만'}
-                </span>
-              </label>
-            ) : null}
+            <label
+              className="flex items-center gap-2 text-xs text-on-surface-variant cursor-pointer select-none"
+              title="에이전트 설정에 저장됩니다. 켜면 카탈로그 피어 호출 — 유료 피어는 agent vault USDC 차감"
+            >
+              <input
+                type="checkbox"
+                checked={a2aPeersEnabled}
+                disabled={!onToggleA2APeers}
+                onChange={(e) => onToggleA2APeers?.(e.target.checked)}
+                className="accent-google-blue"
+              />
+              A2A 피어
+              <span className="text-[10px] text-outline">
+                {a2aPeersEnabled
+                  ? `ON · 에이전트 설정 · ${paymentNetwork || 'devnet'}`
+                  : 'OFF · 에이전트 설정 · 내 RAG만'}
+              </span>
+            </label>
             <span className="relative flex h-3 w-3">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-secondary opacity-75" />
               <span className="relative inline-flex rounded-full h-3 w-3 bg-secondary" />
@@ -137,8 +136,8 @@ export default function AgentTestChat({
             <div className="text-sm text-on-surface-variant text-center py-8 px-4 space-y-2">
               <p className="font-medium text-on-surface">소유자 테스트 대화</p>
               <p>
-                Studio 세션에서는 결제 없이 호출합니다. A2A를 켜면 카탈로그 피어 호출은 vault에서
-                과금됩니다.
+                Studio 세션에서는 이 에이전트 호출 페이월을 건너뜁니다. A2A 피어는 에이전트 설정이며,
+                유료 피어는 vault USDC에서 차감됩니다.
               </p>
             </div>
           )}

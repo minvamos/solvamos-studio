@@ -111,15 +111,17 @@ export function isSelfSufficient(rag: RagResult, userPrompt: string): boolean {
   if (rag.mode === 'demo' && (rag.confidence || 0) < 0.7) return false;
   // Engine "couldn't summarize" is not a real answer — escalate / Gemini path may help
   if (isEngineRefusalAnswer(rag.answer || '')) return false;
+  // Engine refused → Gemini chat fallback is ungrounded; do not skip peers.
+  if (rag.toolsUsed?.includes('engine_answer_skipped')) return false;
+  // Pure conversational Gemini without citations is not "self RAG sufficient".
+  if (rag.mode === 'gemini_only' && !(rag.citations?.length)) return false;
+
   // Engine Answer that looks fine — do not escalate to peers
   if (
     rag.mode === 'ai_application' &&
     (rag.confidence || 0) >= 0.7 &&
     !looksUncertain(rag.answer)
   ) {
-    return true;
-  }
-  if ((rag.confidence || 0) >= SELF_SUFFICIENT_CONFIDENCE && !looksUncertain(rag.answer)) {
     return true;
   }
   if (
@@ -129,7 +131,11 @@ export function isSelfSufficient(rag: RagResult, userPrompt: string): boolean {
   ) {
     return true;
   }
-  if (rag.mode === 'gemini_only' && (rag.confidence || 0) >= 0.65 && !looksUncertain(rag.answer)) {
+  if (
+    (rag.confidence || 0) >= SELF_SUFFICIENT_CONFIDENCE &&
+    !looksUncertain(rag.answer) &&
+    rag.mode !== 'gemini_only'
+  ) {
     return true;
   }
   return false;
@@ -610,7 +616,7 @@ export async function orchestrateA2ATurn(opts: {
   /** Upstream A2A call chain (loop prevention). Defaults to [agent.id]. */
   callChain?: string[];
 }): Promise<A2AOrchestrationResult> {
-  const enablePeers = opts.enablePeers === true; // default OFF unless explicitly enabled
+  const enablePeers = opts.enablePeers === true;
   const callChain =
     opts.callChain && opts.callChain.length > 0 ? opts.callChain : [opts.agent.id];
   const peers = enablePeers ? catalogForPeers(opts.agent.id) : [];
@@ -647,13 +653,15 @@ export async function orchestrateA2ATurn(opts: {
       ragMode: rag.mode,
       peerHops: [],
       catalogUsed: false,
-      planningNote: `AI App answer path mode=${rag.mode} backend=${rag.generationBackend || 'n/a'} engine=${rag.engineId || opts.agent.vertexEngineId || 'none'} tools=${(rag.toolsUsed || []).join(',') || 'none'}`,
+      planningNote: `AI App answer path (a2aPeers=off) mode=${rag.mode} backend=${rag.generationBackend || 'n/a'} engine=${rag.engineId || opts.agent.vertexEngineId || 'none'} tools=${(rag.toolsUsed || []).join(',') || 'none'} peersAvailable=0`,
       spendTier: 'free_self',
       session: rag.session,
       relatedQuestions: rag.relatedQuestions,
       toolsUsed: rag.toolsUsed,
     };
   }
+
+  notes.push(`a2aPeers=on catalogPeers=${peers.length} free=${freePeers.length} paid=${paidPeers.length}`);
 
   // 1) Free: own RAG first
   const selfRag = await generateGroundedAnswer({
@@ -669,11 +677,17 @@ export async function orchestrateA2ATurn(opts: {
     engineId: opts.agent.vertexEngineId,
     agentId: opts.agent.id,
     geminiApiKey: config.geminiApiKey || undefined,
-      runtimeMode: agentRuntimeMode(opts.agent),
+    runtimeMode: agentRuntimeMode(opts.agent),
+    history: opts.history,
+    attachments: opts.attachments,
+    webSearch: opts.webSearch === true,
+    answerSession: opts.answerSession,
   });
 
   if (isSelfSufficient(selfRag, opts.userPrompt)) {
-    notes.push('self RAG sufficient — skipped all peer spend');
+    notes.push(
+      `self RAG sufficient — skipped all peer spend (mode=${selfRag.mode}, conf=${selfRag.confidence})`
+    );
     if (selfRag.generationBackend === 'extractive' && selfRag.retrievalError) {
       console.warn('[a2a] retrieval failed (not shown to user):', selfRag.retrievalError);
     }
@@ -686,6 +700,9 @@ export async function orchestrateA2ATurn(opts: {
       catalogUsed: peers.length > 0,
       planningNote: notes.join(' | '),
       spendTier: 'free_self',
+      session: selfRag.session,
+      relatedQuestions: selfRag.relatedQuestions,
+      toolsUsed: selfRag.toolsUsed,
     };
   }
 

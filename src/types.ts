@@ -15,6 +15,8 @@ export interface Agent {
   systemPrompt: string;
   created: string;
   invokeCount: number;
+  /** Catalog A2A peer escalation for this agent */
+  a2aPeersEnabled?: boolean;
   /** Raw DB counter before Studio-test correction (debug). */
   rawInvokeCount?: number;
   studioTestCount?: number;
@@ -66,6 +68,8 @@ export interface PromptOptions {
   runtimeMode?: 'specialized' | 'autonomous';
   /** Free-form personality / policy instructions */
   customInstructions?: string;
+  /** Catalog A2A peer escalation (persisted on agent) */
+  a2aPeersEnabled?: boolean;
   /** AI Applications app kind (specialized mode) */
   aiAppType?: 'search_docs' | 'chat_rag' | 'website' | 'structured' | 'media';
   /** Knowledge source for the app datastore */

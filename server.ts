@@ -80,7 +80,12 @@ import { connectDb, prisma } from './server/db.js';
 import { registerPlatformAuthRoutes } from './server/auth-routes.js';
 import { getMeFromRequest } from './server/platform-auth.js';
 import { sharedTenantId, ensureSharedCustomerTenant } from './server/tenant-seed.js';
-import { runAgentInvoke, agentFeeUsdc, ensureListed } from './server/invoke-handler.js';
+import {
+  runAgentInvoke,
+  agentFeeUsdc,
+  ensureListed,
+  coerceOptionalBool,
+} from './server/invoke-handler.js';
 import { buildAgentCard } from './server/agent-card.js';
 import { gatewayInvokeUrl } from './server/pay-client.js';
 import {
@@ -673,6 +678,7 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       dataSourceType,
       runtimeMode: bodyRuntimeMode,
       customInstructions,
+      a2aPeersEnabled: bodyA2aPeersEnabled,
       websiteUri,
       gcsUri,
       localFiles,
@@ -690,6 +696,7 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       bodyRuntimeMode === 'autonomous' ? 'autonomous' : 'specialized';
     const customInstructionsText =
       typeof customInstructions === 'string' ? customInstructions.trim() : '';
+    const a2aPeersEnabled = coerceOptionalBool(bodyA2aPeersEnabled) ?? true;
 
     const me = await getMeFromRequest(req);
     const sid = me.sessionId || (await resolveSessionId(req));
@@ -844,6 +851,7 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       dataSourceType: resolvedSource,
       runtimeMode,
       customInstructions: customInstructionsText || undefined,
+      a2aPeersEnabled,
       websiteUri: websiteUri ? String(websiteUri) : undefined,
       gcsUri: gcsUri ? String(gcsUri) : undefined,
       secretManagerPath: gcpStorage.path,
@@ -1024,6 +1032,7 @@ app.post('/api/agents/create', requireGoogleSession, async (req, res) => {
       dataSourceType: aiApp.dataSourceType,
       runtimeMode,
       customInstructions: customInstructionsText || undefined,
+      a2aPeersEnabled,
       websiteUri: websiteUri ? String(websiteUri) : undefined,
       gcsUri: gcsUri ? String(gcsUri) : undefined,
       secretManagerPath: gcpStorage.path,
@@ -1174,6 +1183,7 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
       dataSourceType,
       runtimeMode: bodyRuntimeMode,
       customInstructions,
+      a2aPeersEnabled: bodyA2aPeersEnabled,
       websiteUri,
       gcsUri,
       localFiles,
@@ -1196,6 +1206,9 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
           ? customInstructions.trim() || undefined
           : undefined
         : existing.customInstructions;
+    const parsedA2a = coerceOptionalBool(bodyA2aPeersEnabled);
+    const nextA2aPeersEnabled =
+      parsedA2a !== undefined ? parsedA2a : existing.a2aPeersEnabled !== false;
     const nextName = agentName !== undefined ? agentName : existing.agentName;
     const nextFee =
       typeof fee === 'number'
@@ -1417,6 +1430,7 @@ app.patch('/api/agents/:id', requireGoogleSession, async (req, res) => {
       dataSourceType: resolvedSource,
       runtimeMode: nextRuntimeMode,
       customInstructions: nextCustomInstructions,
+      a2aPeersEnabled: nextA2aPeersEnabled,
       websiteUri: nextWebsite,
       gcsUri: nextGcs,
       // Vault pubkey never changes on edit

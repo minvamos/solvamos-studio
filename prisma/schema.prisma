@@ -136,6 +136,8 @@ model Agent {
   secretManagerPath   String?
   status              String   @default("ACTIVE")
   feeUsdc             Float    @default(0.001)
+  /// When true, invoke may escalate to catalog peers (free then paid)
+  a2aPeersEnabled     Boolean  @default(true)
   /// A2A spend policy — max USDC this agent may pay per single peer call (null = platform default)
   maxSpendPerCallUsdc Float?
   /// A2A spend policy — max USDC this agent may pay per UTC day (null = platform default)

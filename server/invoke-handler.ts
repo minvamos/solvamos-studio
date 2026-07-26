@@ -13,11 +13,18 @@ import {
 import { recordInvokeEvidence } from './invoke-evidence.js';
 import { serverLog } from './dev-log.js';
 
+export function coerceOptionalBool(value: unknown): boolean | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (value === true || value === 1 || value === '1' || value === 'true') return true;
+  if (value === false || value === 0 || value === '0' || value === 'false') return false;
+  return undefined;
+}
+
 export type InvokeInput = {
   agentId: string;
   prompt: string;
-  enableA2A?: boolean;
-  /** When true, peers default off unless enableA2A */
+  /** Request override; when omitted, agent.a2aPeersEnabled is used */
+  enableA2A?: boolean | string | number;
   studioOwnerTest?: boolean;
   baseUrl?: string;
   history?: { role: 'user' | 'model'; text: string }[];
@@ -107,13 +114,15 @@ export async function runAgentInvoke(
       : [agent.id];
 
   // Owner-test only skips the paywall for invoking *this* agent.
-  // Peer escalation (Catalog A2A) stays on by default so creators can verify
-  // "my agent asks other agents" — set enableA2A:false to disable. Paid peers
-  // still spend from the caller agent vault (not free).
+  // Peer escalation follows agent.a2aPeersEnabled unless the request overrides.
+  // Paid peers spend from the caller agent vault.
+  const override = coerceOptionalBool(input.enableA2A);
+  const enablePeers =
+    override !== undefined ? override : agent.a2aPeersEnabled !== false;
   const result = await orchestrateA2ATurn({
     agent,
     userPrompt: input.prompt,
-    enablePeers: input.enableA2A !== false,
+    enablePeers,
     history: input.history,
     attachments: input.attachments,
     webSearch: input.webSearch === true,

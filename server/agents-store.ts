@@ -29,6 +29,8 @@ export interface AgentRecord {
   runtimeMode?: 'specialized' | 'autonomous' | string;
   /** Free-form instructions appended into compiled systemPrompt */
   customInstructions?: string;
+  /** Catalog A2A peer escalation (free then paid) */
+  a2aPeersEnabled?: boolean;
   websiteUri?: string;
   gcsUri?: string;
   secretManagerPath?: string;
@@ -61,6 +63,7 @@ function toRecord(a: DbAgent): AgentRecord {
     dataSourceType: (a as any).dataSourceType || undefined,
     runtimeMode: ((a as any).runtimeMode as string) || 'specialized',
     customInstructions: (a as any).customInstructions || undefined,
+    a2aPeersEnabled: (a as any).a2aPeersEnabled !== false,
     websiteUri: (a as any).websiteUri || undefined,
     gcsUri: (a as any).gcsUri || undefined,
     secretManagerPath: a.secretManagerPath || undefined,
@@ -218,6 +221,7 @@ export async function putAgent(
       dataSourceType: agent.dataSourceType || 'none',
       runtimeMode,
       customInstructions: agent.customInstructions || null,
+      a2aPeersEnabled: agent.a2aPeersEnabled !== false,
       websiteUri: agent.websiteUri || null,
       gcsUri: agent.gcsUri || null,
       secretManagerPath: agent.secretManagerPath || null,
@@ -241,6 +245,7 @@ export async function putAgent(
       dataSourceType: agent.dataSourceType || 'none',
       runtimeMode,
       customInstructions: agent.customInstructions || null,
+      a2aPeersEnabled: agent.a2aPeersEnabled !== false,
       websiteUri: agent.websiteUri || null,
       gcsUri: agent.gcsUri || null,
       secretManagerPath: agent.secretManagerPath || null,

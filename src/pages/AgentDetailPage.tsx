@@ -49,8 +49,8 @@ type Props = {
   paymentLogs: string[];
   onAcknowledgeAndSign: (useRandomSig?: boolean) => void;
   chatScrollRef: RefObject<HTMLDivElement | null>;
-  enableA2A?: boolean;
-  setEnableA2A?: (v: boolean) => void;
+  /** Persist A2A peer setting on the agent (edit + test chat). */
+  onToggleA2APeers?: (enabled: boolean) => void | Promise<void>;
   chatAttachments?: ChatAttachment[];
   onChatAttachmentsChange?: (files: ChatAttachment[]) => void;
   enableWebSearch?: boolean;
@@ -84,8 +84,7 @@ export default function AgentDetailPage({
   paymentLogs,
   onAcknowledgeAndSign,
   chatScrollRef,
-  enableA2A,
-  setEnableA2A,
+  onToggleA2APeers,
   chatAttachments,
   onChatAttachmentsChange,
   enableWebSearch,
@@ -198,6 +197,15 @@ export default function AgentDetailPage({
               }
             >
               {paid ? 'x402 / MPP' : 'free'}
+            </span>
+            <span
+              className={
+                agent.a2aPeersEnabled !== false
+                  ? 'rounded-md border border-google-blue/30 bg-google-blue/15 px-2 py-1 text-[10px] font-semibold uppercase text-google-blue'
+                  : 'rounded-md border border-outline-variant/30 bg-surface-container-high px-2 py-1 text-[10px] font-semibold uppercase text-on-surface-variant'
+              }
+            >
+              {agent.a2aPeersEnabled !== false ? 'A2A peers ON' : 'A2A peers OFF'}
             </span>
           </div>
         </div>
@@ -364,8 +372,7 @@ export default function AgentDetailPage({
           paymentLogs={paymentLogs}
           onAcknowledgeAndSign={onAcknowledgeAndSign}
           chatScrollRef={chatScrollRef}
-          enableA2A={enableA2A}
-          setEnableA2A={setEnableA2A}
+          onToggleA2APeers={onToggleA2APeers}
           chatAttachments={chatAttachments}
           onChatAttachmentsChange={onChatAttachmentsChange}
           enableWebSearch={enableWebSearch}

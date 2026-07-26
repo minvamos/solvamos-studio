@@ -655,6 +655,29 @@ export default function StudioPage(props: Props) {
               </p>
             </div>
 
+            <div className="bg-surface-container p-4 rounded-lg border border-outline-variant/10 space-y-2">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <label className="text-sm font-medium text-on-surface">A2A 피어 호출</label>
+                  <p className="text-[11px] text-outline mt-1 leading-relaxed">
+                    켜면 카탈로그 피어(무료→유료)로 에스컬레이션합니다. 유료 피어는 이 에이전트
+                    vault USDC에서 차감됩니다.
+                  </p>
+                </div>
+                <label className="flex items-center gap-2 text-sm text-on-surface shrink-0 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={options.a2aPeersEnabled !== false}
+                    onChange={(e) =>
+                      setOptions((prev) => ({ ...prev, a2aPeersEnabled: e.target.checked }))
+                    }
+                    className="accent-google-blue"
+                  />
+                  {options.a2aPeersEnabled !== false ? 'ON' : 'OFF'}
+                </label>
+              </div>
+            </div>
+
             <div className="bg-surface-container p-4 rounded-lg border border-outline-variant/10">
               <div className="flex justify-between items-center mb-2">
                 <label className="text-sm font-medium text-on-surface">호출 당 청구 단가</label>

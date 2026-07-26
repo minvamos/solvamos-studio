@@ -58,6 +58,7 @@ export default function App() {
     fee: 0,
     runtimeMode: 'specialized',
     customInstructions: '',
+    a2aPeersEnabled: true,
     aiAppType: 'search_docs',
     dataSourceType: 'local_upload',
   });
@@ -87,11 +88,6 @@ export default function App() {
   const [paymentLogs, setPaymentLogs] = useState<string[]>([]);
   const [isVerifyingPayment, setIsVerifyingPayment] = useState(false);
   const [customSignature, setCustomSignature] = useState('');
-  /** Studio: off by default (direct Vertex). Turn on to demo pay.sh peer hops. */
-  // Default ON: owner-test is free for calling your agent, but A2A peer hops
-  // should still run so creators can verify catalog escalation.
-  const [enableA2A, setEnableA2A] = useState(true);
-
   const [driveSessionId, setDriveSessionId] = useState<string>(
     () => localStorage.getItem('solvamos_drive_session') || ''
   );
@@ -178,6 +174,7 @@ export default function App() {
       runtimeMode:
         agent.runtimeMode === 'autonomous' ? 'autonomous' : 'specialized',
       customInstructions: agent.customInstructions || '',
+      a2aPeersEnabled: agent.a2aPeersEnabled !== false,
       aiAppType: (agent.aiAppType as PromptOptions['aiAppType']) || 'search_docs',
       dataSourceType: (agent.dataSourceType as PromptOptions['dataSourceType']) || 'local_upload',
       websiteUri: agent.websiteUri,
@@ -759,6 +756,7 @@ export default function App() {
       fee: 0,
       runtimeMode: 'specialized',
       customInstructions: '',
+      a2aPeersEnabled: true,
       aiAppType: 'search_docs',
       dataSourceType: 'local_upload',
       websiteUri: undefined,
@@ -1001,6 +999,9 @@ export default function App() {
       return;
     }
 
+    const agentRow = agents.find((a) => a.id === agentId) || activeAgent;
+    const a2aPeersEnabled = agentRow?.a2aPeersEnabled !== false;
+
     setChatHistory((prev) => ({
       ...prev,
       [agentId]: [
@@ -1008,7 +1009,7 @@ export default function App() {
         {
           id: 'loading-placeholder',
           sender: 'system',
-          text: enableA2A
+          text: a2aPeersEnabled
             ? '⏳ A2A + Vertex 응답 생성 중… (필요 시 카탈로그 피어 호출)'
             : extras?.webSearch
               ? '⏳ 웹 검색 + Engine/Vertex 응답 생성 중…'
@@ -1032,7 +1033,8 @@ export default function App() {
         body: JSON.stringify({
           prompt: promptText,
           studioTest: true,
-          enableA2A,
+          // Omit override → server uses agent.a2aPeersEnabled; send explicit for clarity
+          enableA2A: a2aPeersEnabled,
           webSearch: extras?.webSearch === true,
           answerSession: answerSessions[agentId] || undefined,
           attachments: (extras?.attachments || []).map((a) => ({
@@ -1318,8 +1320,31 @@ export default function App() {
           paymentLogs={paymentLogs}
           onAcknowledgeAndSign={handleAcknowledgeAndSign}
           chatScrollRef={chatScrollRef}
-          enableA2A={enableA2A}
-          setEnableA2A={setEnableA2A}
+          onToggleA2APeers={async (enabled) => {
+            if (!activeAgent) return;
+            try {
+              const res = await fetch(`/api/agents/${encodeURIComponent(activeAgent.id)}`, {
+                method: 'PATCH',
+                credentials: 'include',
+                headers: {
+                  'Content-Type': 'application/json',
+                  ...(driveSessionId ? { 'X-SolVamos-Session': driveSessionId } : {}),
+                },
+                body: JSON.stringify({ a2aPeersEnabled: enabled }),
+              });
+              const data = await res.json();
+              if (data.status === 'success' && data.agent) {
+                setAgents((prev) =>
+                  prev.map((a) => (a.id === activeAgent.id ? { ...a, ...data.agent } : a))
+                );
+                setActiveAgent((prev) =>
+                  prev && prev.id === activeAgent.id ? { ...prev, ...data.agent } : prev
+                );
+              }
+            } catch {
+              /* ignore */
+            }
+          }}
           chatAttachments={chatAttachments}
           onChatAttachmentsChange={setChatAttachments}
           enableWebSearch={enableWebSearch}
