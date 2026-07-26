@@ -94,12 +94,17 @@ async function accessToken(): Promise<string | null> {
   return getGcpAccessToken();
 }
 
-/** Official Answer-gen model id (overridable). See Agent Search Answer docs. */
+/**
+ * Answer-gen modelVersion (overridable via VERTEX_ANSWER_MODEL_VERSION).
+ * Docs allow: `stable`, `preview`, or pinned ids like `gemini-2.5-flash/answer_gen/v1`.
+ * Do NOT use `…/answer_gen/stable` — Discovery Engine rejects it as INVALID_ARGUMENT.
+ */
 function answerModelVersion(): string {
-  return (
-    process.env.VERTEX_ANSWER_MODEL_VERSION?.trim() ||
-    'gemini-2.5-flash/answer_gen/stable'
-  );
+  const raw = process.env.VERTEX_ANSWER_MODEL_VERSION?.trim();
+  if (!raw) return 'stable';
+  // Common mistake from earlier spike — normalize to the documented stable alias.
+  if (raw === 'gemini-2.5-flash/answer_gen/stable') return 'stable';
+  return raw;
 }
 
 /**
