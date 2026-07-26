@@ -13,6 +13,8 @@ export type PayShCatalogEntry = {
   agentId: string;
   name: string;
   description: string;
+  /** pay.sh-style "Use for …" discovery text */
+  useCase?: string;
   role: string;
   tone: string;
   invokeUrl: string;
@@ -59,6 +61,7 @@ function fromRemoteAgent(row: any): PayShCatalogEntry | null {
     agentId,
     name: String(row.name || row.title || agentId),
     description: String(row.description || ''),
+    useCase: String(row.useCase || row.use_case || row.description || ''),
     role: String(row.role || ''),
     tone: String(row.tone || ''),
     invokeUrl: String(row.invokeUrl || row.invoke_url || row.publicInvokeUrl || ''),
@@ -252,7 +255,10 @@ function buildLocalEntry(
       : typeof agent.perCallPriceUsdc === 'number'
         ? agent.perCallPriceUsdc
         : config.defaultAgentFeeUsdc;
-  const originBase = (opts?.baseUrl || config.appUrl || 'http://localhost:3000').replace(/\/$/, '');
+  let originBase = (opts?.baseUrl || config.appUrl || 'http://localhost:3000').replace(/\/$/, '');
+  if (/^http:\/\//i.test(originBase) && !/localhost|127\.0\.0\.1/i.test(originBase)) {
+    originBase = originBase.replace(/^http:\/\//i, 'https://');
+  }
   const existing = catalog[agent.id];
   return {
     catalogId: `solvamos_${agent.id}`,
@@ -260,7 +266,12 @@ function buildLocalEntry(
     name,
     description:
       opts?.description ||
-      `SolVamos RAG agent (${agent.role}). A2A discovery + x402/MPP USDC paywall when paid.`,
+      agent.description ||
+      `SolVamos agent (${agent.customRole || agent.role}). A2A discovery + x402/MPP USDC paywall when paid.`,
+    useCase:
+      opts?.description ||
+      agent.description ||
+      `Use for ${agent.customRole || agent.role || 'task-specific assistance'}.`,
     role: agent.role,
     tone: agent.tone,
     invokeUrl:

@@ -37,6 +37,10 @@ export async function upsertCatalogAgentFromRecord(
   if (config.isProd && /localhost|127\.0\.0\.1/i.test(base)) {
     throw new Error('APP_URL must be a public HTTPS origin in production');
   }
+  // External AI fetchers reject mixed-content / plaintext agent-card URLs.
+  if (/^http:\/\//i.test(base) && !/localhost|127\.0\.0\.1/i.test(base)) {
+    base = base.replace(/^http:\/\//i, 'https://');
+  }
   const fee =
     typeof agent.fee === 'number'
       ? agent.fee
@@ -64,9 +68,21 @@ export async function upsertCatalogAgentFromRecord(
       : originInvokeUrl;
   const agentCardUrl = base ? `${base}/api/agents/${encodeURIComponent(agent.id)}/agent-card` : null;
   const title = agent.agentName || agent.id;
+  const roleLabel = String(agent.customRole || agent.role || '').trim();
+  const toneLabel = String(agent.tone || '').trim();
+  const userDescription = String(opts.description || agent.description || '').trim();
+  // pay.sh-style: human description + explicit use_case for agent discovery
   const description =
-    opts.description ||
-    `${title} — SolVamos RAG agent (${agent.role}/${agent.tone}) metered via ${protocol}.`;
+    userDescription ||
+    `${title} — SolVamos agent${roleLabel ? ` (${roleLabel})` : ''}${
+      toneLabel ? `, tone: ${toneLabel}` : ''
+    }.`;
+  const useCase =
+    roleLabel || userDescription
+      ? `Use for ${roleLabel || 'task-specific assistance'}${
+          userDescription ? `: ${userDescription.slice(0, 220)}` : '.'
+        }`
+      : `Use for SolVamos RAG / A2A assistance via ${protocol}.`;
 
   // Machine-readable endpoint list must mirror the ACTUAL public invoke path:
   // paid → gateway /v1 path, free → Studio origin /api path.
@@ -112,7 +128,7 @@ export async function upsertCatalogAgentFromRecord(
       fqn: `solvamos/${agent.id}`,
       title,
       description,
-      useCase: description,
+      useCase,
       category: 'ai_ml',
       role: agent.role,
       tone: agent.tone,
@@ -137,7 +153,7 @@ export async function upsertCatalogAgentFromRecord(
     update: {
       title,
       description,
-      useCase: description,
+      useCase,
       role: agent.role,
       tone: agent.tone,
       invokeUrl: invokeUrl || undefined,
@@ -220,9 +236,11 @@ export async function syncAllAgentsToCatalog(opts?: { baseUrl?: string }): Promi
         status: a.status,
         fee: a.feeUsdc,
         perCallPriceUsdc: a.feeUsdc,
+        description: (a as any).description || undefined,
       },
       {
         baseUrl: opts?.baseUrl,
+        description: (a as any).description || undefined,
         ownerUserId: ownership?.userId || null,
         ownerEmail: ownership?.user?.email || null,
         status: listStatus,
