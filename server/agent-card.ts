@@ -74,6 +74,12 @@ export function buildAgentCard(agent: AgentRecord) {
               }
             : undefined,
       },
+      // Official A2A Protocol v1 surface (@a2a-js/sdk)
+      'solvamos.a2a': {
+        agentCardUrl: `${config.appUrl.replace(/\/$/, '')}/a2a/${encodeURIComponent(agent.id)}/.well-known/agent-card.json`,
+        jsonRpcUrl: `${config.appUrl.replace(/\/$/, '')}/a2a/${encodeURIComponent(agent.id)}`,
+        note: 'Use @a2a-js/sdk ClientFactory against agentCardUrl. Paid commerce still uses invokeUrl (x402/MPP).',
+      },
     },
   };
 }

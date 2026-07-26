@@ -94,9 +94,45 @@ async function accessToken(): Promise<string | null> {
   return getGcpAccessToken();
 }
 
+/** Official Answer-gen model id (overridable). See Agent Search Answer docs. */
+function answerModelVersion(): string {
+  return (
+    process.env.VERTEX_ANSWER_MODEL_VERSION?.trim() ||
+    'gemini-2.5-flash/answer_gen/stable'
+  );
+}
+
+/**
+ * Answer API preamble should be short NL instructions (docs samples),
+ * not the full SolVamos system prompt.
+ */
+function buildAnswerPreamble(systemPrompt?: string): string {
+  const roleHint = String(systemPrompt || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 600);
+  const lines = [
+    'Answer the user using only information grounded in the retrieved documents when possible.',
+    'If the documents do not contain enough information, say clearly that it is not in the knowledge base instead of inventing facts.',
+    'Prefer concise, structured answers with citations when available.',
+    'Respond in Korean unless the user writes in another language.',
+  ];
+  if (roleHint) {
+    lines.push(`Agent role/style hints (secondary): ${roleHint}`);
+  }
+  return lines.join(' ').slice(0, 2000);
+}
+
 /**
  * AI Applications Engine Answer API — the app itself generates the grounded answer.
  * POST .../engines/{engineId}/servingConfigs/default_search:answer
+ *
+ * Aligned with Google Agent Search Answer docs:
+ * - natural-language query
+ * - modelSpec for answer generation
+ * - query rephrasing (maxRephraseSteps)
+ * - short promptSpec.preamble
+ * - session for multi-turn (avoid stuffing history into query when session exists)
  */
 export async function answerFromAiApplication(opts: {
   engineId: string;
@@ -104,7 +140,7 @@ export async function answerFromAiApplication(opts: {
   preamble?: string;
   session?: string;
   languageCode?: string;
-  /** Prior turns — folded into query when no session resource yet */
+  /** Prior turns — folded into query only when no session resource yet */
   history?: { role: 'user' | 'model'; text: string }[];
 }): Promise<{
   ok: boolean;
@@ -127,15 +163,18 @@ export async function answerFromAiApplication(opts: {
   }
 
   const parent = collectionPath();
+  const hasSession = !!opts.session;
   const autoSession =
     opts.session ||
     (parent ? `${parent}/engines/${opts.engineId}/sessions/-` : undefined);
 
+  // With a real session, let Answer API keep multi-turn state.
+  // Without one, fold a short history into the query (bootstrap only).
   let queryText = opts.query;
-  if (!opts.session && opts.history?.length) {
+  if (!hasSession && opts.history?.length) {
     const hist = opts.history
-      .slice(-8)
-      .map((h) => `${h.role === 'model' ? 'Assistant' : 'User'}: ${h.text}`)
+      .slice(-4)
+      .map((h) => `${h.role === 'model' ? 'Assistant' : 'User'}: ${h.text.slice(0, 400)}`)
       .join('\n');
     queryText = `[Conversation so far]\n${hist}\n\n[Current question]\n${opts.query}`;
   }
@@ -144,6 +183,12 @@ export async function answerFromAiApplication(opts: {
   const body: Record<string, unknown> = {
     query: { text: queryText },
     relatedQuestionsSpec: { enable: true },
+    // Docs: query rephrasing improves complex NL questions (max 5).
+    queryUnderstandingSpec: {
+      queryRephraserSpec: {
+        maxRephraseSteps: 5,
+      },
+    },
     answerGenerationSpec: {
       includeCitations: true,
       ignoreAdversarialQuery: true,
@@ -151,9 +196,12 @@ export async function answerFromAiApplication(opts: {
       ignoreLowRelevantContent: false,
       ignoreJailBreakingQuery: true,
       answerLanguageCode: opts.languageCode || 'ko',
-      promptSpec: opts.preamble
-        ? { preamble: opts.preamble.slice(0, 4000) }
-        : undefined,
+      modelSpec: {
+        modelVersion: answerModelVersion(),
+      },
+      promptSpec: {
+        preamble: buildAnswerPreamble(opts.preamble),
+      },
     },
     searchSpec: {
       searchParams: {
