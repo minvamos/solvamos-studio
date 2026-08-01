@@ -22,7 +22,6 @@ import {
 } from 'lucide-react';
 import type { Agent, ChatAttachment, Message } from '../types';
 import AgentTestChat from '../components/AgentTestChat';
-import { fundAgentVaultFromPhantom } from '../lib/solanaFund';
 
 export type DetailTab = 'overview' | 'test';
 
@@ -102,8 +101,6 @@ export default function AgentDetailPage({
   copiedId,
   onCopy,
   authFetch,
-  solanaRpcUrl,
-  usdcMint,
 }: Props) {
   const [tab, setTab] = useState<DetailTab>(initialTab);
   const [copied, setCopied] = useState<string | null>(null);
@@ -111,8 +108,6 @@ export default function AgentDetailPage({
     sol: number | null;
     usdc: number | null;
   } | null>(null);
-  const [rpcUrl, setRpcUrl] = useState(solanaRpcUrl || '');
-  const [mint, setMint] = useState(usdcMint || '');
   const [fundUsdc, setFundUsdc] = useState('1');
   const [fundSol, setFundSol] = useState('0.05');
   const [withdrawAmount, setWithdrawAmount] = useState('');
@@ -133,8 +128,6 @@ export default function AgentDetailPage({
         sol: typeof json.currentSolBalance === 'number' ? json.currentSolBalance : null,
         usdc: typeof json.currentUsdcBalance === 'number' ? json.currentUsdcBalance : null,
       });
-      if (json.solanaRpcUrl) setRpcUrl(String(json.solanaRpcUrl));
-      if (json.usdcMint) setMint(String(json.usdcMint));
     } catch {
       /* ignore */
     }
@@ -310,8 +303,9 @@ export default function AgentDetailPage({
             </h2>
             <p className="text-sm text-on-surface-variant leading-relaxed">
               A2A peer 결제는 <strong className="text-on-surface">에이전트 vault 잔액</strong>으로만
-              합니다. 잔액이 없으면 실패하며, 내 지갑에서 자동으로 끌어쓰지 않습니다. 수익은 아래로
-              출금하고, 부족하면 Phantom으로 vault에 충전해 주세요.
+              합니다. 잔액이 없으면 실패합니다. 출금·충전 모두 삭제 시 반환과 같이{' '}
+              <strong className="text-on-surface">서버가 바로 처리</strong>하며 Phantom 서명은
+              필요 없습니다.
             </p>
             <div className="grid grid-cols-2 gap-3 text-sm">
               <Stat
@@ -405,7 +399,7 @@ export default function AgentDetailPage({
               <div className="rounded-xl border border-outline-variant/25 bg-surface-container-low/50 p-4 space-y-3">
                 <div className="flex items-center gap-2 text-sm font-semibold text-on-surface">
                   <ArrowDownToLine className="h-4 w-4 text-google-blue" />
-                  내 지갑 → vault (충전)
+                  → vault (바로 충전)
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <label className="block text-xs text-on-surface-variant">
@@ -433,24 +427,37 @@ export default function AgentDetailPage({
                 </div>
                 <button
                   type="button"
-                  disabled={vaultBusy || !agent.publicKey || !rpcUrl || !mint}
+                  disabled={
+                    vaultBusy ||
+                    !authFetch ||
+                    !agent.publicKey ||
+                    (!(Number(fundUsdc) > 0) && !(Number(fundSol) > 0))
+                  }
                   onClick={async () => {
+                    if (!authFetch) return;
                     setVaultBusy(true);
                     setVaultErr(null);
                     setVaultMsg(null);
                     try {
-                      const result = await fundAgentVaultFromPhantom({
-                        rpcUrl,
-                        usdcMint: mint,
-                        vaultAddress: agent.publicKey,
-                        usdcAmount: Number(fundUsdc) || 0,
-                        solAmount: Number(fundSol) || 0,
-                      });
-                      if (!result.ok) throw new Error(result.error || '충전 실패');
+                      const res = await authFetch(
+                        `/api/agents/${encodeURIComponent(agent.id)}/fund`,
+                        {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            amountUsdc: Number(fundUsdc) || 0,
+                            amountSol: Number(fundSol) || 0,
+                          }),
+                        }
+                      );
+                      const json = await res.json().catch(() => ({}));
+                      if (!res.ok || json.status !== 'success') {
+                        throw new Error(json.message || '충전 실패');
+                      }
                       setVaultMsg(
-                        result.explorerUrl
-                          ? `충전 완료 · ${result.explorerUrl}`
-                          : `충전 완료 · ${result.signature}`
+                        json.explorerUrl
+                          ? `${json.message || '충전 완료'} · ${json.explorerUrl}`
+                          : json.message || '충전 완료'
                       );
                       await refreshBalance();
                     } catch (err: any) {
@@ -461,28 +468,10 @@ export default function AgentDetailPage({
                   }}
                   className="w-full rounded-lg border border-google-blue/40 bg-google-blue/15 px-3 py-2 text-sm font-semibold text-google-blue disabled:opacity-40"
                 >
-                  {vaultBusy ? '처리 중…' : 'Phantom으로 충전'}
+                  {vaultBusy ? '처리 중…' : '바로 충전'}
                 </button>
                 <p className="text-[11px] text-outline leading-relaxed">
-                  Phantom을 Devnet으로 맞춘 뒤 서명합니다. USDC가 없으면{' '}
-                  <a
-                    href="https://faucet.circle.com"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-google-blue underline"
-                  >
-                    Circle faucet
-                  </a>
-                  , SOL은{' '}
-                  <a
-                    href="https://faucet.solana.com"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-google-blue underline"
-                  >
-                    Solana faucet
-                  </a>
-                  .
+                  출금·삭제 반환과 같이 서버가 온체인 전송을 처리합니다 (Phantom 불필요).
                 </p>
               </div>
             </div>

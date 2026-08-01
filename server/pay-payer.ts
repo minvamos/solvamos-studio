@@ -594,6 +594,130 @@ export async function withdrawUsdcFromAgentVault(opts: {
   }
 }
 
+export type VaultFundResult = {
+  ok: boolean;
+  signature?: string;
+  amountUsdc?: number;
+  amountSol?: number;
+  source?: string;
+  vault?: string;
+  error?: string;
+  explorerUrl?: string;
+};
+
+/**
+ * Owner top-up without Phantom: move USDC/SOL from the platform settlement
+ * wallet → agent vault (server-signed, same style as withdraw / delete reclaim).
+ * Registered primary wallets are address-only — we cannot spend them server-side.
+ */
+export async function fundAgentVaultFromSettlement(opts: {
+  agent: AgentRecord;
+  amountUsdc?: number;
+  amountSol?: number;
+}): Promise<VaultFundResult> {
+  if (config.paymentNetwork !== 'devnet') {
+    return { ok: false, error: `Fund requires devnet (current: ${config.paymentNetwork})` };
+  }
+  if (!opts.agent.publicKey) {
+    return { ok: false, error: 'Agent vault missing' };
+  }
+
+  const usdcAmt = Number(opts.amountUsdc || 0);
+  const solAmt = Number(opts.amountSol || 0);
+  if (!(usdcAmt > 0) && !(solAmt > 0)) {
+    return { ok: false, error: 'amountUsdc or amountSol must be > 0' };
+  }
+  if (usdcAmt < 0 || solAmt < 0 || !Number.isFinite(usdcAmt) || !Number.isFinite(solAmt)) {
+    return { ok: false, error: 'Invalid amount' };
+  }
+  // Shared platform wallet — keep per-request caps modest.
+  if (usdcAmt > 100) return { ok: false, error: 'amountUsdc max is 100 per request' };
+  if (solAmt > 1) return { ok: false, error: 'amountSol max is 1 per request' };
+
+  const settlement = await loadSettlementKeypair();
+  if (!settlement) {
+    return {
+      ok: false,
+      error: 'Settlement wallet key unavailable (set PAY_SETTLEMENT_SECRET_PATH)',
+    };
+  }
+
+  try {
+    const connection = new Connection(config.solanaRpcUrl, 'confirmed');
+    const vaultPk = new PublicKey(opts.agent.publicKey);
+    const mint = new PublicKey(config.usdcMint);
+    const settlementAta = getAssociatedTokenAddressSync(mint, settlement.publicKey);
+    const vaultAta = getAssociatedTokenAddressSync(mint, vaultPk);
+
+    const tx = new Transaction();
+
+    if (usdcAmt > 0) {
+      let available = 0n;
+      try {
+        const acc = await getAccount(connection, settlementAta, 'confirmed');
+        available = acc.amount;
+      } catch {
+        return {
+          ok: false,
+          error: `Settlement wallet has no USDC ATA — fund ${settlement.publicKey.toBase58()} first`,
+        };
+      }
+      const need = toUnits(usdcAmt);
+      if (need > available) {
+        return {
+          ok: false,
+          error: `Insufficient settlement USDC (have ${Number(available) / 10 ** USDC_DECIMALS}, asked ${usdcAmt})`,
+        };
+      }
+      tx.add(
+        createAssociatedTokenAccountIdempotentInstruction(
+          settlement.publicKey,
+          vaultAta,
+          vaultPk,
+          mint
+        )
+      );
+      tx.add(createTransferInstruction(settlementAta, vaultAta, settlement.publicKey, need));
+    }
+
+    if (solAmt > 0) {
+      const lamports = Math.ceil(solAmt * 1e9);
+      const bal = await connection.getBalance(settlement.publicKey, 'confirmed');
+      // Keep ~50k lamports for future fee-payer use.
+      if (bal < lamports + 50_000) {
+        return {
+          ok: false,
+          error: `Insufficient settlement SOL (have ${bal / 1e9}, asked ${solAmt})`,
+        };
+      }
+      tx.add(
+        SystemProgram.transfer({
+          fromPubkey: settlement.publicKey,
+          toPubkey: vaultPk,
+          lamports,
+        })
+      );
+    }
+
+    tx.feePayer = settlement.publicKey;
+    const signature = await sendAndConfirmTransaction(connection, tx, [settlement], {
+      commitment: 'confirmed',
+    });
+
+    return {
+      ok: true,
+      signature,
+      amountUsdc: usdcAmt > 0 ? usdcAmt : 0,
+      amountSol: solAmt > 0 ? solAmt : 0,
+      source: settlement.publicKey.toBase58(),
+      vault: opts.agent.publicKey,
+      explorerUrl: `https://explorer.solana.com/tx/${signature}?cluster=devnet`,
+    };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err).slice(0, 300) };
+  }
+}
+
 /** On-chain balances of a wallet: SOL + USDC (current mint). */
 export async function getWalletBalances(wallet: string): Promise<{
   sol: number | null;

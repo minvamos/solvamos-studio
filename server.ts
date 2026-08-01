@@ -22,6 +22,7 @@ import {
   getWalletBalances,
   ensureUsdcAtaForOwner,
   withdrawUsdcFromAgentVault,
+  fundAgentVaultFromSettlement,
 } from './server/pay-payer.js';
 import {
   parseGatewayReceiptHeaders,
@@ -1718,10 +1719,10 @@ app.get('/api/agents/:id/balance', async (req, res) => {
     currentUsdcBalance: balances.usdc,
     balanceError: balances.error || null,
     fundingPolicy:
-      'Agent vault pays A2A peer fees itself. Platform does NOT auto-pull from your personal wallet — top up the vault (Phantom) or withdraw earnings to your primary wallet.',
+      'Agent vault pays A2A peer fees itself. Top up via POST /fund (server-signed from settlement, no Phantom) or withdraw earnings to your primary wallet.',
     topUp: {
       address: agent.publicKey,
-      note: '에이전트 vault로 devnet SOL(A2A 수수료)과 USDC(A2A 결제)를 충전하세요. 잔액이 없으면 peer 결제가 실패합니다 — 내 지갑에서 자동으로 끌어쓰지 않습니다.',
+      note: '에이전트 vault로 devnet SOL(A2A 수수료)과 USDC(A2A 결제)를 충전하세요. 잔액이 없으면 peer 결제가 실패합니다. 충전은 출금과 같이 서버가 바로 처리합니다(Phantom 불필요).',
       solFaucet: 'https://faucet.solana.com',
       usdcFaucet: 'https://faucet.circle.com',
     },
@@ -1785,6 +1786,62 @@ app.post('/api/agents/:id/withdraw', requireGoogleSession, async (req, res) => {
     });
   } catch (err: any) {
     res.status(500).json({ status: 'error', message: err?.message || 'withdraw failed' });
+  }
+});
+
+/** Owner top-up: settlement wallet → agent vault (server-signed, no Phantom). */
+app.post('/api/agents/:id/fund', requireGoogleSession, async (req, res) => {
+  try {
+    const me = await getMeFromRequest(req);
+    if (!me.user?.id) {
+      res.status(401).json({ status: 'error', message: '로그인이 필요합니다.' });
+      return;
+    }
+    const agent = await getAgent(req.params.id);
+    if (!agent) {
+      res.status(404).json({ status: 'error', message: 'Agent not found' });
+      return;
+    }
+    if (!(await userCanManageAgent(me.user.id, agent.id))) {
+      res.status(403).json({ status: 'error', message: '이 에이전트를 관리할 권한이 없습니다.' });
+      return;
+    }
+
+    const amountUsdc = Number(req.body?.amountUsdc ?? req.body?.usdc ?? 0);
+    const amountSol = Number(req.body?.amountSol ?? req.body?.sol ?? 0);
+    if (
+      (amountUsdc && (!(amountUsdc > 0) || !Number.isFinite(amountUsdc))) ||
+      (amountSol && (!(amountSol > 0) || !Number.isFinite(amountSol)))
+    ) {
+      res.status(400).json({
+        status: 'error',
+        message: 'amountUsdc / amountSol must be positive numbers',
+      });
+      return;
+    }
+
+    const result = await fundAgentVaultFromSettlement({
+      agent,
+      amountUsdc,
+      amountSol,
+    });
+    if (!result.ok) {
+      res.status(400).json({ status: 'error', message: result.error || 'fund failed' });
+      return;
+    }
+    const balances = await getWalletBalances(agent.publicKey);
+    const parts: string[] = [];
+    if (result.amountUsdc) parts.push(`${result.amountUsdc} USDC`);
+    if (result.amountSol) parts.push(`${result.amountSol} SOL`);
+    res.json({
+      status: 'success',
+      ...result,
+      currentSolBalance: balances.sol,
+      currentUsdcBalance: balances.usdc,
+      message: `Charged ${parts.join(' + ')} → vault`,
+    });
+  } catch (err: any) {
+    res.status(500).json({ status: 'error', message: err?.message || 'fund failed' });
   }
 });
 
