@@ -110,11 +110,26 @@ async function generateViaVertexRest(
   for (const model of modelCandidates()) {
     const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${project}/locations/${location}/publishers/google/models/${model}:generateContent`;
 
+    // gemini-2.5* thinking tokens count against maxOutputTokens — 2048 often
+    // cuts the visible answer mid-sentence (finishReason=MAX_TOKENS).
+    const maxOut = Math.max(
+      1024,
+      Number(process.env.VERTEX_GEMINI_MAX_OUTPUT_TOKENS || 8192) || 8192
+    );
     const body: Record<string, unknown> = {
       systemInstruction: { parts: [{ text: systemPrompt }] },
       contents,
-      generationConfig: { temperature: 0.5, maxOutputTokens: 2048 },
+      generationConfig: {
+        temperature: 0.5,
+        maxOutputTokens: maxOut,
+      },
     };
+    if (/gemini-2\.5/i.test(model)) {
+      // Keep thinking budget modest so the visible answer gets the token room.
+      (body.generationConfig as Record<string, unknown>).thinkingConfig = {
+        thinkingBudget: Number(process.env.VERTEX_GEMINI_THINKING_BUDGET || 1024) || 1024,
+      };
+    }
     if (opts.webSearch) {
       // Vertex Gemini Google Search grounding tool
       body.tools = [{ googleSearch: {} }];
@@ -133,6 +148,36 @@ async function generateViaVertexRest(
     if (!res.ok) {
       lastError = `Vertex ${model} ${res.status}: ${JSON.stringify(json).slice(0, 220)}`;
       console.warn('[vertex-generate]', lastError);
+      // thinkingConfig unsupported on some models/locations — retry bare config once
+      if (/thinkingConfig|thinking_budget|Unknown name/i.test(lastError) && /gemini-2\.5/i.test(model)) {
+        const retryBody = {
+          ...body,
+          generationConfig: { temperature: 0.5, maxOutputTokens: maxOut },
+        };
+        const retry = await fetch(url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(retryBody),
+        });
+        const retryJson: any = await retry.json().catch(() => ({}));
+        if (retry.ok) {
+          const parts = retryJson?.candidates?.[0]?.content?.parts || [];
+          const text = parts
+            .filter((p: any) => !p.thought && p.text)
+            .map((p: any) => p.text)
+            .join('');
+          if (text) {
+            const fr = retryJson?.candidates?.[0]?.finishReason;
+            if (fr && fr !== 'STOP') {
+              console.warn('[vertex-generate] finishReason=', fr, 'model=', model);
+            }
+            return { text, backend: 'vertex_ai', toolsUsed };
+          }
+        }
+      }
       // If googleSearch tool rejected, retry once without tool
       if (opts.webSearch && /tool|googleSearch|INVALID/i.test(lastError)) {
         continue;
@@ -141,10 +186,25 @@ async function generateViaVertexRest(
     }
 
     const parts = json?.candidates?.[0]?.content?.parts || [];
-    const text = parts.map((p: any) => p.text || '').join('') || '';
+    // Exclude model "thought" parts — only surface the user-facing answer.
+    const text = parts
+      .filter((p: any) => !p.thought && p.text)
+      .map((p: any) => p.text)
+      .join('');
     if (!text) {
       lastError = `Empty Vertex response for ${model}`;
       continue;
+    }
+    const finishReason = json?.candidates?.[0]?.finishReason;
+    if (finishReason && finishReason !== 'STOP') {
+      console.warn(
+        '[vertex-generate] finishReason=',
+        finishReason,
+        'model=',
+        model,
+        'len=',
+        text.length
+      );
     }
     console.log(
       '[vertex-generate] ok model=',
@@ -152,7 +212,9 @@ async function generateViaVertexRest(
       'turns=',
       contents.length,
       'tools=',
-      toolsUsed.join(',') || 'none'
+      toolsUsed.join(',') || 'none',
+      'finish=',
+      finishReason || 'STOP'
     );
     return { text, backend: 'vertex_ai', toolsUsed };
   }
@@ -198,6 +260,7 @@ async function generateViaSdkEnterprise(
         config: {
           systemInstruction: systemPrompt,
           temperature: 0.4,
+          maxOutputTokens: Number(process.env.VERTEX_GEMINI_MAX_OUTPUT_TOKENS || 8192) || 8192,
         },
       });
       const text = response.text || '';
