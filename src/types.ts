@@ -94,6 +94,8 @@ export interface PromptOptions {
 
 /** Files prepared client-side for RAG ingest (no GCP console). */
 export type LocalUploadFile = {
+  /** Set when browser truncated text to the upload cap */
+  truncated?: boolean;
   name: string;
   mimeType?: string;
   text?: string;

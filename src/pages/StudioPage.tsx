@@ -425,6 +425,8 @@ export default function StudioPage(props: Props) {
                     }
                     return btoa(binary);
                   };
+                  // Keep in sync with server/local-ingest.ts (500k chars / file, 25 files).
+                  const MAX_TEXT_CHARS = 500_000;
                   for (const file of Array.from(list).slice(0, 25) as File[]) {
                     try {
                       const isPdf =
@@ -439,10 +441,12 @@ export default function StudioPage(props: Props) {
                         });
                       } else {
                         const text = await file.text();
+                        const truncated = text.length > MAX_TEXT_CHARS;
                         next.push({
                           name: file.name,
                           mimeType: file.type || 'text/plain',
-                          text: text.slice(0, 12_000),
+                          text: text.slice(0, MAX_TEXT_CHARS),
+                          truncated: truncated || undefined,
                         });
                       }
                     } catch {
@@ -466,7 +470,9 @@ export default function StudioPage(props: Props) {
                         <span className="text-xs text-on-surface-variant ml-2">
                           {f.contentBase64
                             ? 'PDF → AI Applications'
-                            : `${(f.text?.length || 0).toLocaleString()}자`}
+                            : `${(f.text?.length || 0).toLocaleString()}자${
+                                f.truncated ? ' (잘림)' : ''
+                              }`}
                         </span>
                       </span>
                       <button
@@ -483,8 +489,9 @@ export default function StudioPage(props: Props) {
                 </ul>
               ) : (
                 <p className="text-xs text-on-surface-variant mt-2">
-                  파일을 올리면 SolVamos가 AI Applications 데이터스토어에 넣습니다. PDF는 Google이
-                  파싱합니다 (최대 8MB/파일). GCP 콘솔 작업은 필요 없습니다.
+                  파일을 올리면 SolVamos가 AI Applications 데이터스토어에 넣습니다. 텍스트/CSV는
+                  파일당 최대 50만 자(큰 CSV는 자동 분할), PDF는 최대 8MB/파일 · 최대 25개.
+                  GCP 콘솔 작업은 필요 없습니다.
                 </p>
               )}
             </div>

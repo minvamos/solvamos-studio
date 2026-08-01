@@ -25,8 +25,9 @@ export type LocalRagCorpus = {
 };
 
 const MAX_FILES = 25;
-const MAX_CHARS_PER_FILE = 12_000;
-const MAX_TOTAL_CHARS = 80_000;
+/** Keep aligned with local-ingest (large CSV / Drive text). */
+const MAX_CHARS_PER_FILE = 500_000;
+const MAX_TOTAL_CHARS = 1_500_000;
 const MAX_PDF_BYTES = 8_000_000;
 
 function corpusPath(agentId: string) {

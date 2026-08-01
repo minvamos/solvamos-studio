@@ -1,16 +1,22 @@
 /**
  * Customer-facing local file ingest — no GCP console required.
- * Text → local corpus; PDF raw bytes → AI Applications parse via Vertex import.
+ * Text → local corpus (chunked for large CSV); PDF raw bytes → Vertex import.
  */
 import fs from 'fs';
 import { dataFile, ensureDataDir } from './data-paths.js';
 import type { LocalRagCorpus, LocalRagDoc } from './drive-ingest.js';
 
+/** Upload file count (UI also caps at 25). */
 const MAX_FILES = 25;
-const MAX_CHARS_PER_FILE = 12_000;
-const MAX_TOTAL_CHARS = 80_000;
+/** Max docs after chunking — matches Vertex inline import batch size. */
+const MAX_DOCS = 40;
+/** Per-file raw text before chunking (was 12_000 — truncated large CSVs). */
+const MAX_CHARS_PER_FILE = 500_000;
+const MAX_TOTAL_CHARS = 1_500_000;
 const MAX_TEXT_BYTES = 2_000_000;
 const MAX_PDF_BYTES = 8_000_000;
+/** Chunk size for Vertex / Answer retrieval quality. */
+const CHUNK_CHARS = 12_000;
 
 export type LocalUploadInput = {
   name: string;
@@ -58,9 +64,37 @@ function looksTexty(name: string, mime: string): boolean {
 }
 
 type Decoded =
-  | { kind: 'text'; text: string }
+  | { kind: 'text'; text: string; truncated: boolean }
   | { kind: 'pdf'; base64: string; byteLength: number }
   | { kind: 'skip'; reason: string };
+
+/** Split large text (CSV keeps header on every chunk). */
+export function chunkTextForRag(name: string, text: string, chunkSize = CHUNK_CHARS): string[] {
+  if (text.length <= chunkSize) return [text];
+  const isTabular = /\.(csv|tsv)$/i.test(name);
+  let header = '';
+  let body = text;
+  if (isTabular) {
+    const nl = text.indexOf('\n');
+    if (nl > 0 && nl < 4000) {
+      header = text.slice(0, nl + 1);
+      body = text.slice(nl + 1);
+    }
+  }
+  const budget = Math.max(2000, chunkSize - header.length);
+  const out: string[] = [];
+  let pos = 0;
+  while (pos < body.length && out.length < MAX_DOCS) {
+    let end = Math.min(pos + budget, body.length);
+    if (end < body.length) {
+      const nl = body.lastIndexOf('\n', end);
+      if (nl > pos + budget * 0.5) end = nl + 1;
+    }
+    out.push(header + body.slice(pos, end));
+    pos = end;
+  }
+  return out.length ? out : [text.slice(0, chunkSize)];
+}
 
 function decodeUpload(file: LocalUploadInput): Decoded {
   const name = (file.name || 'upload').trim() || 'upload';
@@ -85,7 +119,13 @@ function decodeUpload(file: LocalUploadInput): Decoded {
   }
 
   if (file.text != null && String(file.text).trim()) {
-    return { kind: 'text', text: String(file.text).slice(0, MAX_CHARS_PER_FILE) };
+    const raw = String(file.text);
+    const truncated = raw.length > MAX_CHARS_PER_FILE;
+    return {
+      kind: 'text',
+      text: raw.slice(0, MAX_CHARS_PER_FILE),
+      truncated,
+    };
   }
 
   if (file.contentBase64) {
@@ -102,7 +142,12 @@ function decodeUpload(file: LocalUploadInput): Decoded {
       }
       const text = buf.toString('utf8');
       if (!text.trim()) return { kind: 'skip', reason: `${name}: empty` };
-      return { kind: 'text', text: text.slice(0, MAX_CHARS_PER_FILE) };
+      const truncated = text.length > MAX_CHARS_PER_FILE;
+      return {
+        kind: 'text',
+        text: text.slice(0, MAX_CHARS_PER_FILE),
+        truncated,
+      };
     } catch {
       return { kind: 'skip', reason: `${name}: base64 decode failed` };
     }
@@ -168,8 +213,8 @@ export async function ingestLocalUploadsForAgent(opts: {
   }
 
   for (let i = 0; i < files.length; i++) {
-    if (docs.length >= MAX_FILES) {
-      skipped.push('limit reached (max files)');
+    if (docs.length >= MAX_DOCS) {
+      skipped.push('document limit reached (max chunks)');
       break;
     }
     const f = files[i];
@@ -179,14 +224,15 @@ export async function ingestLocalUploadsForAgent(opts: {
       continue;
     }
 
-    const id = `local-${Date.now().toString(36)}-${i}-${(f.name || 'f')
+    const baseId = `local-${Date.now().toString(36)}-${i}-${(f.name || 'f')
       .replace(/[^a-zA-Z0-9._-]/g, '_')
       .slice(0, 40)}`;
+    const baseName = (f.name || `file-${i + 1}`).slice(0, 200);
 
     if (decoded.kind === 'pdf') {
       docs.push({
-        id,
-        name: (f.name || `file-${i + 1}.pdf`).slice(0, 200),
+        id: baseId,
+        name: baseName.endsWith('.pdf') ? baseName : `${baseName}.pdf`,
         mimeType: 'application/pdf',
         text: `[PDF ${Math.round(decoded.byteLength / 1024)}KB — indexed by AI Applications] ${f.name || ''}`,
         contentBase64: decoded.base64,
@@ -194,17 +240,33 @@ export async function ingestLocalUploadsForAgent(opts: {
       continue;
     }
 
-    if (totalChars >= MAX_TOTAL_CHARS) {
-      skipped.push('text char limit reached');
-      break;
+    if (decoded.truncated) {
+      skipped.push(
+        `${baseName}: truncated to ${MAX_CHARS_PER_FILE.toLocaleString()} chars (file was larger)`
+      );
     }
-    docs.push({
-      id,
-      name: (f.name || `file-${i + 1}`).slice(0, 200),
-      mimeType: f.mimeType || 'text/plain',
-      text: decoded.text,
-    });
-    totalChars += decoded.text.length;
+
+    const chunks = chunkTextForRag(baseName, decoded.text);
+    for (let c = 0; c < chunks.length; c++) {
+      if (docs.length >= MAX_DOCS) {
+        skipped.push(`${baseName}: remaining chunks dropped (max ${MAX_DOCS} docs)`);
+        break;
+      }
+      if (totalChars >= MAX_TOTAL_CHARS) {
+        skipped.push('text char limit reached');
+        break;
+      }
+      const piece = chunks[c];
+      const name =
+        chunks.length > 1 ? `${baseName} (part ${c + 1}/${chunks.length})` : baseName;
+      docs.push({
+        id: chunks.length > 1 ? `${baseId}-p${c + 1}` : baseId,
+        name: name.slice(0, 200),
+        mimeType: f.mimeType || 'text/plain',
+        text: piece,
+      });
+      totalChars += piece.length;
+    }
   }
 
   const corpus: LocalRagCorpus = {
