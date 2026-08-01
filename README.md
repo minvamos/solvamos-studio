@@ -18,6 +18,7 @@ pay fetch "https://<gateway>/v1/agents/<agentId>/invoke?prompt=우리 제품 반
 
 - [제품 컨셉과 범위](./docs/CONCEPT.md)
 - [전체 아키텍처](./docs/ARCHITECTURE.md)
+- [슬라이드용 상세 동작도](./docs/ARCHITECTURE_SLIDES.md) — CRUD · 결제 · A2A · RAG · vault
 - [핵심 프로세스와 운영 흐름](./docs/PROCESSES.md)
 - [API surface](./docs/API.md)
 - [Studio ↔ Catalog 통합](./docs/CATALOG_INTEGRATION.md)
@@ -43,166 +44,162 @@ pay fetch "https://<gateway>/v1/agents/<agentId>/invoke?prompt=우리 제품 반
 
 ## 아키텍처
 
-SolVamos는 **Cloud Run 서비스 3개 + 공유 Cloud SQL 1개**로 동작한다.
+한 줄: **Studio가 만들고 → Catalog가 보여주고 → pay-gateway가 유료 호출을 결제·중계한다.**
 
-**Studio가 만들고 → Catalog가 보여주고 → pay-gateway가 유료 호출을 결제·중계한다.**
+역할을 네 덩어리로 보면 된다.
+
+| 레이어 | 누가 | 하는 일 |
+|---|---|---|
+| **Control** | Studio | 로그인, 에이전트 생성, 지식 ingest, owner chat, runtime, vault |
+| **Discovery** | Catalog | marketplace / JSON / `llms.txt` — 무엇을 팔는지 공개 |
+| **Payment** | pay-gateway + Solana | HTTP 402, USDC 정산, 결제 후 Studio proxy |
+| **AI / Data** | Vertex · Cloud SQL · Secret Manager | 지식 검색·답변, listing/계정 DB, vault key |
+
+### 1) 전체 그림 (GCP 안)
+
+실선 = 현재 Lab 구현. 점선 = 설계 목표(테넌트별 GCP project, 코드에 스켈레톤만·기본 비활성).
 
 ```mermaid
-flowchart TB
-  subgraph People [사람]
-    Creator[Creator / Owner]
+flowchart LR
+  subgraph Users [엔드유저]
+    C[Creator]
+    B[Marketplace 방문자]
+    A[외부 AI Agent]
   end
 
-  subgraph Agents [외부 AI Agent]
-    Buyer[pay client]
+  subgraph GCP [Google Cloud]
+    subgraph Planes [Cloud Run × 3]
+      S[Studio<br/>Control]
+      Cat[Catalog<br/>Discovery]
+      G[pay-gateway<br/>Payment]
+    end
+
+    subgraph Data [Data]
+      DB[(Cloud SQL)]
+      SM[Secret Manager]
+    end
+
+    subgraph AI [AI — 현재 shared project]
+      DS[(Datastore)]
+      Eng[Engine]
+      Gem[Gemini]
+      Dr[Drive]
+    end
+
+    subgraph Goal [설계 · 미구현]
+      TProj[고객별 GCP project<br/>cust-*-prod]
+    end
   end
 
-  subgraph Run [Cloud Run × 3]
-    Studio[Studio<br/>solvamos-studio]
-    Catalog[Catalog<br/>solvamos-catalog]
-    Gateway[pay-gateway<br/>pay.sh x402/MPP]
+  subgraph Chain [Solana Devnet]
+    Pay[pay.sh<br/>x402 / MPP]
+    USDC[(USDC TX)]
   end
 
-  DB[(Cloud SQL PostgreSQL<br/>User · Agent · CatalogAgent · …)]
-  DS[(Discovery Engine Datastore)]
-  Engine[AI Applications Engine]
-  Gemini[Vertex Gemini]
-  Drive[Google Drive]
-  SM[Secret Manager / KMS]
-  SOL[Solana Devnet USDC]
+  C --> S
+  B --> Cat
+  A -->|발견| Cat
+  A -->|유료 호출| G
+  A -->|무료 호출| S
 
-  Creator -->|생성 · owner chat| Studio
-  Buyer -->|/llms.txt · /api/catalog · card| Catalog
-  Buyer -->|유료 invoke_url| Gateway
-  Gateway -->|HTTP 402| Buyer
-  Buyer -->|USDC| SOL
-  Gateway -->|X-Pay-Internal-Secret proxy| Studio
+  G --- Pay
+  Pay --> USDC
+  G -->|결제 후 proxy| S
 
-  Studio <--> DB
-  Catalog <--> DB
-  Studio -->|CatalogAgent upsert| DB
-  Studio -->|admin publish| Catalog
-  Studio --> Drive
-  Studio --> DS
-  DS --> Engine
-  Studio --> Engine
-  Studio --> Gemini
-  Studio --> SM
+  S <--> DB
+  Cat <--> DB
+  S --> Cat
+  S --> SM
+  S --> DS
+  S --> Eng
+  S --> Gem
+  S --> Dr
+  DS --> Eng
+
+  S -.->|TENANCY_MODE=isolated| TProj
+  TProj -.->|목표: AI/Secret 격리| AI
 ```
 
-### 서비스 경계
+**읽는 순서:** 왼쪽 유저 → 가운데 Cloud Run 3역할 → 오른쪽 아래 체인.  
+Catalog는 Gateway를 직접 호출하지 않고 `invoke_url`만 알려준다. 유료 HTTP는 Agent → Gateway.
 
-| 서비스 | 하는 일 | 하지 않는 일 |
-|---|---|---|
-| **Studio** | 로그인·tenant·에이전트 CRUD, Datastore/Engine, 지식 ingest, owner chat, peer orchestration, vault, 정산 ledger | 공개 marketplace UI (`/catalog`는 Catalog로 redirect) |
-| **Catalog** | landing · marketplace · agent detail · JSON/Markdown/`llms.txt` | 결제 · RAG 실행 · Prisma migration 소유 |
-| **pay-gateway** | 유료 `invoke_url`에 402를 걸고 USDC 수령 후 Studio `/v1`으로 proxy | 에이전트 로직·지식 |
-
-연결 키: **`Agent.id == AgentOwnership.agentId == CatalogAgent.agentId`**.  
-Studio가 runtime `Agent`를 만들고 같은 ID로 `CatalogAgent` listing을 남긴다. Catalog는 그
-listing을 외부에 노출한다. Prisma migration은 Studio가 소유하고, Catalog는 배포 시
-`prisma generate`만 수행한다.
-
-### 데이터
-
-```text
-Cloud SQL (공유)
-├─ User / Session          계정 · Google OAuth · 세션
-├─ Tenant / TenantMember   workspace · 멤버십
-├─ Agent                   prompt, fee, Datastore/Engine ID, vault pubkey
-├─ AgentOwnership          관리 권한
-├─ Wallet                  사용자 운영 지갑 (agent vault와 분리)
-├─ CatalogAgent            공개 listing (Catalog source of truth)
-├─ RagDocument             ingest 메타 · 추출 텍스트 mirror
-└─ PaymentSettlement       결제 영수증
-
-GCP / chain
-├─ Discovery Engine Datastore   검색 지식 (Agent.vertexDataStoreId)
-├─ AI Applications Engine       Answer API (Agent.vertexEngineId)
-├─ Secret Manager [/ KMS]       vault private key
-└─ Solana Devnet USDC           호출당 결제
-```
-
-### 에이전트 생성
-
-`POST /api/agents/create` → provisioning (`server/provision.ts`, `server/vault.ts` 등):
-
-1. prompt 컴파일 · agent Solana key → Secret Manager
-2. `Agent` + `AgentOwnership` 저장
-3. Datastore(+ Engine) 생성, Drive/로컬/웹 지식 import
-4. `CatalogAgent` upsert (`server/catalog-db.ts`) + Catalog HTTP publish (`server/paysh-catalog.ts`)
-
-```text
-유료 invokeUrl  https://<pay-gateway>/v1/agents/{agentId}/invoke
-무료 invokeUrl  https://<studio>/api/agents/{agentId}/invoke
-```
-
-유료 listing이 Studio origin을 가리키면 publish되지 않는다. 상업 결제는 gateway만 사용한다.
-
-### 발견 → 결제 → 호출
+### 2) 유료 호출만 따로 (결제 레일)
 
 ```mermaid
 sequenceDiagram
-  participant A as 외부 Agent
-  participant C as Catalog
-  participant G as pay-gateway
-  participant SOL as Solana Devnet
-  participant S as Studio /v1
-  participant R as runAgentInvoke
+  autonumber
+  actor Agent as 외부 AI Agent
+  participant Cat as Catalog
+  participant GW as pay-gateway
+  participant Chain as Solana USDC
+  participant Studio as Studio runtime
 
-  A->>C: /llms.txt · /api/catalog · /api/v1/agents
-  C-->>A: listing + invoke_url
-  A->>G: /v1/agents/:id/invoke
-  G-->>A: HTTP 402 (가격·수취인·mint)
-  A->>SOL: USDC 결제
-  A->>G: 증빙과 함께 재시도
-  G->>S: X-Pay-Internal-Secret proxy
-  S->>R: RAG 실행
-  R-->>A: answer + citations
+  Agent->>Cat: 발견 (/llms.txt, /api/catalog)
+  Cat-->>Agent: invoke_url (gateway)
+  Agent->>GW: /v1/agents/:id/invoke
+  GW-->>Agent: HTTP 402 (가격·수취인·mint)
+  Agent->>Chain: USDC 서명·전송
+  Note over Chain: ~90% agent vault<br/>~10% platform treasury
+  Agent->>GW: 증빙과 함께 재시도
+  GW->>Studio: X-Pay-Internal-Secret → /v1/.../invoke
+  Studio-->>Agent: answer + citations
 ```
 
-Catalog discovery surface:
+```text
+유료  https://<gateway>/v1/agents/{id}/invoke
+무료  https://<studio>/api/agents/{id}/invoke
+Gateway → Studio   /v1/... + X-Pay-Internal-Secret
+Studio → Catalog   POST /api/catalog/agents + X-Catalog-Admin-Secret
+```
+
+- 402 챌린지가 결제 source of truth (Catalog `price`는 힌트)
+- 유료를 Studio origin에 직접 치면 실행하지 않고 402 + gateway URL만 반환
+- 체인 쪽: buyer wallet 서명 · agent vault 수취 · treasury split · (devnet) fee_payer / operator ATA
+- 코드: `pay/*.yml`, `payment.ts`, `gateway-settle.ts`, `pay-payer.ts`
+
+### 3) 테넌시 — 지금 vs 목표
+
+| | 지금 (Lab · 구현됨) | 목표 (설계 · 미구현) |
+|---|---|---|
+| GCP project | 플랫폼 하나 (`GOOGLE_CLOUD_PROJECT`) | 고객별 `cust-*-prod` |
+| 격리 | Cloud SQL ownership / tenant 멤버십 | project 단위 AI·Secret 격리 |
+| AI 리소스 | 같은 project 안 **agent별** Datastore/Engine | 테넌트 project 안 Datastore/Engine |
+| 스위치 | `TENANCY_MODE=shared` (기본) | `isolated` + `ENABLE_ORG_PROJECT_CREATE` (기본 false) |
+
+### 서비스 경계 · 데이터
+
+| 서비스 | 하는 일 | 하지 않는 일 |
+|---|---|---|
+| **Studio** | CRUD, Datastore/Engine, ingest, owner chat, peer orchestration, vault, 정산 | 공개 marketplace UI |
+| **Catalog** | landing · marketplace · JSON/Markdown/`llms.txt` | 결제 · RAG · migration 소유 |
+| **pay-gateway** | 402 · USDC · Studio `/v1` proxy | 에이전트 로직·지식 |
+
+연결 키: `Agent.id == AgentOwnership.agentId == CatalogAgent.agentId`.  
+Prisma migration은 Studio 소유. Catalog는 `prisma generate`만.
+
+```text
+Cloud SQL     User · Tenant · Agent · CatalogAgent · Wallet · PaymentSettlement …
+GCP AI        Datastore · Engine · Gemini · Drive
+Secrets       agent vault private key (Secret Manager / KMS)
+Chain         buyer wallet · agent vault · platform treasury · USDC
+```
+
+### 생성 · runtime · discovery (요약)
+
+**생성** `POST /api/agents/create` → vault(SM) → Datastore/Engine → `CatalogAgent` upsert + Catalog publish.
+
+**Runtime** `runAgentInvoke`: specialized=Engine Answer · autonomous/첨부/웹=Gemini(+Datastore) · peer=Catalog 후보를 같은 결제 레일로 재호출.
+
+**Discovery**
 
 | Surface | URL |
 |---|---|
-| 마켓 가이드 | `GET /llms.txt` |
-| 전체 목록 | `GET /api/catalog` |
-| 슬림 인덱스 | `GET /api/v1/agents`, `/marketplace.json` |
-| 에이전트 JSON | `GET /api/solvamos/:agentId` |
-| Markdown card | `GET /api/solvamos/:agentId/index.md` |
+| 가이드 | `GET /llms.txt` |
+| 목록 | `GET /api/catalog`, `/api/v1/agents` |
+| 상세 | `GET /api/solvamos/:id`, `.../index.md` |
 | Agent Card | `GET <studio>/api/agents/:id/agent-card` |
 
-Catalog의 `price`는 discovery 힌트다. 결제 금액·수취인·mint의 source of truth는 라이브
-**HTTP 402 챌린지**다.
-
-### 답변 runtime
-
-공개/owner invoke는 `server/invoke-handler.ts`의 `runAgentInvoke`로 모인다.
-
-```text
-prompt
-  ├─ 첨부 / 웹검색  → Datastore search + Vertex Gemini
-  ├─ specialized    → AI Applications Answer API (fallback: search + Gemini)
-  ├─ autonomous     → Vertex Gemini (+ Datastore retrieve)
-  └─ peer 사용 시   → self → free Catalog peer → paid peer (vault USDC) → 합성
-```
-
-### 결제 경로
-
-```text
-유료 외부 호출  → pay-gateway /v1/agents/:id/invoke 만
-                 (Studio /api/agents/:id/invoke 직접 호출 시 402 + gateway URL)
-무료 외부 호출  → Studio /api/agents/:id/invoke
-gateway → Studio → /v1/agents/:id/invoke + X-Pay-Internal-Secret
-```
-
-- gateway 계약: `pay/solvamos-provider.devnet.yml`
-- 검증·replay 방지: `server/payment.ts`
-- 정산: `server/gateway-settle.ts` → `PaymentSettlement`
-- 사용자 `Wallet` ≠ agent vault (`Agent.publicKey` + Secret Manager)
-
-공개 커머스 실행 경로는 `invoke_url` + 402가 유일하다. Google A2A는 디스커버리용 Agent Card
-형태만 사용한다. 상세: [`docs/A2A.md`](./docs/A2A.md).
+공개 실행 경로는 `invoke_url` + 402가 유일하다. A2A는 Card 형태만. [`docs/A2A.md`](./docs/A2A.md) · 상세 [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
 
 ---
 

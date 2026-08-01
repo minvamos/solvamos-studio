@@ -1,7 +1,8 @@
 # SolVamos 전체 아키텍처
 
 > 기준: 2026-07-25 현재 `solvamos-studio` 및 `solvamos-catalog` 코드  
-> 이 문서는 목표 상태가 아니라 **현재 구현**, **부분 구현**, **후속 과제**를 구분해 설명한다.
+> 이 문서는 목표 상태가 아니라 **현재 구현**, **부분 구현**, **후속 과제**를 구분해 설명한다.  
+> 슬라이드 첨부용 동작별 다이어그램: [ARCHITECTURE_SLIDES.md](./ARCHITECTURE_SLIDES.md)
 
 ## 1. 시스템 목적
 
@@ -20,35 +21,74 @@ SolVamos는 사용자가 도메인 지식과 정책을 가진 AI 에이전트를
 
 ## 2. 배포 토폴로지
 
+역할을 **Control (Studio) · Discovery (Catalog) · Payment (pay-gateway) · AI/Data** 네 덩어리로 나눈다.  
+실선 = 현재 Lab 구현. 점선 = 설계 목표(테넌트별 GCP project, `TENANCY_MODE=isolated`, 기본 비활성).
+
 ```mermaid
 flowchart LR
-  U[사용자 / 외부 클라이언트]
-  S[Studio Cloud Run<br/>React + Express]
-  C[Catalog Cloud Run<br/>Marketplace + Discovery API]
-  G[pay-gateway Cloud Run<br/>x402 / MPP]
-  DB[(Cloud SQL PostgreSQL)]
-  DS[(Discovery Engine<br/>Datastore)]
-  E[AI Applications Engine]
-  V[Vertex Gemini]
-  D[Google Drive]
-  SM[Secret Manager / KMS]
-  SOL[Solana Devnet USDC]
+  subgraph Users [엔드유저]
+    C[Creator]
+    B[Marketplace 방문자]
+    A[외부 AI Agent]
+  end
 
-  U -->|에이전트 생성·소유자 채팅| S
-  U -->|검색·상세·invoke_url| C
-  C -->|유료 invoke_url| G
-  G -->|HTTP 402 및 결제| SOL
-  G -->|결제 완료 후 내부 proxy<br/>X-Pay-Internal-Secret| S
+  subgraph GCP [Google Cloud]
+    subgraph Planes [Cloud Run × 3]
+      S[Studio<br/>Control]
+      Cat[Catalog<br/>Discovery]
+      G[pay-gateway<br/>Payment]
+    end
+
+    subgraph Data [Data]
+      DB[(Cloud SQL)]
+      SM[Secret Manager]
+    end
+
+    subgraph AI [AI — 현재 shared project]
+      DS[(Datastore)]
+      Eng[Engine]
+      Gem[Gemini]
+      Dr[Drive]
+    end
+
+    subgraph Goal [설계 · 미구현]
+      TProj[고객별 GCP project<br/>cust-*-prod]
+    end
+  end
+
+  subgraph Chain [Solana Devnet]
+    Pay[pay.sh<br/>x402 / MPP]
+    USDC[(USDC TX)]
+  end
+
+  C --> S
+  B --> Cat
+  A -->|발견| Cat
+  A -->|유료 호출| G
+  A -->|무료 호출| S
+
+  G --- Pay
+  Pay --> USDC
+  G -->|결제 후 proxy| S
 
   S <--> DB
-  C <--> DB
-  S --> D
-  S --> DS
-  DS --> E
-  S --> E
-  S --> V
+  Cat <--> DB
+  S --> Cat
   S --> SM
+  S --> DS
+  S --> Eng
+  S --> Gem
+  S --> Dr
+  DS --> Eng
+
+  S -.->|TENANCY_MODE=isolated| TProj
+  TProj -.->|목표: AI/Secret 격리| AI
 ```
+
+**읽는 순서:** 왼쪽 유저 → 가운데 Cloud Run 3역할 → Solana.  
+Catalog는 Gateway를 런타임 호출하지 않는다. 유료 HTTP는 Agent → Gateway → (402/USDC) → Studio `/v1` proxy.
+
+유료 결제 시퀀스·테넌시 표·URL 계약은 [README 아키텍처](../README.md#아키텍처)와 동일하다.
 
 운영 서비스는 독립 Cloud Run 이미지다.
 
@@ -57,6 +97,15 @@ flowchart LR
 - gateway: `Dockerfile.pay-gateway`, `cloudbuild.pay-gateway.yaml`
 
 Cloud Build 파일은 이미지를 빌드·push한다. 실제 Cloud Run 배포 설정과 환경 변수/Secret 연결은 CI 또는 `gcloud run deploy` 단계가 담당한다.
+
+### 테넌시 (현재 vs 목표)
+
+| | 지금 (Lab · 구현됨) | 목표 (설계 · 미구현) |
+|---|---|---|
+| GCP project | 플랫폼 하나 (`GOOGLE_CLOUD_PROJECT`) | 고객별 `cust-*-prod` |
+| 격리 | Cloud SQL ownership / tenant | project 단위 AI·Secret |
+| AI 리소스 | 같은 project 안 agent별 Datastore/Engine | 테넌트 project 안 |
+| 스위치 | `TENANCY_MODE=shared` (기본) | `isolated` + `ENABLE_ORG_PROJECT_CREATE=false` 기본 |
 
 ## 3. 데이터 및 책임 경계
 
