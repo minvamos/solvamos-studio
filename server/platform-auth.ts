@@ -90,15 +90,20 @@ export async function toPublicUser(userId: string, sid?: string): Promise<Public
   });
   if (!user) return null;
   let driveConnected = false;
+  let sessionName: string | null = null;
+  let sessionPicture: string | null = null;
   if (sid) {
     const sess = await prisma.session.findUnique({ where: { id: sid } });
     driveConnected = !!(sess?.accessToken || sess?.refreshToken || sess?.via === 'adc');
+    sessionName = sess?.name || null;
+    sessionPicture = sess?.picture || null;
   }
   return {
     id: user.id,
     email: user.email,
-    name: user.name,
-    picture: user.picture,
+    // Prefer User profile; fall back to Session snapshot from Google OAuth.
+    name: user.name || sessionName,
+    picture: user.picture || sessionPicture,
     tenantId: user.primaryTenantId || user.members[0]?.tenantId || null,
     googleLinked: !!user.googleSub,
     hasPassword: !!user.passwordHash,

@@ -188,7 +188,10 @@ export default function App() {
     setLocalFiles([]);
   };
 
-  const authFetch = (url: string, init?: RequestInit) => {
+  /** Serialize refresh so StrictMode / parallel 401s don't rotate the same refresh token twice. */
+  const refreshInFlight = useRef<Promise<boolean> | null>(null);
+
+  const rawAuthFetch = (url: string, init?: RequestInit) => {
     return fetch(url, {
       ...init,
       credentials: 'include',
@@ -199,16 +202,44 @@ export default function App() {
     });
   };
 
+  const rotateAccessToken = async (): Promise<boolean> => {
+    if (refreshInFlight.current) return refreshInFlight.current;
+    refreshInFlight.current = (async () => {
+      try {
+        const refreshed = await rawAuthFetch('/api/auth/refresh', { method: 'POST' });
+        return refreshed.ok;
+      } catch {
+        return false;
+      } finally {
+        refreshInFlight.current = null;
+      }
+    })();
+    return refreshInFlight.current;
+  };
+
+  /** Cookie JWT + auto refresh/retry once on 401 (expired access token). */
+  const authFetch = async (url: string, init?: RequestInit): Promise<Response> => {
+    const res = await rawAuthFetch(url, init);
+    if (res.status !== 401) return res;
+    // Don't recurse on auth endpoints themselves
+    if (/\/api\/auth\/(refresh|login|register|logout|me)(\?|$)/.test(url)) return res;
+    const ok = await rotateAccessToken();
+    if (!ok) return res;
+    return rawAuthFetch(url, init);
+  };
+
   /** Cookie JWT first; refresh once if access expired. */
   const ensureAuth = async (): Promise<any | null> => {
-    const me = await authFetch('/api/auth/me');
-    const data = await me.json();
-    if (data?.connected || data?.user?.connected) return data;
-    const refreshed = await authFetch('/api/auth/refresh', { method: 'POST' });
-    if (!refreshed.ok) return null;
-    const again = await authFetch('/api/auth/me');
-    const data2 = await again.json();
-    if (data2?.connected || data2?.user?.connected) return data2;
+    const me = await rawAuthFetch('/api/auth/me');
+    const data = await me.json().catch(() => null);
+    if (data?.connected && data?.user) return data;
+
+    const rotated = await rotateAccessToken();
+    if (!rotated) return null;
+
+    const again = await rawAuthFetch('/api/auth/me');
+    const data2 = await again.json().catch(() => null);
+    if (data2?.connected && data2?.user) return data2;
     return null;
   };
 
@@ -233,16 +264,16 @@ export default function App() {
 
   const applyAuthUser = (data: any, sessionId?: string) => {
     const user = data?.user;
-    const connected = !!(data?.connected || user?.email);
-    if (!connected) return false;
     const email = data.email || user?.email || null;
+    const connected = !!(data?.connected && email);
+    if (!connected) return false;
     const name = data.name || user?.name || null;
     const picture = data.picture || user?.picture || null;
     const tenantId = data.tenantId || user?.tenantId || null;
     setDriveEmail(email);
     setUserName(name);
     setUserPicture(picture);
-    if (tenantId) setTenantIdInput(tenantId);
+    if (tenantId) setTenantIdInput(String(tenantId));
     if (sessionId || data.sessionId) {
       const sid = sessionId || data.sessionId;
       localStorage.setItem('solvamos_drive_session', sid);
@@ -405,6 +436,8 @@ export default function App() {
       const data = await ensureAuth();
       if (data && applyAuthUser(data, data.sessionId || undefined)) {
         setView('studio');
+        // Agents must load AFTER cookies are valid — anonymous /api/agents returns [].
+        await fetchStatusAndAgents();
         await loadDriveFolders(undefined);
         await fetchWallets();
         await fetchSettlements();
@@ -554,12 +587,20 @@ export default function App() {
       }
       const entered = localStorage.getItem('solvamos_entered') === '1';
       const initialRoute = parseAppRoute();
-      // Keep studio visible across refresh while we revalidate (no login flash)
+      // Stay on boot shell until auth is resolved — avoids empty agents / blank account.
       if (entered) {
-        setView('studio');
+        setView('boot');
       }
 
-      await fetchStatusAndAgents();
+      // Public status only (no user-scoped agents yet — access JWT may be expired).
+      try {
+        const statusRes = await fetch('/api/status', { cache: 'no-store' });
+        const statusData = await statusRes.json();
+        setServerStatus(statusData);
+      } catch (err) {
+        console.error('Failed to load /api/status', err);
+      }
+
       // After status load, redirect /catalog if still on that path
       if (window.location.pathname === '/catalog' || window.location.pathname.startsWith('/catalog/')) {
         try {
@@ -597,6 +638,7 @@ export default function App() {
         }
       }
 
+      // Auth first (refresh cookies if needed), then user-scoped agents inside refreshAuthSession.
       const ok = await refreshAuthSession();
       if (ok) {
         if (initialRoute.tab) {

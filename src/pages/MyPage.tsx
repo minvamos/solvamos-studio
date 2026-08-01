@@ -44,14 +44,17 @@ export default function MyPage({ authFetch, onLinked }: Props) {
   const load = async () => {
     setError(null);
     try {
+      // authFetch auto-refreshes expired access JWT once on 401
       const res = await authFetch('/api/account/me');
-      const json = await res.json();
+      const json = await res.json().catch(() => ({}));
       if (!res.ok || json.status !== 'success') {
+        setData(null);
         setError(json.message || '계정 정보를 불러오지 못했습니다');
         return;
       }
       setData(json);
     } catch (err: any) {
+      setData(null);
       setError(err.message || '요청 실패');
     }
   };

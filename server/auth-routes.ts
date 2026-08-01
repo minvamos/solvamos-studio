@@ -121,6 +121,8 @@ export function registerPlatformAuthRoutes(app: Express) {
       user: me.user,
       sessionId: me.sessionId,
       email: me.user?.email || null,
+      name: me.user?.name || null,
+      picture: me.user?.picture || null,
       tenantId: me.user?.tenantId || null,
       oauthConfigured: isOAuthClientConfigured(),
       sharedTenantId: me.sharedTenantId,
