@@ -11,7 +11,7 @@ pay fetch "https://<gateway>/v1/agents/<agentId>/invoke?prompt=우리 제품 반
 | 구성요소 | 역할 | 위치 |
 |---|---|---|
 | **Studio** | 에이전트 빌더 · runtime · vault · 정산 | 이 repository |
-| **Catalog** | 공개 marketplace · 기계용 discovery API | [`solvamos-catalog`](https://github.com/minvamos/solvamos-catalog) |
+| **Catalog** | 공개 marketplace · 기계용 discovery API | [`solvamos-catalog`](https://github.com/mikohatsu/solvamos-catalog) |
 | **pay-gateway** | HTTP 402 결제 · Studio 내부 proxy | 이 repository (`pay/`, `Dockerfile.pay-gateway`) |
 
 ## 문서
@@ -217,44 +217,206 @@ Chain         buyer wallet · agent vault · platform treasury · USDC
 
 ---
 
-## 설치 및 로컬 구동
+## 설치 및 로컬 구동 (Quickstart)
 
-### 필수
+Studio README만으로 **Studio + Catalog + 외부 검증 Buyer**까지 로컬에서 이어서 테스트할 수 있게 정리한다.  
+형제 저장소는 같은 부모 디렉터리에 clone 하는 것을 권장한다.
 
-- Node.js 20+
-- GCP project (Discovery Engine · Vertex AI) · Google OAuth Web Client
-- pay.sh CLI (`npm run pay:install`) · Devnet USDC 지갑
+| Repository | 역할 | URL |
+|---|---|---|
+| **Studio** (이 repo) | 빌더 · runtime · vault · 로컬 pay-gateway | https://github.com/minvamos/solvamos-studio |
+| **Catalog** | 공개 marketplace · discovery API | https://github.com/mikohatsu/solvamos-catalog |
+| **외부 검증 Buyer** | Catalog 탐색 → HTTP 402 → Devnet 결제 → invoke | https://github.com/minvamos/solvamos_test_external_agent |
 
-### Studio + gateway
+```text
+~/HSJ/
+  solvamos-studio/                 :3000  (+ managed gateway :1402)
+  solvamos-catalog/                :4173
+  solvamos_test_external_agent/    :3100  (Studio와 포트 충돌 방지)
+```
+
+### 무엇을 검증할 수 있나
+
+| 경로 | 로컬에서 | 필요한 것 |
+|---|---|---|
+| Catalog discovery (`/health`, `/api/v1/agents`, `/llms.txt`, UI) | ✅ | Node 20+ (DB 없으면 file fallback) |
+| Studio UI · 로그인 · 에이전트 CRUD | ✅ | Cloud SQL(+Auth Proxy) · JWT · OAuth |
+| RAG create / invoke / Drive ingest | ✅ | GCP ADC · Discovery Engine · Vertex · OAuth |
+| pay-gateway 402 challenge | ✅ | pay CLI · `PAY_INTERNAL_SECRET` 일치 |
+| `pay fetch` 유료 호출 | ✅ | Devnet USDC buyer 지갑 |
+| 외부 검증 Buyer E2E | ✅ | Gemini key · `caller.json` · Catalog `:4173` · gateway invoke_url |
+
+이 머신에 `.env` / Cloud SQL Proxy / pay CLI / ADC가 없으면 Studio·유료 경로 기동은 막히고, Catalog file-fallback 스모크만 즉시 가능하다.
+
+### 0) 공통 사전 준비
+
+- Node.js **20+**
+- `gcloud` ADC (`gcloud auth application-default login`) — Studio RAG/Vault용
+- Cloud SQL Auth Proxy → `127.0.0.1:5432` (Studio·Catalog 공유 `DATABASE_URL`)
+- Google OAuth Web Client (Drive `drive.readonly`) — [DRIVE_OAUTH_SETUP](./docs/DRIVE_OAUTH_SETUP.md)
+- pay.sh CLI + Devnet USDC (유료 경로)
+
+**pay CLI**
+
+```bash
+# macOS / Linux — PATH에 pay 설치
+npm install -g @solana/pay
+pay --version
+
+# 또는 로컬 경로를 Studio가 읽게
+mkdir -p tools/pay
+# binary를 tools/pay/pay 에 두고, 없으면 PAY_CLI_PATH=/절대경로/pay
+# Windows는 기존 스크립트:
+npm run pay:install   # → tools/pay/pay.exe
+```
+
+### 1) Studio + managed pay-gateway (`:3000` · `:1402`)
 
 ```bash
 git clone https://github.com/minvamos/solvamos-studio.git
 cd solvamos-studio
 npm install
 cp .env.example .env
-npm run dev                 # http://localhost:3000
 ```
 
-로컬에서는 `PAY_GATEWAY_MANAGED=true`(기본)로 Studio가 pay.sh gateway를 `:1402`에 띄운다.
+`.env`에서 로컬 Lab에 최소로 맞출 값:
 
-```bash
-PAY_INTERNAL_SECRET=dev-pay-internal \
-  pay server start pay/solvamos-provider.devnet.yml --bind 127.0.0.1:1402
+```env
+APP_URL=http://localhost:3000
+PORT=3000
+JWT_SECRET=dev-only-change-me-to-a-long-random-string
+DATABASE_URL=postgresql://USER:PASS@127.0.0.1:5432/solvamos_studio?schema=public
+GOOGLE_CLOUD_PROJECT=<your-gcp-project>
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+OAUTH_REDIRECT_URI=http://localhost:3000/api/auth/google/callback
+
+# Lab bypasses (production 금지)
+ALLOW_LOCAL_VAULT_FALLBACK=true
+ALLOW_PAYMENT_BYPASS=true
+
+PAYMENT_NETWORK=devnet
+PAY_GATEWAY_URL=http://127.0.0.1:1402
+PAY_ORIGIN_URL=http://127.0.0.1:3000
+PAY_INTERNAL_SECRET=dev-pay-internal
+PAY_GATEWAY_MANAGED=true
+USE_PAY_GATEWAY=true
+
+# Catalog 연동 (아래 Catalog .env와 동일 secret)
+CATALOG_SITE_URL=http://127.0.0.1:4173
+CATALOG_ADMIN_SECRET=dev-catalog-admin-secret-change-me
 ```
 
-### Catalog
-
 ```bash
-git clone https://github.com/minvamos/solvamos-catalog.git
-cd solvamos-catalog && cp .env.example .env
-npm install && npm run dev   # http://127.0.0.1:4173
+# Cloud SQL Auth Proxy를 별도 터미널에서 먼저 띄운 뒤
+npm run dev
+# → http://localhost:3000
+# → PAY_GATEWAY_MANAGED=true 이면 Studio가 pay server를 :1402에 자식으로 기동
 ```
 
-### 유료 호출 확인
+managed가 실패하거나 CLI만 따로 띄울 때:
 
 ```bash
-curl -i "http://127.0.0.1:1402/v1/agents/<agentId>/invoke?prompt=hello"   # → 402
-pay fetch "http://127.0.0.1:1402/v1/agents/<agentId>/invoke?prompt=hello" # → 결제 + 답변
+export PAY_INTERNAL_SECRET=dev-pay-internal
+pay server start pay/solvamos-provider.devnet.yml --bind 127.0.0.1:1402
+```
+
+스모크:
+
+```bash
+curl -sS http://127.0.0.1:3000/healthz
+curl -sS http://127.0.0.1:3000/api/status | head -c 400
+curl -sS http://127.0.0.1:1402/v1/health
+```
+
+상세: [PAYSH_LOCAL.md](./docs/PAYSH_LOCAL.md) · [DATABASE.md](./docs/DATABASE.md) · [CATALOG_INTEGRATION.md](./docs/CATALOG_INTEGRATION.md).
+
+### 2) Catalog (`:4173`) — [solvamos-catalog](https://github.com/mikohatsu/solvamos-catalog)
+
+```bash
+git clone https://github.com/mikohatsu/solvamos-catalog.git
+cd solvamos-catalog
+npm install
+cp .env.example .env
+```
+
+```env
+PORT=4173
+PUBLIC_BASE_URL=http://127.0.0.1:4173
+STUDIO_URL=http://localhost:3000
+CATALOG_ADMIN_SECRET=dev-catalog-admin-secret-change-me   # Studio와 동일
+# 전체 listing 연동 시 Studio와 같은 Cloud SQL:
+# DATABASE_URL=postgresql://USER:PASS@127.0.0.1:5432/solvamos_studio?schema=public
+# DATABASE_URL 비우면 file fallback (.data/catalog-store.json) — discovery 스모크용
+```
+
+```bash
+npm run dev
+# → http://127.0.0.1:4173
+```
+
+스모크:
+
+```bash
+curl -sS http://127.0.0.1:4173/health
+curl -sS http://127.0.0.1:4173/api/v1/agents | head -c 500
+curl -sS http://127.0.0.1:4173/llms.txt | head -20
+open http://127.0.0.1:4173/marketplace
+```
+
+Studio에서 에이전트를 만들고 publish하면 Catalog listing에 나타나고, 유료 에이전트의 `invoke_url`은 `http://127.0.0.1:1402/v1/agents/<id>/invoke` 형태여야 한다.
+
+### 3) 유료 호출 (CLI)
+
+```bash
+# agentId는 Catalog / Studio에서 확인
+curl -i "http://127.0.0.1:1402/v1/agents/<agentId>/invoke?prompt=hello"
+# → HTTP 402 + WWW-Authenticate: Payment …
+
+pay fetch "http://127.0.0.1:1402/v1/agents/<agentId>/invoke?prompt=hello"
+# → Devnet USDC 결제 후 Studio proxy 답변
+```
+
+Studio origin의 유료 `/api/agents/<id>/invoke`는 실행하지 않고 402 + gateway URL만 돌려준다.
+
+### 4) 외부 검증 Buyer (`:3100`) — [solvamos_test_external_agent](https://github.com/minvamos/solvamos_test_external_agent)
+
+Gemini가 Catalog를 검색하고, 402를 받아 buyer 지갑으로 결제한 뒤 raw 응답을 스트리밍하는 Lab용 Buyer다. **Studio와 포트가 겹치지 않게 기본 `:3100`.**
+
+```bash
+git clone https://github.com/minvamos/solvamos_test_external_agent.git
+cd solvamos_test_external_agent
+npm install
+```
+
+준비 파일 (repo 루트, gitignore 대상):
+
+```text
+gemini_API_key.txt     # 또는 export GEMINI_API_KEY=...
+caller.json            # Solana Devnet secret key byte array (buyer)
+```
+
+```bash
+# 로컬 Catalog를 보도록 (기본값도 이미 로컬 :4173)
+export CATALOG_INDEX_URL=http://127.0.0.1:4173/api/v1/agents
+npm start
+# → http://localhost:3100
+```
+
+UI에서 자연어 질의 → `search_catalog` → `invoke_paid_agent` → SSE 타임라인으로 402·TX·원본 응답 확인.  
+CLI만: `npm run start:cli` 또는 `node autonomous-agent.mjs`.
+
+전제: Studio·Catalog·gateway가 떠 있고, Catalog에 **유료** listing이 있으며 buyer 지갑에 Devnet USDC가 있어야 한다.
+
+### 5) 권장 기동 순서 (한 번에 전체)
+
+```text
+1. Cloud SQL Auth Proxy
+2. Catalog          npm run dev          → :4173
+3. Studio           npm run dev          → :3000 (+ :1402 managed)
+4. (선택) External  npm start            → :3100
+5. Studio UI에서 에이전트 생성·publish → Catalog에 listing 확인
+6. curl 402 → pay fetch 또는 External Buyer UI
 ```
 
 ### Cloud Run
@@ -291,11 +453,15 @@ solvamos-studio/                 Studio + pay-gateway
   Dockerfile
   Dockerfile.pay-gateway
 
-solvamos-catalog/                공개 discovery (별도 repository)
+solvamos-catalog/                https://github.com/mikohatsu/solvamos-catalog
   server/catalog.ts
   server/catalog-db-store.ts
   server/llm-discovery.ts        /llms.txt · settlement guide
   src/pages/                     Landing · Marketplace · Agent detail
+
+solvamos_test_external_agent/    https://github.com/minvamos/solvamos_test_external_agent
+  server.mjs · agent-runner.mjs  Buyer UI (:3100) + Gemini tools
+  x402-executor.mjs              402 → Devnet 결제 → retry
 ```
 
 ---
