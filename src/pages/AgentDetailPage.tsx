@@ -4,12 +4,15 @@
 import {
   FormEvent,
   RefObject,
+  useCallback,
   useEffect,
   useState,
   type ReactNode,
 } from 'react';
 import {
+  ArrowDownToLine,
   ArrowLeft,
+  ArrowUpFromLine,
   Bot,
   Check,
   Copy,
@@ -19,6 +22,7 @@ import {
 } from 'lucide-react';
 import type { Agent, ChatAttachment, Message } from '../types';
 import AgentTestChat from '../components/AgentTestChat';
+import { fundAgentVaultFromPhantom } from '../lib/solanaFund';
 
 export type DetailTab = 'overview' | 'test';
 
@@ -60,6 +64,9 @@ type Props = {
   primaryWalletLabel?: string | null;
   copiedId?: string | null;
   onCopy: (text: string, id: string) => void;
+  authFetch?: (url: string, init?: RequestInit) => Promise<Response>;
+  solanaRpcUrl?: string | null;
+  usdcMint?: string | null;
 };
 
 function roleLabel(role: string) {
@@ -94,6 +101,9 @@ export default function AgentDetailPage({
   primaryWalletLabel,
   copiedId,
   onCopy,
+  authFetch,
+  solanaRpcUrl,
+  usdcMint,
 }: Props) {
   const [tab, setTab] = useState<DetailTab>(initialTab);
   const [copied, setCopied] = useState<string | null>(null);
@@ -101,29 +111,38 @@ export default function AgentDetailPage({
     sol: number | null;
     usdc: number | null;
   } | null>(null);
+  const [rpcUrl, setRpcUrl] = useState(solanaRpcUrl || '');
+  const [mint, setMint] = useState(usdcMint || '');
+  const [fundUsdc, setFundUsdc] = useState('1');
+  const [fundSol, setFundSol] = useState('0.05');
+  const [withdrawAmount, setWithdrawAmount] = useState('');
+  const [vaultBusy, setVaultBusy] = useState(false);
+  const [vaultMsg, setVaultMsg] = useState<string | null>(null);
+  const [vaultErr, setVaultErr] = useState<string | null>(null);
 
   useEffect(() => {
     setTab(initialTab);
   }, [agent.id, initialTab]);
 
-  useEffect(() => {
-    let cancelled = false;
-    fetch(`/api/agents/${encodeURIComponent(agent.id)}/balance`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((json) => {
-        if (cancelled || !json) return;
-        setVaultBalance({
-          sol: typeof json.currentSolBalance === 'number' ? json.currentSolBalance : null,
-          usdc: typeof json.currentUsdcBalance === 'number' ? json.currentUsdcBalance : null,
-        });
-      })
-      .catch(() => {
-        if (!cancelled) setVaultBalance(null);
+  const refreshBalance = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/agents/${encodeURIComponent(agent.id)}/balance`);
+      const json = r.ok ? await r.json() : null;
+      if (!json) return;
+      setVaultBalance({
+        sol: typeof json.currentSolBalance === 'number' ? json.currentSolBalance : null,
+        usdc: typeof json.currentUsdcBalance === 'number' ? json.currentUsdcBalance : null,
       });
-    return () => {
-      cancelled = true;
-    };
+      if (json.solanaRpcUrl) setRpcUrl(String(json.solanaRpcUrl));
+      if (json.usdcMint) setMint(String(json.usdcMint));
+    } catch {
+      /* ignore */
+    }
   }, [agent.id]);
+
+  useEffect(() => {
+    void refreshBalance();
+  }, [refreshBalance]);
 
   const title = agent.agentName || agent.customRole || roleLabel(agent.role);
   const fee = agent.fee ?? agent.perCallPriceUsdc ?? 0;
@@ -282,6 +301,196 @@ export default function AgentDetailPage({
                 copied={copied === 'vault'}
                 onCopy={() => copy(agent.publicKey, 'vault')}
               />
+            )}
+          </section>
+
+          <section className="glass-panel rounded-xl p-5 space-y-4">
+            <h2 className="text-sm font-semibold tracking-wider text-outline uppercase">
+              Vault 자금 (출금 · 충전)
+            </h2>
+            <p className="text-sm text-on-surface-variant leading-relaxed">
+              A2A peer 결제는 <strong className="text-on-surface">에이전트 vault 잔액</strong>으로만
+              합니다. 잔액이 없으면 실패하며, 내 지갑에서 자동으로 끌어쓰지 않습니다. 수익은 아래로
+              출금하고, 부족하면 Phantom으로 vault에 충전해 주세요.
+            </p>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <Stat
+                label="Vault SOL"
+                value={
+                  vaultBalance?.sol != null
+                    ? vaultBalance.sol.toFixed(4)
+                    : agent.vaultSol != null
+                      ? agent.vaultSol.toFixed(4)
+                      : '—'
+                }
+              />
+              <Stat
+                label="Vault USDC"
+                value={
+                  vaultBalance?.usdc != null
+                    ? vaultBalance.usdc.toFixed(4)
+                    : agent.vaultUsdc != null
+                      ? agent.vaultUsdc.toFixed(4)
+                      : '—'
+                }
+              />
+            </div>
+            {primaryWalletAddress ? (
+              <p className="text-[11px] text-outline">
+                출금 대상(주 지갑): {primaryWalletLabel || 'Wallet'} ·{' '}
+                <span className="font-mono">{primaryWalletAddress}</span>
+              </p>
+            ) : (
+              <p className="text-[11px] text-amber-300">
+                출금하려면 헤더 Connect Wallet에서 주 지갑을 등록하세요.
+              </p>
+            )}
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="rounded-xl border border-outline-variant/25 bg-surface-container-low/50 p-4 space-y-3">
+                <div className="flex items-center gap-2 text-sm font-semibold text-on-surface">
+                  <ArrowUpFromLine className="h-4 w-4 text-solana-green" />
+                  vault → 내 지갑 (출금)
+                </div>
+                <label className="block text-xs text-on-surface-variant">
+                  USDC 금액 (비우면 전액)
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.001"
+                    value={withdrawAmount}
+                    onChange={(e) => setWithdrawAmount(e.target.value)}
+                    placeholder="전액"
+                    className="mt-1 w-full rounded-lg border border-outline-variant/30 bg-surface-container-lowest px-3 py-2 text-sm text-on-surface"
+                  />
+                </label>
+                <button
+                  type="button"
+                  disabled={vaultBusy || !authFetch || !primaryWalletAddress}
+                  onClick={async () => {
+                    if (!authFetch) return;
+                    setVaultBusy(true);
+                    setVaultErr(null);
+                    setVaultMsg(null);
+                    try {
+                      const body: Record<string, unknown> = {};
+                      if (withdrawAmount.trim()) body.amountUsdc = Number(withdrawAmount);
+                      const res = await authFetch(
+                        `/api/agents/${encodeURIComponent(agent.id)}/withdraw`,
+                        {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify(body),
+                        }
+                      );
+                      const json = await res.json().catch(() => ({}));
+                      if (!res.ok || json.status !== 'success') {
+                        throw new Error(json.message || '출금 실패');
+                      }
+                      setVaultMsg(json.message || '출금 완료');
+                      if (json.explorerUrl) setVaultMsg(`${json.message} · ${json.explorerUrl}`);
+                      await refreshBalance();
+                    } catch (err: any) {
+                      setVaultErr(err?.message || '출금 실패');
+                    } finally {
+                      setVaultBusy(false);
+                    }
+                  }}
+                  className="w-full rounded-lg border border-solana-green/40 bg-solana-green/15 px-3 py-2 text-sm font-semibold text-solana-green disabled:opacity-40"
+                >
+                  {vaultBusy ? '처리 중…' : 'USDC 출금'}
+                </button>
+              </div>
+
+              <div className="rounded-xl border border-outline-variant/25 bg-surface-container-low/50 p-4 space-y-3">
+                <div className="flex items-center gap-2 text-sm font-semibold text-on-surface">
+                  <ArrowDownToLine className="h-4 w-4 text-google-blue" />
+                  내 지갑 → vault (충전)
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="block text-xs text-on-surface-variant">
+                    USDC
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={fundUsdc}
+                      onChange={(e) => setFundUsdc(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-outline-variant/30 bg-surface-container-lowest px-3 py-2 text-sm text-on-surface"
+                    />
+                  </label>
+                  <label className="block text-xs text-on-surface-variant">
+                    SOL
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={fundSol}
+                      onChange={(e) => setFundSol(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-outline-variant/30 bg-surface-container-lowest px-3 py-2 text-sm text-on-surface"
+                    />
+                  </label>
+                </div>
+                <button
+                  type="button"
+                  disabled={vaultBusy || !agent.publicKey || !rpcUrl || !mint}
+                  onClick={async () => {
+                    setVaultBusy(true);
+                    setVaultErr(null);
+                    setVaultMsg(null);
+                    try {
+                      const result = await fundAgentVaultFromPhantom({
+                        rpcUrl,
+                        usdcMint: mint,
+                        vaultAddress: agent.publicKey,
+                        usdcAmount: Number(fundUsdc) || 0,
+                        solAmount: Number(fundSol) || 0,
+                      });
+                      if (!result.ok) throw new Error(result.error || '충전 실패');
+                      setVaultMsg(
+                        result.explorerUrl
+                          ? `충전 완료 · ${result.explorerUrl}`
+                          : `충전 완료 · ${result.signature}`
+                      );
+                      await refreshBalance();
+                    } catch (err: any) {
+                      setVaultErr(err?.message || '충전 실패');
+                    } finally {
+                      setVaultBusy(false);
+                    }
+                  }}
+                  className="w-full rounded-lg border border-google-blue/40 bg-google-blue/15 px-3 py-2 text-sm font-semibold text-google-blue disabled:opacity-40"
+                >
+                  {vaultBusy ? '처리 중…' : 'Phantom으로 충전'}
+                </button>
+                <p className="text-[11px] text-outline leading-relaxed">
+                  Phantom을 Devnet으로 맞춘 뒤 서명합니다. USDC가 없으면{' '}
+                  <a
+                    href="https://faucet.circle.com"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-google-blue underline"
+                  >
+                    Circle faucet
+                  </a>
+                  , SOL은{' '}
+                  <a
+                    href="https://faucet.solana.com"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-google-blue underline"
+                  >
+                    Solana faucet
+                  </a>
+                  .
+                </p>
+              </div>
+            </div>
+            {vaultMsg && (
+              <p className="text-xs text-solana-green break-all whitespace-pre-wrap">{vaultMsg}</p>
+            )}
+            {vaultErr && (
+              <p className="text-xs text-red-400 break-all whitespace-pre-wrap">{vaultErr}</p>
             )}
           </section>
 

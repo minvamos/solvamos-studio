@@ -1441,6 +1441,9 @@ export default function App() {
           primaryWalletLabel={primaryWallet?.label || null}
           copiedId={copiedId}
           onCopy={handleCopyText}
+          authFetch={authFetch}
+          solanaRpcUrl={serverStatus?.solanaRpcUrl || null}
+          usdcMint={serverStatus?.usdcMint || null}
         />
       ) : null}
       {activeTab === 'list' && !(detailAgentId && activeAgent?.id === detailAgentId) && (

@@ -21,6 +21,7 @@ import {
   payoutGatewaySale,
   getWalletBalances,
   ensureUsdcAtaForOwner,
+  withdrawUsdcFromAgentVault,
 } from './server/pay-payer.js';
 import {
   parseGatewayReceiptHeaders,
@@ -1712,16 +1713,79 @@ app.get('/api/agents/:id/balance', async (req, res) => {
     payShCatalogId: listing?.catalogId || null,
     network: config.paymentNetwork,
     usdcMint: config.usdcMint,
+    solanaRpcUrl: config.solanaRpcUrl,
     currentSolBalance: balances.sol,
     currentUsdcBalance: balances.usdc,
     balanceError: balances.error || null,
+    fundingPolicy:
+      'Agent vault pays A2A peer fees itself. Platform does NOT auto-pull from your personal wallet — top up the vault (Phantom) or withdraw earnings to your primary wallet.',
     topUp: {
       address: agent.publicKey,
-      note: '에이전트 vault로 devnet SOL(A2A 호출 수수료)과 USDC(A2A 결제)를 충전하세요. 삭제 시 회수 TX 수수료만 플랫폼이 냅니다.',
+      note: '에이전트 vault로 devnet SOL(A2A 수수료)과 USDC(A2A 결제)를 충전하세요. 잔액이 없으면 peer 결제가 실패합니다 — 내 지갑에서 자동으로 끌어쓰지 않습니다.',
       solFaucet: 'https://faucet.solana.com',
       usdcFaucet: 'https://faucet.circle.com',
     },
   });
+});
+
+/** Owner cash-out: agent vault USDC → registered primary wallet. */
+app.post('/api/agents/:id/withdraw', requireGoogleSession, async (req, res) => {
+  try {
+    const me = await getMeFromRequest(req);
+    if (!me.user?.id) {
+      res.status(401).json({ status: 'error', message: '로그인이 필요합니다.' });
+      return;
+    }
+    const agent = await getAgent(req.params.id);
+    if (!agent) {
+      res.status(404).json({ status: 'error', message: 'Agent not found' });
+      return;
+    }
+    if (!(await userCanManageAgent(me.user.id, agent.id))) {
+      res.status(403).json({ status: 'error', message: '이 에이전트를 관리할 권한이 없습니다.' });
+      return;
+    }
+    const primary = await getPrimaryWallet(me.user.id);
+    if (!primary?.address) {
+      res.status(400).json({
+        status: 'error',
+        message: '출금할 주 지갑이 없습니다. 헤더 Connect Wallet에서 주소를 등록하세요.',
+      });
+      return;
+    }
+    const rawAmount = req.body?.amountUsdc ?? req.body?.amount;
+    const amountUsdc =
+      rawAmount === undefined || rawAmount === null || rawAmount === ''
+        ? undefined
+        : Number(rawAmount);
+    if (amountUsdc !== undefined && (!(amountUsdc > 0) || !Number.isFinite(amountUsdc))) {
+      res.status(400).json({ status: 'error', message: 'amountUsdc must be a positive number' });
+      return;
+    }
+
+    const result = await withdrawUsdcFromAgentVault({
+      agent,
+      destinationWallet: primary.address,
+      amountUsdc,
+    });
+    if (!result.ok) {
+      res.status(400).json({ status: 'error', message: result.error || 'withdraw failed' });
+      return;
+    }
+    const balances = await getWalletBalances(agent.publicKey);
+    res.json({
+      status: 'success',
+      ...result,
+      destinationLabel: primary.label,
+      currentSolBalance: balances.sol,
+      currentUsdcBalance: balances.usdc,
+      message: result.skipped
+        ? 'Vault USDC balance is already 0'
+        : `Withdrew ${result.amountUsdc} USDC → ${primary.address.slice(0, 4)}…${primary.address.slice(-4)}`,
+    });
+  } catch (err: any) {
+    res.status(500).json({ status: 'error', message: err?.message || 'withdraw failed' });
+  }
 });
 
 async function sendCatalogJson(req: express.Request, res: express.Response) {

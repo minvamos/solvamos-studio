@@ -485,6 +485,115 @@ export async function payoutGatewaySale(
   return sendSplitUsdcPayment({ payer, sellerWallet, amountUsdc });
 }
 
+export type VaultWithdrawResult = {
+  ok: boolean;
+  skipped?: boolean;
+  signature?: string;
+  amountUsdc?: number;
+  destination?: string;
+  error?: string;
+  explorerUrl?: string;
+};
+
+/**
+ * Owner cash-out: move USDC from agent vault → owner's primary wallet.
+ * Keeps the vault ATA open (unlike delete reclaim). Fee-payer is the vault when
+ * it has SOL, otherwise the operator settlement wallet.
+ */
+export async function withdrawUsdcFromAgentVault(opts: {
+  agent: AgentRecord;
+  destinationWallet: string;
+  /** Omit or 0 = withdraw entire USDC balance. */
+  amountUsdc?: number;
+}): Promise<VaultWithdrawResult> {
+  if (config.paymentNetwork !== 'devnet') {
+    return { ok: false, error: `Withdraw requires devnet (current: ${config.paymentNetwork})` };
+  }
+  if (!isPubkey(opts.destinationWallet)) {
+    return { ok: false, error: 'Invalid destination wallet' };
+  }
+  if (!opts.agent.publicKey || !opts.agent.secretManagerPath) {
+    return { ok: false, error: 'Agent vault missing' };
+  }
+
+  const vault = await loadAgentKeypair(opts.agent);
+  if (!vault) {
+    return { ok: false, error: `Vault key unavailable for agent ${opts.agent.id}` };
+  }
+
+  try {
+    const connection = new Connection(config.solanaRpcUrl, 'confirmed');
+    const mint = new PublicKey(config.usdcMint);
+    const dest = new PublicKey(opts.destinationWallet);
+    const agentAta = getAssociatedTokenAddressSync(mint, vault.publicKey);
+    const destAta = getAssociatedTokenAddressSync(mint, dest);
+
+    let balance = 0n;
+    try {
+      const acc = await getAccount(connection, agentAta, 'confirmed');
+      balance = acc.amount;
+    } catch {
+      return { ok: true, skipped: true, amountUsdc: 0, destination: opts.destinationWallet };
+    }
+    if (balance <= 0n) {
+      return { ok: true, skipped: true, amountUsdc: 0, destination: opts.destinationWallet };
+    }
+
+    let amount = balance;
+    if (opts.amountUsdc != null && opts.amountUsdc > 0) {
+      amount = toUnits(opts.amountUsdc);
+      if (amount > balance) {
+        return {
+          ok: false,
+          error: `Insufficient vault USDC (have ${Number(balance) / 10 ** USDC_DECIMALS}, asked ${opts.amountUsdc})`,
+        };
+      }
+    }
+
+    const vaultLamports = await connection.getBalance(vault.publicKey, 'confirmed');
+    let feePayer = vault;
+    const signers: Keypair[] = [vault];
+    if (vaultLamports < 20_000) {
+      const operator = await loadSettlementKeypair();
+      if (!operator) {
+        return {
+          ok: false,
+          error:
+            'Vault has too little SOL for fees and settlement wallet is unavailable — top up vault SOL first',
+        };
+      }
+      feePayer = operator;
+      signers.unshift(operator);
+    }
+
+    const tx = new Transaction();
+    tx.add(
+      createAssociatedTokenAccountIdempotentInstruction(
+        feePayer.publicKey,
+        destAta,
+        dest,
+        mint
+      )
+    );
+    tx.add(createTransferInstruction(agentAta, destAta, vault.publicKey, amount));
+    tx.feePayer = feePayer.publicKey;
+
+    const signature = await sendAndConfirmTransaction(connection, tx, signers, {
+      commitment: 'confirmed',
+    });
+    const amountUsdc = Number(amount) / 10 ** USDC_DECIMALS;
+    return {
+      ok: true,
+      signature,
+      amountUsdc,
+      destination: opts.destinationWallet,
+      explorerUrl: `https://explorer.solana.com/tx/${signature}?cluster=devnet`,
+    };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err).slice(0, 300) };
+  }
+}
+
 /** On-chain balances of a wallet: SOL + USDC (current mint). */
 export async function getWalletBalances(wallet: string): Promise<{
   sol: number | null;
