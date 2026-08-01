@@ -19,16 +19,22 @@
 
 ## 1회 설치
 
-```powershell
+```bash
 cd solvamos-studio
+npm install
 npm run pay:install
-# .env
-# PAYMENT_NETWORK=localnet
+# → tools/pay/pay (macOS/Linux) 또는 tools/pay/pay.exe (Windows)
+# Studio managed gateway와 npm run pay:fetch 가 이 바이너리를 사용한다.
+
+# .env (Devnet Lab)
+# PAYMENT_NETWORK=devnet
 # PAY_INTERNAL_SECRET=dev-pay-internal
 # PAY_GATEWAY_MANAGED=true
 # USE_PAY_GATEWAY=true
 # ALLOW_LEGACY_SANDBOX_PROOF=false
 ```
+
+전체 로컬 순서(Catalog·Studio·402·pay fetch): README Quickstart.
 
 ## Localnet
 
