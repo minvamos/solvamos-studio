@@ -188,10 +188,14 @@ export async function answerFromAiApplication(opts: {
   const body: Record<string, unknown> = {
     query: { text: queryText },
     relatedQuestionsSpec: { enable: true },
-    // Docs: query rephrasing improves complex NL questions (max 5).
+    // Query rephrasing: max 5 is allowed by docs, but on CSV/chunked
+    // unstructured corpora high steps often rewrite the query into a form
+    // that yields search hits with no answer-generation documents → Answer
+    // API 404 "No answer generation documents generated from search response."
+    // Empirically maxRephraseSteps>=3 fails for this Tata CSV agent; 0/1 works.
     queryUnderstandingSpec: {
       queryRephraserSpec: {
-        maxRephraseSteps: 5,
+        maxRephraseSteps: Number(process.env.VERTEX_ANSWER_MAX_REPHRASE_STEPS || 1) || 1,
       },
     },
     answerGenerationSpec: {
