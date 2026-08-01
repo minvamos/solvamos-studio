@@ -225,7 +225,7 @@ Studio README만으로 **Studio + Catalog + pay-gateway + 외부 Buyer**까지, 
 |---|---|---|
 | **Studio** (이 repo) | 빌더 · runtime · vault · 로컬 pay-gateway | https://github.com/minvamos/solvamos-studio |
 | **Catalog** | 공개 marketplace · discovery API | https://github.com/mikohatsu/solvamos-catalog |
-| **외부 검증 Buyer** | Catalog 탐색 → 402 → Devnet 결제 → invoke | https://github.com/minvamos/solvamos_test_external_agent |
+| **외부 검증 Buyer** | Catalog 탐색 → 402 → Devnet 결제 → invoke | https://github.com/mikohatsu/solvamos_test_external_agent |
 
 ```text
 ~/HSJ/
@@ -263,7 +263,7 @@ Studio README만으로 **Studio + Catalog + pay-gateway + 외부 Buyer**까지, 
 mkdir -p ~/HSJ && cd ~/HSJ
 git clone https://github.com/minvamos/solvamos-studio.git
 git clone https://github.com/mikohatsu/solvamos-catalog.git
-git clone https://github.com/minvamos/solvamos_test_external_agent.git
+git clone https://github.com/mikohatsu/solvamos_test_external_agent.git
 ```
 
 #### ② pay CLI 설치 + Devnet 지갑 (필수 · 유료 경로)
@@ -495,7 +495,7 @@ solvamos-catalog/                https://github.com/mikohatsu/solvamos-catalog
   server/llm-discovery.ts        /llms.txt · settlement guide
   src/pages/                     Landing · Marketplace · Agent detail
 
-solvamos_test_external_agent/    https://github.com/minvamos/solvamos_test_external_agent
+solvamos_test_external_agent/    https://github.com/mikohatsu/solvamos_test_external_agent
   server.mjs · agent-runner.mjs  Buyer UI (:3100) + Gemini tools
   x402-executor.mjs              402 → Devnet 결제 → retry
 ```
