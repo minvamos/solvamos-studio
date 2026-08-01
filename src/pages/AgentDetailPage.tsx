@@ -19,9 +19,17 @@ import {
   ExternalLink,
   MessageSquare,
   Pencil,
+  QrCode,
+  Wallet,
 } from 'lucide-react';
 import type { Agent, ChatAttachment, Message } from '../types';
 import AgentTestChat from '../components/AgentTestChat';
+import {
+  fundAgentVaultFromPhantom,
+  qrDataUrlForPay,
+  waitForSolanaPayConfirmations,
+  type SolanaPayIntentClient,
+} from '../lib/solanaFund';
 
 export type DetailTab = 'overview' | 'test';
 
@@ -101,6 +109,8 @@ export default function AgentDetailPage({
   copiedId,
   onCopy,
   authFetch,
+  solanaRpcUrl,
+  usdcMint,
 }: Props) {
   const [tab, setTab] = useState<DetailTab>(initialTab);
   const [copied, setCopied] = useState<string | null>(null);
@@ -108,12 +118,16 @@ export default function AgentDetailPage({
     sol: number | null;
     usdc: number | null;
   } | null>(null);
+  const [rpcUrl, setRpcUrl] = useState(solanaRpcUrl || '');
+  const [mint, setMint] = useState(usdcMint || '');
   const [fundUsdc, setFundUsdc] = useState('1');
   const [fundSol, setFundSol] = useState('0.05');
   const [withdrawAmount, setWithdrawAmount] = useState('');
   const [vaultBusy, setVaultBusy] = useState(false);
   const [vaultMsg, setVaultMsg] = useState<string | null>(null);
   const [vaultErr, setVaultErr] = useState<string | null>(null);
+  const [payIntents, setPayIntents] = useState<SolanaPayIntentClient[]>([]);
+  const [payWaiting, setPayWaiting] = useState(false);
 
   useEffect(() => {
     setTab(initialTab);
@@ -128,6 +142,8 @@ export default function AgentDetailPage({
         sol: typeof json.currentSolBalance === 'number' ? json.currentSolBalance : null,
         usdc: typeof json.currentUsdcBalance === 'number' ? json.currentUsdcBalance : null,
       });
+      if (json.solanaRpcUrl) setRpcUrl(String(json.solanaRpcUrl));
+      if (json.usdcMint) setMint(String(json.usdcMint));
     } catch {
       /* ignore */
     }
@@ -303,9 +319,8 @@ export default function AgentDetailPage({
             </h2>
             <p className="text-sm text-on-surface-variant leading-relaxed">
               A2A peer 결제는 <strong className="text-on-surface">에이전트 vault 잔액</strong>으로만
-              합니다. 잔액이 없으면 실패합니다. 출금·충전 모두 삭제 시 반환과 같이{' '}
-              <strong className="text-on-surface">서버가 바로 처리</strong>하며 Phantom 서명은
-              필요 없습니다.
+              합니다. 유저 충전은 Phantom 서명 또는 Solana Pay(QR/딥링크)로 직접 보내고, 출금은
+              서버가 주 지갑으로 반환합니다.
             </p>
             <div className="grid grid-cols-2 gap-3 text-sm">
               <Stat
@@ -399,7 +414,7 @@ export default function AgentDetailPage({
               <div className="rounded-xl border border-outline-variant/25 bg-surface-container-low/50 p-4 space-y-3">
                 <div className="flex items-center gap-2 text-sm font-semibold text-on-surface">
                   <ArrowDownToLine className="h-4 w-4 text-google-blue" />
-                  → vault (바로 충전)
+                  내 지갑 → vault (충전)
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <label className="block text-xs text-on-surface-variant">
@@ -425,54 +440,229 @@ export default function AgentDetailPage({
                     />
                   </label>
                 </div>
-                <button
-                  type="button"
-                  disabled={
-                    vaultBusy ||
-                    !authFetch ||
-                    !agent.publicKey ||
-                    (!(Number(fundUsdc) > 0) && !(Number(fundSol) > 0))
-                  }
-                  onClick={async () => {
-                    if (!authFetch) return;
-                    setVaultBusy(true);
-                    setVaultErr(null);
-                    setVaultMsg(null);
-                    try {
-                      const res = await authFetch(
-                        `/api/agents/${encodeURIComponent(agent.id)}/fund`,
-                        {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({
-                            amountUsdc: Number(fundUsdc) || 0,
-                            amountSol: Number(fundSol) || 0,
-                          }),
-                        }
-                      );
-                      const json = await res.json().catch(() => ({}));
-                      if (!res.ok || json.status !== 'success') {
-                        throw new Error(json.message || '충전 실패');
-                      }
-                      setVaultMsg(
-                        json.explorerUrl
-                          ? `${json.message || '충전 완료'} · ${json.explorerUrl}`
-                          : json.message || '충전 완료'
-                      );
-                      await refreshBalance();
-                    } catch (err: any) {
-                      setVaultErr(err?.message || '충전 실패');
-                    } finally {
-                      setVaultBusy(false);
+                <div className="grid grid-cols-1 gap-2">
+                  <button
+                    type="button"
+                    disabled={
+                      vaultBusy ||
+                      !agent.publicKey ||
+                      !rpcUrl ||
+                      !mint ||
+                      (!(Number(fundUsdc) > 0) && !(Number(fundSol) > 0))
                     }
-                  }}
-                  className="w-full rounded-lg border border-google-blue/40 bg-google-blue/15 px-3 py-2 text-sm font-semibold text-google-blue disabled:opacity-40"
-                >
-                  {vaultBusy ? '처리 중…' : '바로 충전'}
-                </button>
+                    onClick={async () => {
+                      setVaultBusy(true);
+                      setVaultErr(null);
+                      setVaultMsg(null);
+                      setPayIntents([]);
+                      try {
+                        const result = await fundAgentVaultFromPhantom({
+                          rpcUrl,
+                          usdcMint: mint,
+                          vaultAddress: agent.publicKey,
+                          usdcAmount: Number(fundUsdc) || 0,
+                          solAmount: Number(fundSol) || 0,
+                        });
+                        if (!result.ok) throw new Error(result.error || '충전 실패');
+                        setVaultMsg(
+                          result.explorerUrl
+                            ? `Phantom 충전 완료 · ${result.explorerUrl}`
+                            : `Phantom 충전 완료 · ${result.signature}`
+                        );
+                        await refreshBalance();
+                      } catch (err: any) {
+                        setVaultErr(err?.message || '충전 실패');
+                      } finally {
+                        setVaultBusy(false);
+                      }
+                    }}
+                    className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-google-blue/40 bg-google-blue/15 px-3 py-2 text-sm font-semibold text-google-blue disabled:opacity-40"
+                  >
+                    <Wallet className="h-4 w-4" />
+                    {vaultBusy ? '처리 중…' : 'Phantom으로 전송'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={
+                      vaultBusy ||
+                      payWaiting ||
+                      !authFetch ||
+                      !agent.publicKey ||
+                      (!(Number(fundUsdc) > 0) && !(Number(fundSol) > 0))
+                    }
+                    onClick={async () => {
+                      if (!authFetch) return;
+                      setVaultBusy(true);
+                      setPayWaiting(true);
+                      setVaultErr(null);
+                      setVaultMsg(null);
+                      setPayIntents([]);
+                      try {
+                        const res = await authFetch(
+                          `/api/agents/${encodeURIComponent(agent.id)}/solana-pay`,
+                          {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              amountUsdc: Number(fundUsdc) || 0,
+                              amountSol: Number(fundSol) || 0,
+                            }),
+                          }
+                        );
+                        const json = await res.json().catch(() => ({}));
+                        if (!res.ok || json.status !== 'success') {
+                          throw new Error(json.message || 'Solana Pay 생성 실패');
+                        }
+                        if (json.rpcUrl) setRpcUrl(String(json.rpcUrl));
+                        if (json.usdcMint) setMint(String(json.usdcMint));
+
+                        const intents: SolanaPayIntentClient[] = [];
+                        for (const raw of json.intents || []) {
+                          const qrDataUrl = await qrDataUrlForPay(String(raw.url));
+                          intents.push({
+                            kind: raw.kind,
+                            amount: Number(raw.amount),
+                            url: String(raw.url),
+                            reference: String(raw.reference),
+                            phantomUrl: raw.phantomUrl ? String(raw.phantomUrl) : undefined,
+                            qrDataUrl,
+                          });
+                        }
+                        setPayIntents(intents);
+                        setVaultMsg(
+                          'Solana Pay 요청 생성됨. QR을 스캔하거나 Phantom 링크를 연 뒤 승인하세요.'
+                        );
+
+                        const wait = await waitForSolanaPayConfirmations({
+                          authFetch,
+                          agentId: agent.id,
+                          references: intents.map((i) => i.reference),
+                          onProgress: (done) => {
+                            setVaultMsg(`온체인 확인 ${done.length}/${intents.length}…`);
+                          },
+                        });
+                        if (!wait.confirmed.length) {
+                          throw new Error(wait.error || '결제 미확인');
+                        }
+                        setVaultMsg(
+                          wait.explorerUrls.length
+                            ? `Solana Pay 충전 확인 · ${wait.explorerUrls.join(' · ')}`
+                            : `Solana Pay 충전 확인 (${wait.confirmed.length}건)`
+                        );
+                        await refreshBalance();
+                      } catch (err: any) {
+                        setVaultErr(err?.message || 'Solana Pay 실패');
+                      } finally {
+                        setVaultBusy(false);
+                        setPayWaiting(false);
+                      }
+                    }}
+                    className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-outline-variant/40 bg-surface-container-lowest px-3 py-2 text-sm font-semibold text-on-surface disabled:opacity-40"
+                  >
+                    <QrCode className="h-4 w-4 text-google-blue" />
+                    {payWaiting ? '결제 대기 중…' : 'Solana Pay (QR)'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={
+                      vaultBusy ||
+                      !authFetch ||
+                      !agent.publicKey ||
+                      (!(Number(fundUsdc) > 0) && !(Number(fundSol) > 0))
+                    }
+                    onClick={async () => {
+                      if (!authFetch) return;
+                      setVaultBusy(true);
+                      setVaultErr(null);
+                      setVaultMsg(null);
+                      try {
+                        const res = await authFetch(
+                          `/api/agents/${encodeURIComponent(agent.id)}/fund`,
+                          {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              amountUsdc: Number(fundUsdc) || 0,
+                              amountSol: Number(fundSol) || 0,
+                            }),
+                          }
+                        );
+                        const json = await res.json().catch(() => ({}));
+                        if (!res.ok || json.status !== 'success') {
+                          throw new Error(json.message || '테스트 충전 실패');
+                        }
+                        setVaultMsg(
+                          json.explorerUrl
+                            ? `스튜디오 테스트 충전 · ${json.explorerUrl}`
+                            : json.message || '테스트 충전 완료'
+                        );
+                        await refreshBalance();
+                      } catch (err: any) {
+                        setVaultErr(err?.message || '테스트 충전 실패');
+                      } finally {
+                        setVaultBusy(false);
+                      }
+                    }}
+                    className="w-full rounded-lg border border-outline-variant/20 px-3 py-1.5 text-[11px] text-outline hover:text-on-surface disabled:opacity-40"
+                  >
+                    스튜디오 테스트 충전 (settlement)
+                  </button>
+                </div>
                 <p className="text-[11px] text-outline leading-relaxed">
-                  출금·삭제 반환과 같이 서버가 온체인 전송을 처리합니다 (Phantom 불필요).
+                  Phantom은 Devnet으로 맞추세요. USDC는{' '}
+                  <a
+                    href="https://faucet.circle.com"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-google-blue underline"
+                  >
+                    Circle faucet
+                  </a>
+                  , SOL은{' '}
+                  <a
+                    href="https://faucet.solana.com"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-google-blue underline"
+                  >
+                    Solana faucet
+                  </a>
+                  .
                 </p>
+                {payIntents.length > 0 && (
+                  <div className="space-y-3 pt-1">
+                    {payIntents.map((intent) => (
+                      <div
+                        key={intent.reference}
+                        className="rounded-lg border border-outline-variant/20 bg-surface-container-lowest/80 p-3 space-y-2"
+                      >
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <span className="font-semibold text-on-surface uppercase">
+                            {intent.kind} · {intent.amount}
+                          </span>
+                          {intent.phantomUrl && (
+                            <a
+                              href={intent.phantomUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1 text-google-blue underline"
+                            >
+                              Phantom에서 열기 <ExternalLink className="h-3 w-3" />
+                            </a>
+                          )}
+                        </div>
+                        {intent.qrDataUrl && (
+                          <img
+                            src={intent.qrDataUrl}
+                            alt={`Solana Pay ${intent.kind}`}
+                            className="mx-auto h-[180px] w-[180px] rounded-md bg-white p-2"
+                          />
+                        )}
+                        <p className="break-all font-mono text-[10px] text-outline">{intent.url}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
             {vaultMsg && (

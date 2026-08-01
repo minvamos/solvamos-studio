@@ -25,6 +25,11 @@ import {
   fundAgentVaultFromSettlement,
 } from './server/pay-payer.js';
 import {
+  createVaultFundIntents,
+  findPaymentByReference,
+  phantomBrowseLink,
+} from './server/solana-pay.js';
+import {
   parseGatewayReceiptHeaders,
   settleVerifiedGatewaySale,
 } from './server/gateway-settle.js';
@@ -1719,12 +1724,13 @@ app.get('/api/agents/:id/balance', async (req, res) => {
     currentUsdcBalance: balances.usdc,
     balanceError: balances.error || null,
     fundingPolicy:
-      'Agent vault pays A2A peer fees itself. Top up via POST /fund (server-signed from settlement, no Phantom) or withdraw earnings to your primary wallet.',
+      'Agent vault pays A2A peer fees itself. Users top up from their own wallet via Phantom or Solana Pay (POST /solana-pay). Optional studio test top-up: POST /fund from settlement.',
     topUp: {
       address: agent.publicKey,
-      note: '에이전트 vault로 devnet SOL(A2A 수수료)과 USDC(A2A 결제)를 충전하세요. 잔액이 없으면 peer 결제가 실패합니다. 충전은 출금과 같이 서버가 바로 처리합니다(Phantom 불필요).',
+      note: '에이전트 vault로 devnet SOL(A2A 수수료)과 USDC(A2A 결제)를 충전하세요. Phantom 서명 또는 Solana Pay QR/딥링크로 유저 지갑에서 직접 보냅니다.',
       solFaucet: 'https://faucet.solana.com',
       usdcFaucet: 'https://faucet.circle.com',
+      solanaPay: `/api/agents/${agent.id}/solana-pay`,
     },
   });
 });
@@ -1786,6 +1792,114 @@ app.post('/api/agents/:id/withdraw', requireGoogleSession, async (req, res) => {
     });
   } catch (err: any) {
     res.status(500).json({ status: 'error', message: err?.message || 'withdraw failed' });
+  }
+});
+
+/**
+ * Create Solana Pay transfer-request URL(s) for the user to fund the vault
+ * from their own wallet (Phantom / any Solana Pay wallet).
+ */
+app.post('/api/agents/:id/solana-pay', requireGoogleSession, async (req, res) => {
+  try {
+    const me = await getMeFromRequest(req);
+    if (!me.user?.id) {
+      res.status(401).json({ status: 'error', message: '로그인이 필요합니다.' });
+      return;
+    }
+    const agent = await getAgent(req.params.id);
+    if (!agent) {
+      res.status(404).json({ status: 'error', message: 'Agent not found' });
+      return;
+    }
+    if (!(await userCanManageAgent(me.user.id, agent.id))) {
+      res.status(403).json({ status: 'error', message: '이 에이전트를 관리할 권한이 없습니다.' });
+      return;
+    }
+    if (!agent.publicKey) {
+      res.status(400).json({ status: 'error', message: 'Agent vault missing' });
+      return;
+    }
+    if (config.paymentNetwork !== 'devnet') {
+      res.status(400).json({
+        status: 'error',
+        message: `Solana Pay fund requires devnet (current: ${config.paymentNetwork})`,
+      });
+      return;
+    }
+
+    const amountUsdc = Number(req.body?.amountUsdc ?? req.body?.usdc ?? 0);
+    const amountSol = Number(req.body?.amountSol ?? req.body?.sol ?? 0);
+    if (!(amountUsdc > 0) && !(amountSol > 0)) {
+      res.status(400).json({
+        status: 'error',
+        message: 'amountUsdc or amountSol must be > 0',
+      });
+      return;
+    }
+
+    const created = createVaultFundIntents({
+      vaultAddress: agent.publicKey,
+      amountUsdc,
+      amountSol,
+      agentLabel: agent.agentName || agent.customRole || agent.id,
+    });
+    const origin = publicBaseFromReq(req);
+    const intents = created.intents.map((intent) => ({
+      ...intent,
+      phantomUrl: phantomBrowseLink(intent.url, origin),
+      qrPayload: intent.url,
+    }));
+
+    res.json({
+      status: 'success',
+      vault: agent.publicKey,
+      network: created.network,
+      usdcMint: created.usdcMint,
+      rpcUrl: created.rpcUrl,
+      intents,
+      note: 'Open Phantom (Devnet) or scan the Solana Pay QR. Poll /solana-pay/:reference until confirmed.',
+    });
+  } catch (err: any) {
+    res.status(500).json({ status: 'error', message: err?.message || 'solana-pay failed' });
+  }
+});
+
+/** Poll whether a Solana Pay reference has an on-chain signature. */
+app.get('/api/agents/:id/solana-pay/:reference', requireGoogleSession, async (req, res) => {
+  try {
+    const me = await getMeFromRequest(req);
+    if (!me.user?.id) {
+      res.status(401).json({ status: 'error', message: '로그인이 필요합니다.' });
+      return;
+    }
+    const agent = await getAgent(req.params.id);
+    if (!agent) {
+      res.status(404).json({ status: 'error', message: 'Agent not found' });
+      return;
+    }
+    if (!(await userCanManageAgent(me.user.id, agent.id))) {
+      res.status(403).json({ status: 'error', message: '이 에이전트를 관리할 권한이 없습니다.' });
+      return;
+    }
+    const found = await findPaymentByReference(req.params.reference);
+    if (found.error && !found.confirmed) {
+      res.status(400).json({ status: 'error', message: found.error });
+      return;
+    }
+    const balances = found.confirmed
+      ? await getWalletBalances(agent.publicKey)
+      : { sol: null, usdc: null };
+    res.json({
+      status: 'success',
+      reference: req.params.reference,
+      confirmed: found.confirmed,
+      signature: found.signature || null,
+      explorerUrl: found.explorerUrl || null,
+      currentSolBalance: balances.sol,
+      currentUsdcBalance: balances.usdc,
+    });
+  } catch (err: any) {
+    res.status(500).json({ status: 'error', message: err?.message || 'solana-pay status failed' });
   }
 });
 

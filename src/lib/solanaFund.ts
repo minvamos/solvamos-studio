@@ -1,6 +1,6 @@
 /**
- * Client-side Phantom transfers → agent vault (USDC / SOL).
- * Server never holds the user's private key; funding must be signed in-wallet.
+ * User-signed vault funding: Phantom browser extension + Solana Pay helpers.
+ * Server never holds the user's private key.
  */
 import { Connection, PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
 import {
@@ -8,20 +8,21 @@ import {
   createTransferInstruction,
   getAssociatedTokenAddressSync,
 } from '@solana/spl-token';
+import QRCode from 'qrcode';
 
 const USDC_DECIMALS = 6;
 
 type PhantomProvider = {
   isPhantom?: boolean;
   publicKey?: { toString: () => string } | null;
-  connect: () => Promise<{ publicKey: { toString: () => string } }>;
+  connect: (opts?: { onlyIfTrusted?: boolean }) => Promise<{ publicKey: { toString: () => string } }>;
   signAndSendTransaction: (
     tx: Transaction,
     opts?: { skipPreflight?: boolean }
   ) => Promise<{ signature: string }>;
 };
 
-function getPhantom(): PhantomProvider | null {
+export function getPhantomProvider(): PhantomProvider | null {
   const official = (window as any).phantom?.solana as PhantomProvider | undefined;
   if (official?.isPhantom) return official;
   const legacy = (window as any).solana as PhantomProvider | undefined;
@@ -40,7 +41,7 @@ export type FundVaultResult = {
   error?: string;
 };
 
-/** Send USDC and/or SOL from connected Phantom → agent vault. */
+/** Send USDC and/or SOL from connected Phantom → agent vault (one TX). */
 export async function fundAgentVaultFromPhantom(opts: {
   rpcUrl: string;
   usdcMint: string;
@@ -48,7 +49,7 @@ export async function fundAgentVaultFromPhantom(opts: {
   usdcAmount?: number;
   solAmount?: number;
 }): Promise<FundVaultResult> {
-  const provider = getPhantom();
+  const provider = getPhantomProvider();
   if (!provider) {
     return {
       ok: false,
@@ -94,12 +95,12 @@ export async function fundAgentVaultFromPhantom(opts: {
       );
     }
 
-    const { blockhash } = await connection.getLatestBlockhash('confirmed');
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
     tx.recentBlockhash = blockhash;
     tx.feePayer = from;
 
     const { signature } = await provider.signAndSendTransaction(tx);
-    await connection.confirmTransaction(signature, 'confirmed');
+    await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
     return {
       ok: true,
       signature,
@@ -112,4 +113,73 @@ export async function fundAgentVaultFromPhantom(opts: {
     }
     return { ok: false, error: msg.slice(0, 280) || '전송 실패' };
   }
+}
+
+export type SolanaPayIntentClient = {
+  kind: 'usdc' | 'sol';
+  amount: number;
+  url: string;
+  reference: string;
+  phantomUrl?: string;
+  qrDataUrl?: string;
+};
+
+/** Render Solana Pay URL as a QR data URL for mobile wallets. */
+export async function qrDataUrlForPay(url: string): Promise<string> {
+  return QRCode.toDataURL(url, {
+    width: 220,
+    margin: 2,
+    color: { dark: '#0b1220', light: '#ffffff' },
+  });
+}
+
+/**
+ * Poll server until Solana Pay reference is confirmed on-chain.
+ * Returns on first confirmed intent (caller can refresh balances).
+ */
+export async function waitForSolanaPayConfirmations(opts: {
+  authFetch: (url: string, init?: RequestInit) => Promise<Response>;
+  agentId: string;
+  references: string[];
+  timeoutMs?: number;
+  intervalMs?: number;
+  onProgress?: (confirmed: string[]) => void;
+}): Promise<{ ok: boolean; confirmed: string[]; explorerUrls: string[]; error?: string }> {
+  const timeoutMs = opts.timeoutMs ?? 180_000;
+  const intervalMs = opts.intervalMs ?? 2500;
+  const start = Date.now();
+  const pending = new Set(opts.references);
+  const confirmed: string[] = [];
+  const explorerUrls: string[] = [];
+
+  while (pending.size && Date.now() - start < timeoutMs) {
+    for (const ref of [...pending]) {
+      try {
+        const res = await opts.authFetch(
+          `/api/agents/${encodeURIComponent(opts.agentId)}/solana-pay/${encodeURIComponent(ref)}`
+        );
+        const json = await res.json().catch(() => ({}));
+        if (res.ok && json.confirmed) {
+          pending.delete(ref);
+          confirmed.push(ref);
+          if (json.explorerUrl) explorerUrls.push(String(json.explorerUrl));
+          opts.onProgress?.(confirmed);
+        }
+      } catch {
+        /* keep polling */
+      }
+    }
+    if (!pending.size) break;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+
+  if (!confirmed.length) {
+    return {
+      ok: false,
+      confirmed,
+      explorerUrls,
+      error: '결제 확인 시간 초과. 지갑에서 보냈다면 잔액을 새로고침해 보세요.',
+    };
+  }
+  return { ok: pending.size === 0, confirmed, explorerUrls };
 }
